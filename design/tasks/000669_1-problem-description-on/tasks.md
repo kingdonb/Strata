@@ -15,6 +15,10 @@
 - [ ] Upstream submission to Niko1221/Strata — user's decision; suggested framing: "completes #2323 for small-memory Macs (the hotfix's reporter ran a 96 GB M2 Max where chunks are several GB; 16-24 GB Macs still stop at the first prompt)". Cross-repo PR mechanics need the user's GitHub flow; also re-run the M2 build on the refactored commit first.
 - [ ] Defect B (chat template `reasoning_effort: none` cutoff, `tokenizer/chat_template.jinja`) is still open upstream: the hotfix's reasoning_effort work (5d08c753, Responses/Codex) is API plumbing, not the jinja empty-thought issue. Candidate follow-up PR.
 
+- [x] Final pre-submission review of the branch (2026-10-14): diff re-read as upstream would see it (1 commit, 3 files, +20/−13); one fix applied — the commit message's "verified on the reporter's M2" misattributed the 24 GB verification to #2323's reporter (Excavatory, 96 GB M2 Max); amended to "verified on a 24 GB M2" and force-pushed (`5f158604`)
+- [x] Upstream etiquette check (AGENTS.md / COMMUNITY_BENCHMARKS.md): one change per PR ✓ (docs sentence rides with the fix); "say what you did not test" → listed in the PR body draft; no matching open entry in TEST_REQUESTS.md to cite — #2323 itself is the reference; only `metal/` builds touched ✓
+- [ ] Before submitting upstream: rebuild + run one prompt on the M2 at `5f158604` (the verified run predates the `standalone_region()` refactor — statement-for-statement identical, but the etiquette is to test what you ship); then merge PR #1 in the fork and submit upstream with the paste-ready body in the reply
+
 ## Upstream review notes (2026-10-13, self-review after M2 verification)
 
 - Fix 1 is an extension of the accepted f5a6fb47 design decision to the case it missed, not a new mechanism — the strongest upstream argument. Diff is 12 lines; no behavior change for any arena that already fits.
