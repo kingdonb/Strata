@@ -104,7 +104,7 @@ struct State {
     mtl::Buffer sk_pacc, sk_pm, sk_pl;   // split-K attention partials (k_attn_sk_part / k_attn_sk_merge)
     // prompt-chunk buffers (allocated when --prefill is on; CT = the chunk size)
     mtl::Buffer toks_c, xc, hc, yc, qkv_c, z_c, alpha_c, beta_c, conv_out_c, gdn_out_c, qg_c, k_c, v_c, q_c, gate_c, att_c;
-    mtl::Buffer router_c, ids_c, wts_c, scr, srt_in_gu, srt_in_d, pos_c, zero_ids;
+    mtl::Buffer router_c, ids_c, wts_c, scr, srt_in_gu, srt_in_d, pos_c;
     mtl::Buffer eg_c, eu_c, eh_c, ey_c, sg_c, su_c, sh_c, sy_c, sgate_c;
     std::vector<mtl::Buffer> conv_state, S, kc, vc;
 
@@ -138,6 +138,7 @@ struct Pipelines {
     // prompt-chunk pipelines (init_prompt, when --prefill is on)
     std::map<int, mtl::Pipeline> p_emb_c, p_gemv_c, p_expc;
     mtl::Pipeline p_route_c, p_zero, p_hist, p_exp_off, p_place, p_moe_sum_c, p_conv_c, p_gdn_c, p_gated_norm_c, p_attn_prep_c;
+    mtl::Buffer zero_ids;   // nt zeros: the decode lpr8's per-token dummy expert id (chunk dense products)
     std::map<int, mtl::Pipeline> p_gemv;
     std::map<int, mtl::Pipeline> p_gemv_lpr8;
     std::map<int, mtl::Pipeline> p_row;
@@ -201,7 +202,8 @@ struct Pipelines {
 
     // The prompt-chunk kernels (k_*_chunk / k_gemv_c / k_expc): compiled and created only when --prefill
     // turns the chunk path on, so the plain engine's startup does less and its behavior is unchanged.
-    void init_prompt(mtl::Context& cx) {
+    void init_prompt(mtl::Context& cx, int ct) {
+        zero_ids = cx.alloc((size_t) ct * sizeof(int));   // alloc zeroes it
         auto get_emb_c = [&](int ty, const char* fn) { p_emb_c[ty] = cx.pipeline(lib, fn); };
         auto get_gemv_c = [&](int ty, const char* fn) { p_gemv_c[ty] = cx.pipeline(lib, fn); };
         auto get_expc = [&](int ty, const char* fn) { p_expc[ty] = cx.pipeline(lib, fn); };
@@ -1100,7 +1102,6 @@ int run(int argc, char** argv) {
         s.srt_in_gu = cx.alloc(CT * K * sizeof(int));
         s.srt_in_d = cx.alloc(CT * K * sizeof(int));
         s.pos_c = cx.alloc(CT * K * sizeof(int));
-        s.zero_ids = cx.alloc(CT * sizeof(int));   // stays zero: the decode lpr8's per-token dummy expert id
         s.eg_c = cx.alloc(CT * K * FF * sizeof(float));
         s.eu_c = cx.alloc(CT * K * FF * sizeof(float));
         s.eh_c = cx.alloc(CT * K * FF * sizeof(float));
@@ -1110,7 +1111,7 @@ int run(int argc, char** argv) {
         s.sh_c = cx.alloc(CT * g.n_ff_shexp * sizeof(float));
         s.sy_c = cx.alloc(CT * N * sizeof(float));
         s.sgate_c = cx.alloc(CT * sizeof(float));
-        pipes.init_prompt(cx);
+        pipes.init_prompt(cx, prefill_chunk);
         std::fprintf(stderr, "strata metal q36: prompt chunks of %d tokens on (chunk buffers %.2f GB)\n",
                      prefill_chunk, (double) (CT * K * (size_t) (3 * FF + N + 4)) / (1024.0 * 1024.0 * 1024.0)
                          + (double) (CT * (size_t) (6 * N + 2 * g.ssm_conv_channels + 2 * g.ssm_value_dim
