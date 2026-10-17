@@ -15,8 +15,10 @@ careful mirroring of proven kernels and by the Mac compile test.
 
 ## Phase A — Split-K attention, uncap the context window
 
-(pushed through 67f098fb; the two verification bullets below are the user's Mac round — everything else in
-Phases A and B is code-complete and awaiting it)
+(pushed through 5f84e2e5; Mac round 1: `q36_compile_test` failed on two program-scope `constexpr int` — MSL
+needs `enum` there — and an unused variable; both fixed. Everything else in the file parsed clean. Next Mac
+round should get past the compile gate and on to the parity gates; the chunk kernels' first real compile
+happens in that round too.)
 
 - [x] Add `k_attn_part` + `k_attn_merge` to `metal/kernels/q36.metal`, copying the partial layout
       (256-cell chunks, acc/m/l) from `src/qwen35/q36_engine.cu` (~L298-355) — `k_attn_sk_part` /
