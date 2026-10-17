@@ -59,24 +59,19 @@ against its decode kernel and names the diverging stage in one Mac round.)
       chunk run as one partial chunk; without the flag the engine behaves exactly as before (the default
       flip lands only after the Mac parity + speed gates pass — reviewer: do what upstream did)
 - [x] Head/logits only via the last prompt token's decode window; prefix-cache state reuse untouched
-- [~] Parity + measurement (user, on the Mac): **round 6b — MSL nit fixed (82dcbc4f):** `k_tables`' two
-  counter zeroings now use `atomic_store_explicit` (`atomic_uint` assignment is deleted in MSL — the repo's
-  own moe_mm/qsa kernels use this exact pattern; no other direct atomic assignments in q36.metal). Round 6's
-  race fix itself (feb752c4) stands: the entry tables are built by ONE dispatch, `k_tables` (one threadgroup
-  of 256: zero + count via THREADGROUP atomics, exclusive offsets, placement; plain stores out), replacing
-  the four-dispatch device-atomic chain whose relaxed device atomics + inter-dispatch barriers did not
-  order on the M2 — k_expc read stale cnt/off inside one barrier-ordered graph. The old kernels stay in
-  q36.metal for the tests only; the engine's scr is now 2×256 ints (counts at 0, offsets at 256 ints).
-  Test: check() is NaN-aware, sanitize() kills NaN half-scales from garbage weight bytes, stage 14 rewritten
-  one-graph-vs-many with ORDER-INDEPENDENT comparisons (placement invariant + pos-matched expert rows),
-  stage 15 checks k_tables vs the old chain (counts/offsets identical + placement invariant). **Mac round
-  6b, ask user:** `git pull && /opt/homebrew/bin/cmake --build build-metal && ./build-metal/q36_chunk_parity`
-  (expect all stages OK incl. chain/tables), then the engine ladder: plain vs `--prefill 512` via
-  q36_solo_gate + q36_cmp_gate (expect 10/10 identical), then the long-prompt timing (80×line-1 prompt via
-  /tmp/long.ids) plain vs `--prefill 512`. Previous rounds: round 5 killed the serial-deq theory (24/24
-  stage parity incl. Q5_K/Q6_K gemv_c + IQ experts) but --prefill 1 diverged at token 0 → the bug was the
-  graph structure, not the kernels; --prefill 512 chunk = 38 ms/tok vs plain 53, ALU-bound on deq (perf
-  plausible, exactness first).
+- [~] Parity + measurement (user, on the Mac): **round 7 — the RACE IS FIXED (Mac-verified): `chain experts` /
+  `chain combine-in` / `tables cnt/off/place` / `chain scr` all OK — one-graph k_tables → k_expc is exact.**
+  Two test-harness slips remained (5ac3221f): stage 14 passed ONE buffer as both srt_in_gu/srt_in_d (the
+  engine uses two) so the entry-index write clobbered the token column and check_placement read the wrong
+  field — now separate buffers like the engine; and stages 1/2/3/4's float-filled W weren't sanitized, so
+  garbage half-scales minted NaNs on both sides (0 real diffs) — now EVERY W fill is sanitized and "NaN cell"
+  strictly means an out-of-bounds/garbage read. **Mac round 7, ask user:** `git pull &&
+  /opt/homebrew/bin/cmake --build build-metal && ./build-metal/q36_chunk_parity` (expect "all stages
+  bit-identical"), then the engine ladder: plain vs `--prefill 512` via q36_solo_gate + q36_cmp_gate (expect
+  10/10 identical), then the long-prompt timing (80×line-1 prompt via /tmp/long.ids) plain vs `--prefill 512`.
+  Prior context: round 5 killed the serial-deq theory (24/24 stage parity), round 6 found the graph race
+  (k_tables fix feb752c4 + MSL atomic_store nit 82dcbc4f); --prefill 512 chunk = 38 ms/tok vs plain 53,
+  ALU-bound on deq (perf plausible, exactness first).
 
 ## Phase C — MTP speculative decoding
 
