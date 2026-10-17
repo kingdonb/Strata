@@ -72,13 +72,22 @@ against its decode kernel and names the diverging stage in one Mac round.)
   logs and names the first diverging layer. Round 8a: the trace never fired because the gate sends the
   ENGINE's stderr to /dev/null without `--log` (q36_harness.py spawns the engine with stderr=DEVNULL by
   default; the shell's 2> only catches the gate's own) — env propagates fine (c2477455 fixed the script's
-  hints). **Mac round 8b, ask user (no rebuild):** rerun the two trace gates WITH `--log /tmp/*.log`, then
-  q36_trace_cmp.py on those logs + the json cmp. Interpretation: a diverging
-  LAYER = a chunk kernel/glue bug at real shapes (then dump that layer's intermediates); all-OK-but-text-
-  differs = one-graph structural (then bisect the chunk graph's segment size); TRACE runs producing IDENTICAL
-  text = the bug is one-graph-structural (trace runs the graph per layer). Also: gate prompts are ~24-40
-  tokens ⇒ --prefill 512 runs ONE PARTIAL CHUNK nt≈33 — the shapes stages never tested (tpb=33, partial
-  blocks); if the trace pins it to a GEMV layer, test k_gemv_c's tpb/nt guards first.
+  hints). **Round 8b results (Mac): LAYER 0 ALREADY DIVERGES, hugely (chunk x=19.74 vs decode x=8.85 — not
+  ulp drift; 40/40 layers differ from there on).** And a SECOND structural fact: the TRACE runs (per-layer
+  sub-graphs) produce DIFFERENT chunk texts than round 7's one-graph runs (p01 differs at 0 now, at 3
+  before; several stop lengths changed) — so the one-graph chunk path ALSO has a cross-dispatch hazard the
+  per-layer structure doesn't, OR vice versa; two bugs may be stacked. The blind spot identified: stage 14
+  compares the chain against ITSELF, so a shared-kernel bug at new grid shapes (p_rms at grid nt, p_add,
+  the lpr8 gemv at grid[1]=nt with real types/dims, k_emb_chunk with the REAL emb type — only Q8_0 was
+  stage-tested) passes every stage while corrupting both sides identically. Checked and cleared by reading:
+  k_rms is grid-correct (x+gid*n), k_row/k_emb_chunk write identical values, k_route_chunk ≡ k_topk_router.
+  **Round 9 = cut-level trace (5b0c1d54):** TRACE cuts G0-G10 inside layer 0 of BOTH paths (emb → the 4
+  projections → conv+state → gdn+S → norm/out → add → post-norm → router/route → routed-swiglu →
+  down/shared/combine → moe), q36_trace_cmp.py now compares cuts (state fields cst/sst snapshotted at the
+  chunk's last token; activations summed in identical order; embtype printed on the G0 lines = the
+  token_embd GGUF type id). **Mac round 9, ask user:** `git pull && cmake --build build-metal`, rerun the
+  two trace gates (WITH --log) + trace_cmp (now prints LAYERS: and CUTS: verdicts) + the json cmp. The
+  first diverging cut names the dispatch; if all cuts match, the bug is one-graph-structural only.
 
 ## Phase C — MTP speculative decoding
 
