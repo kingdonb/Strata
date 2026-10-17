@@ -16,9 +16,10 @@ careful mirroring of proven kernels and by the Mac compile test.
 ## Phase A — Split-K attention, uncap the context window
 
 (pushed through 5f84e2e5; Mac round 1: `q36_compile_test` failed on two program-scope `constexpr int` — MSL
-needs `enum` there — and an unused variable; both fixed. Everything else in the file parsed clean. Next Mac
-round should get past the compile gate and on to the parity gates; the chunk kernels' first real compile
-happens in that round too.)
+needs `enum` there — and an unused variable; both fixed. Mac round 2: **compile gate passed** — all 30
+pipelines created on the M2 (macOS 26.6.2), every split-K and chunk kernel compiles. Next: the user's parity
+ladder — reference run, `STRATA_Q36M_ATTN_SK=1` forced-split-K, `--prefill 512` chunk run (both compared
+token-for-token against the reference), then the 32K long-context run.)
 
 - [x] Add `k_attn_part` + `k_attn_merge` to `metal/kernels/q36.metal`, copying the partial layout
       (256-cell chunks, acc/m/l) from `src/qwen35/q36_engine.cu` (~L298-355) — `k_attn_sk_part` /

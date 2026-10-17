@@ -160,5 +160,8 @@ and its math order matches the CUDA engine (cross-backend parity).
 - **Sandbox constraint held throughout:** no Metal compile here; host C++ was checked with
   `g++ -fsyntax-only -I metal/src -I include -I src`; the MSL is checked on the Mac by the extended
   `q36_compile_test` (every new pipeline is created there) and then by the gates.
+- **MSL gotcha from the Mac round:** program-scope `constexpr int` is rejected ("program scope variable must
+  reside in constant address space") — use `enum { NAME = v };` at program scope (the `fmt` structs' style);
+  function-scope `constexpr` is fine. Verified on an M2, macOS 26.6.2.
 - **Deferred default flip:** `--prefill` defaults OFF until the Mac gates pass; the flip commit (default 512,
   upstream-style) is one line once tokens are confirmed identical.
