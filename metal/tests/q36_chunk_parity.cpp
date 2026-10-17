@@ -90,11 +90,15 @@ int main() {
     auto pipe = [&](const char* n) { return cx.pipeline(lib, n); };
     mtl::Pipeline p_row = pipe("k_row_T_Q8_0"), p_emb = pipe("k_emb_chunk_T_Q8_0");
     mtl::Pipeline p_g_f32 = pipe("k_gemv_T_F32"), p_g_q8 = pipe("k_gemv_T_Q8_0"), p_g_q4k = pipe("k_gemv_T_Q4_K");
+    mtl::Pipeline p_g_q5k = pipe("k_gemv_T_Q5_K"), p_g_q6k = pipe("k_gemv_T_Q6_K");
     mtl::Pipeline p_gc_f32 = pipe("k_gemv_c_T_F32"), p_gc_q8 = pipe("k_gemv_c_T_Q8_0"), p_gc_q4k = pipe("k_gemv_c_T_Q4_K");
+    mtl::Pipeline p_gc_q5k = pipe("k_gemv_c_T_Q5_K"), p_gc_q6k = pipe("k_gemv_c_T_Q6_K");
     mtl::Pipeline p_lpr8 = pipe("k_gemv_lpr8_T_Q4_K");
     mtl::Pipeline p_topk = pipe("k_topk_router"), p_route = pipe("k_route_chunk");
     mtl::Pipeline p_zero = pipe("k_zero"), p_hist = pipe("k_hist"), p_off = pipe("k_exp_off"), p_place = pipe("k_place");
     mtl::Pipeline p_expc = pipe("k_expc_T_Q4_K");
+    mtl::Pipeline p_expc_iq2 = pipe("k_expc_T_IQ2_XS"), p_expc_iq3 = pipe("k_expc_T_IQ3_XXS");
+    mtl::Pipeline p_g_iq2 = pipe("k_gemv_T_IQ2_XS"), p_g_iq3 = pipe("k_gemv_T_IQ3_XXS");
     mtl::Pipeline p_conv = pipe("k_conv"), p_convc = pipe("k_conv_chunk");
     mtl::Pipeline p_gdn = pipe("k_gdn"), p_gdnc = pipe("k_gdn_chunk");
     mtl::Pipeline p_gn = pipe("k_gated_norm"), p_gnc = pipe("k_gated_norm_chunk");
@@ -283,6 +287,41 @@ int main() {
         check("lpr8 grid[1]=T", y1.ptr, y2.ptr, 4 * T * NOUT);
     }
 
+    // ---- 4b. Q5_K and Q6_K through k_gemv_c: the serial deq_dot path (the Q4_K/F32 stages above went
+    // through the float4-dot specializations or a load-only deq - these are the fma-ambiguous ones)
+    for (int which = 0; which < 2; ++which) {
+        const int NIN = 512, NOUT = 64;
+        const uint64_t RB = which == 0 ? 2ull * 176 : 2ull * 210;   // Q5_K / Q6_K rows of 512
+        mtl::Buffer hin = cx.alloc(4 * T * NIN);
+        for (int i = 0; i < T * NIN; ++i) hin.as<float>()[i] = r.sym();
+        mtl::Buffer W = cx.alloc(RB * NOUT);
+        for (size_t i = 0; i < W.bytes; ++i) W.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        mtl::Buffer y1 = cx.alloc(4 * T * NOUT), y2 = cx.alloc(4 * T * NOUT);
+        std::vector<mtl::Dispatch> ds;
+        for (int t = 0; t < T; ++t) {
+            GemvParam p{RB, 0, NIN, NOUT, 0};
+            mtl::Dispatch d;
+            d.p = which == 0 ? &p_g_q5k : &p_g_q6k;
+            d.args = {mtl::Arg::B(W), mtl::Arg::B(hin, 4 * (size_t) t * NIN), mtl::Arg::B(y1, 4 * (size_t) t * NOUT),
+                      mtl::Arg::B(dummy_ids), mtl::Arg::V(p)};
+            d.grid[0] = (NOUT + 7) / 8;
+            d.tg[0] = 256;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+        cx.run_graph(ds);
+        GemvParam p{RB, 0, NIN, NOUT, (unsigned long) NIN};
+        mtl::Dispatch d;
+        d.p = which == 0 ? &p_gc_q5k : &p_gc_q6k;
+        d.args = {mtl::Arg::B(W), mtl::Arg::B(hin), mtl::Arg::B(y2), mtl::Arg::V(p), mtl::Arg::V(T),
+                  mtl::Arg::V(0), mtl::Arg::V(T)};
+        d.grid[0] = (NOUT + 7) / 8;
+        d.grid[1] = 1;
+        d.tg[0] = 256;
+        cx.run_graph({d});
+        check(which == 0 ? "gemv q5_K" : "gemv q6_K", y1.ptr, y2.ptr, 4 * T * NOUT);
+    }
+
     // ---- 6. top-k routing ----------------------------------------------------------------------------------
     mtl::Buffer ids1 = cx.alloc(4 * T * K), wts1 = cx.alloc(4 * T * K);
     mtl::Buffer ids2 = cx.alloc(4 * T * K), wts2 = cx.alloc(4 * T * K);
@@ -370,6 +409,72 @@ int main() {
         de.tg[0] = 256;
         cx.run_graph({de});
         check_scattered("expert gemv", eg1.as<float>(), eg2.as<float>(), pos.as<int>());
+    }
+
+    // ---- 7b. the experts through k_expc with the SERIAL-deq types (IQ2_XS / IQ3_XXS: the engine's real
+    // expert formats, whose deq_dot has no float4 specialization) vs the decode k_gemv per token
+    for (int which = 0; which < 2; ++which) {
+        const uint64_t RB = which == 0 ? 74ull : 98ull;   // IQ2_XS / IQ3_XXS rows of n_in = 256
+        const uint64_t EB = RB * FF;
+        mtl::Pipeline& pe = which == 0 ? p_expc_iq2 : p_expc_iq3;
+        mtl::Pipeline& gd = which == 0 ? p_g_iq2 : p_g_iq3;
+        mtl::Buffer W = cx.alloc(NEXP * EB);
+        for (size_t i = 0; i < W.bytes; ++i) W.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        mtl::Buffer eg1 = cx.alloc(4 * T * K * FF), eg2 = cx.alloc(4 * T * K * FF);
+        mtl::Buffer scr = cx.alloc(4 * 3 * 256), srt_gu = cx.alloc(4 * T * K), srt_d = cx.alloc(4 * T * K);
+        std::vector<mtl::Dispatch> ds;
+        for (int t = 0; t < T; ++t) {
+            GemvParam p{RB, EB, N, FF, 0};
+            mtl::Dispatch d;
+            d.p = &gd;
+            d.args = {mtl::Arg::B(W), mtl::Arg::B(h_all, 4 * (size_t) t * N), mtl::Arg::B(eg1, 4 * (size_t) t * K * FF),
+                      mtl::Arg::B(ids1, 4 * (size_t) t * K), mtl::Arg::V(p)};
+            d.grid[0] = (FF + 7) / 8;
+            d.grid[1] = K;
+            d.tg[0] = 256;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+        cx.run_graph(ds);
+
+        mtl::Dispatch dz;
+        dz.p = &p_zero;
+        dz.args = {mtl::Arg::B(scr), mtl::Arg::V(3 * 256)};
+        dz.grid[0] = (3 * 256 + 127) / 128;
+        dz.tg[0] = 128;
+        dz.barrier = true;
+        mtl::Dispatch dh;
+        dh.p = &p_hist;
+        dh.args = {mtl::Arg::B(ids2), mtl::Arg::B(scr), mtl::Arg::V(T * K)};
+        dh.grid[0] = 1;
+        dh.tg[0] = 256;
+        dh.barrier = true;
+        mtl::Dispatch doff;
+        doff.p = &p_off;
+        doff.args = {mtl::Arg::B(scr), mtl::Arg::B(scr, 512 * 4), mtl::Arg::V(NEXP)};
+        doff.grid[0] = 1;
+        doff.tg[0] = 1;
+        doff.barrier = true;
+        mtl::Dispatch dp;
+        dp.p = &p_place;
+        dp.args = {mtl::Arg::B(ids2), mtl::Arg::B(scr, 256 * 4), mtl::Arg::B(scr, 512 * 4), mtl::Arg::B(srt_gu),
+                   mtl::Arg::B(srt_d), mtl::Arg::B(pos), mtl::Arg::V(K), mtl::Arg::V(T * K)};
+        dp.grid[0] = 1;
+        dp.tg[0] = 256;
+        dp.barrier = true;
+        cx.run_graph({dz, dh, doff, dp});
+
+        GemvParam p{RB, EB, N, FF, (unsigned long) N};
+        mtl::Dispatch de;
+        de.p = &pe;
+        de.args = {mtl::Arg::B(W), mtl::Arg::B(h_all), mtl::Arg::B(srt_gu), mtl::Arg::B(scr, 512 * 4),
+                   mtl::Arg::B(scr), mtl::Arg::B(eg2), mtl::Arg::V(p)};
+        de.grid[0] = (FF + 7) / 8;
+        de.grid[1] = NEXP;
+        de.tg[0] = 256;
+        cx.run_graph({de});
+        check_scattered(which == 0 ? "expert iq2_xs" : "expert iq3_xxs", eg1.as<float>(), eg2.as<float>(),
+                        pos.as<int>());
     }
 
     // ---- 8. conv (4-tap) over the chunk vs per token; the state must match too ------------------------------
