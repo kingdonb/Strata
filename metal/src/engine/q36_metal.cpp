@@ -124,6 +124,31 @@ bool env_flag(const char* name) {
     return e && *e && std::atoi(e) != 0;
 }
 
+// Debug-trace sums (STRATA_Q36M_TRACE=1): rows summed in order, each row's sum accumulated in index order.
+// The decode path prints one line per (token, cut); tools/qwen35/q36_trace_cmp.py sums those over the
+// chunk's token range in token order, which reproduces the chunk path's accumulation exactly - so equal
+// states print bit-equal doubles, and the first mismatching cut names the diverging dispatch.
+static double trace_rows(const float* p, size_t rows, size_t width) {
+    double s = 0.0;
+    for (size_t r = 0; r < rows; ++r) {
+        double rs = 0.0;
+        for (size_t i = 0; i < width; ++i) rs += p[r * width + i];
+        s += rs;
+    }
+    return s;
+}
+// an entry-major buffer's rows in (token, slot) order through the placement table
+static double trace_rows_pos(const float* p, const int* pos, int n_ent, size_t width) {
+    double s = 0.0;
+    for (int i = 0; i < n_ent; ++i) {
+        const float* row = p + (size_t) pos[i] * width;
+        double rs = 0.0;
+        for (size_t j = 0; j < width; ++j) rs += row[j];
+        s += rs;
+    }
+    return s;
+}
+
 // k_attn's scores are threadgroup memory, capped at 32 KB: 8,192 cells.  Above that (or forced by
 // STRATA_Q36M_ATTN_SK, the parity knob) the split-K kernels take over; SK_HD must be the head_dim.
 constexpr int SK_CELLS = 256;
@@ -312,6 +337,12 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
         d.tg[0] = 128;
         ds.push_back(d);
     }
+    if (tr) {   // debug cut G0: the embedding rows (type= prints the token_embd GGUF type id)
+        cx.run_graph(ds);
+        ds.clear();
+        std::fprintf(stderr, "TRACE G0 pos=%d L=-1 x=%.17g embtype=%d\n", (int) s.pos,
+                     trace_rows((const float*) s.x.ptr, 1, (size_t) N), (int) m.W("token_embd.weight").type);
+    }
 
     for (int64_t l = 0; l < g.n_layers; ++l) {
         // RMSNorm
@@ -333,6 +364,15 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
             push_gemv(ds, pipes, m.W(L(l, "attn_gate.weight")), s.h, s.z, nullptr, 1, 0, false);
             push_gemv(ds, pipes, m.W(L(l, "ssm_beta.weight")), s.h, s.beta, nullptr, 1, 0, false);
             push_gemv(ds, pipes, m.W(L(l, "ssm_alpha.weight")), s.h, s.alpha, nullptr, 1, 0, false);
+            if (tr && l == 0) {   // debug cut G1: the four projections
+                cx.run_graph(ds);
+                ds.clear();
+                std::fprintf(stderr, "TRACE G1 pos=%d L=0 qkv=%.17g z=%.17g al=%.17g be=%.17g\n", (int) s.pos,
+                             trace_rows((const float*) s.qkv.ptr, 1, (size_t) C),
+                             trace_rows((const float*) s.z.ptr, 1, (size_t) g.ssm_value_dim),
+                             trace_rows((const float*) s.alpha.ptr, 1, (size_t) HV),
+                             trace_rows((const float*) s.beta.ptr, 1, (size_t) HV));
+            }
 
             // Conv
             {
@@ -345,6 +385,13 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
                 d.tg[0] = 128;
                 d.barrier = true;
                 ds.push_back(d);
+            }
+            if (tr && l == 0) {   // debug cut G2: the conv outputs + the conv history it left
+                cx.run_graph(ds);
+                ds.clear();
+                std::fprintf(stderr, "TRACE G2 pos=%d L=0 co=%.17g cst=%.17g\n", (int) s.pos,
+                             trace_rows((const float*) s.conv_out.ptr, 1, (size_t) C),
+                             trace_rows((const float*) s.conv_state[l].ptr, 1, s.conv_state[l].bytes / 4));
             }
             // GDN step
             {
@@ -360,6 +407,13 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
                 d.barrier = true;
                 ds.push_back(d);
             }
+            if (tr && l == 0) {   // debug cut G3: the delta rule's outputs + the state it left
+                cx.run_graph(ds);
+                ds.clear();
+                std::fprintf(stderr, "TRACE G3 pos=%d L=0 go=%.17g sst=%.17g\n", (int) s.pos,
+                             trace_rows((const float*) s.gdn_out.ptr, 1, (size_t) g.ssm_value_dim),
+                             trace_rows((const float*) s.S[l].ptr, 1, s.S[l].bytes / 4));
+            }
             // Gated norm
             {
                 const int D_val = D;
@@ -374,6 +428,13 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
                 ds.push_back(d);
             }
             push_gemv(ds, pipes, m.W(L(l, "ssm_out.weight")), s.gdn_out, s.y, nullptr, 1, 0, true);
+            if (tr && l == 0) {   // debug cut G4: the gated norm's z and the mixer output y
+                cx.run_graph(ds);
+                ds.clear();
+                std::fprintf(stderr, "TRACE G4 pos=%d L=0 z=%.17g y=%.17g\n", (int) s.pos,
+                             trace_rows((const float*) s.z.ptr, 1, (size_t) g.ssm_value_dim),
+                             trace_rows((const float*) s.y.ptr, 1, (size_t) N));
+            }
         } else {
             const int H = (int) g.n_head, HKV = (int) g.n_head_kv, D = (int) g.head_dim;
             push_gemv(ds, pipes, m.W(L(l, "attn_q.weight")), s.h, s.qg, nullptr, 1, 0, true);
@@ -453,6 +514,12 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
             d.barrier = true;
             ds.push_back(d);
         }
+        if (tr && l == 0) {   // debug cut G5: the residual after the mixer's add
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G5 pos=%d L=0 x=%.17g\n", (int) s.pos,
+                         trace_rows((const float*) s.x.ptr, 1, (size_t) N));
+        }
 
         // Post norm
         {
@@ -465,6 +532,12 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
             d.tg[0] = 128;
             d.barrier = true;
             ds.push_back(d);
+        }
+        if (tr && l == 0) {   // debug cut G6: the post-norm rows the MoE reads
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G6 pos=%d L=0 h=%.17g\n", (int) s.pos,
+                         trace_rows((const float*) s.h.ptr, 1, (size_t) N));
         }
 
         // Router
@@ -483,6 +556,14 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
             d.barrier = true;
             ds.push_back(d);
         }
+        if (tr && l == 0) {   // debug cut G7: the router logits and the top-k pick
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G7 pos=%d L=0 ro=%.17g ids=%.17g wts=%.17g\n", (int) s.pos,
+                         trace_rows((const float*) s.router.ptr, 1, (size_t) g.n_expert),
+                         trace_rows((const float*) s.ids.ptr, 1, (size_t) K),
+                         trace_rows((const float*) s.wts.ptr, 1, (size_t) K));
+        }
 
         // Routed experts + Shared expert
         push_gemv(ds, pipes, m.W(L(l, "ffn_gate_exps.weight")), s.h, s.eg, &s.ids, K, 0, true);
@@ -499,6 +580,12 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
             d.barrier = true;
             ds.push_back(d);
         }
+        if (tr && l == 0) {   // debug cut G8: the routed experts' swiglu output
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G8 pos=%d L=0 eh=%.17g\n", (int) s.pos,
+                         trace_rows((const float*) s.eh.ptr, (size_t) K, (size_t) FF));
+        }
         {
             const int n_val = FS;
             mtl::Dispatch d;
@@ -512,6 +599,15 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
         push_gemv(ds, pipes, m.W(L(l, "ffn_down_exps.weight")), s.eh, s.ey, &s.ids, K, FF, true);
         push_gemv(ds, pipes, m.W(L(l, "ffn_down_shexp.weight")), s.sh, s.sy, nullptr, 1, 0, false);
         push_gemv(ds, pipes, m.W(L(l, "ffn_gate_inp_shexp.weight")), s.h, s.sgate, nullptr, 1, 0, false);
+        if (tr && l == 0) {   // debug cut G9: the down projections + the shared expert + its gate
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G9 pos=%d L=0 sh=%.17g sy=%.17g sgate=%.17g ey=%.17g\n", (int) s.pos,
+                         trace_rows((const float*) s.sh.ptr, 1, (size_t) FS),
+                         trace_rows((const float*) s.sy.ptr, 1, (size_t) N),
+                         trace_rows((const float*) s.sgate.ptr, 1, 1),
+                         trace_rows((const float*) s.ey.ptr, (size_t) K, (size_t) N));
+        }
 
         // MoE sum
         {
@@ -524,6 +620,12 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
             d.tg[0] = 128;
             d.barrier = true;
             ds.push_back(d);
+        }
+        if (tr && l == 0) {   // debug cut G10: the residual after the MoE add
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G10 pos=%d L=0 x=%.17g\n", (int) s.pos,
+                         trace_rows((const float*) s.x.ptr, 1, (size_t) N));
         }
 
         if (tr) {   // debug: run this layer alone and checksum the token's rows (row sums in index order)
@@ -656,6 +758,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
     const int HV = (int) g.ssm_v_heads, HK = (int) g.ssm_k_heads, DS = (int) g.ssm_state_size;
     const int H = (int) g.n_head, HKV = (int) g.n_head_kv, D = (int) g.head_dim;
     const int n_ent = nt * K;
+    const bool trc = env_flag("STRATA_Q36M_TRACE");   // debug: per-layer sub-graphs + cut checksums
 
     if (D != 256) {   // k_attn_prep_chunk's threadgroup buffer and the split-K kernels are 256-wide
         std::fprintf(stderr, "q36_metal: chunk prefill needs head_dim 256, model has %d\n", D);
@@ -690,6 +793,13 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
         d.barrier = true;
         ds.push_back(d);
     }
+    if (trc) {   // debug cut G0: the chunk's embedding rows (type= prints the token_embd GGUF type id)
+        if (pos0 == 0) std::fprintf(stderr, "TRACE BEGIN C\n");
+        cx.run_graph(ds);
+        ds.clear();
+        std::fprintf(stderr, "TRACE G0 pos0=%d L=-1 x=%.17g embtype=%d\n", (int) pos0,
+                     trace_rows((const float*) s.xc.ptr, (size_t) nt, (size_t) N), (int) m.W("token_embd.weight").type);
+    }
 
     for (int64_t l = 0; l < g.n_layers; ++l) {
         // RMSNorm (one threadgroup per token row)
@@ -709,6 +819,15 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             push_c_gemv(ds, pipes, m.W(L(l, "attn_gate.weight")), s.hc, s.z_c, nt, N);
             push_c_gemv(ds, pipes, m.W(L(l, "ssm_beta.weight")), s.hc, s.beta_c, nt, N);
             push_c_gemv(ds, pipes, m.W(L(l, "ssm_alpha.weight")), s.hc, s.alpha_c, nt, N);
+            if (trc && l == 0) {   // debug cut G1: the four projections
+                cx.run_graph(ds);
+                ds.clear();
+                std::fprintf(stderr, "TRACE G1 pos0=%d L=0 qkv=%.17g z=%.17g al=%.17g be=%.17g\n", (int) pos0,
+                             trace_rows((const float*) s.qkv_c.ptr, (size_t) nt, (size_t) C),
+                             trace_rows((const float*) s.z_c.ptr, (size_t) nt, (size_t) ZV),
+                             trace_rows((const float*) s.alpha_c.ptr, (size_t) nt, (size_t) HV),
+                             trace_rows((const float*) s.beta_c.ptr, (size_t) nt, (size_t) HV));
+            }
             {
                 const int Kd = (int) g.ssm_d_conv;
                 mtl::Dispatch d;
@@ -720,6 +839,13 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                 d.tg[0] = 128;
                 d.barrier = true;
                 ds.push_back(d);
+            }
+            if (trc && l == 0) {   // debug cut G2: the conv outputs + the conv history it left
+                cx.run_graph(ds);
+                ds.clear();
+                std::fprintf(stderr, "TRACE G2 pos0=%d L=0 co=%.17g cst=%.17g\n", (int) pos0,
+                             trace_rows((const float*) s.conv_out_c.ptr, (size_t) nt, (size_t) C),
+                             trace_rows((const float*) s.conv_state[l].ptr, 1, s.conv_state[l].bytes / 4));
             }
             {
                 mtl::Dispatch d;
@@ -733,6 +859,13 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                 d.barrier = true;
                 ds.push_back(d);
             }
+            if (trc && l == 0) {   // debug cut G3: the delta rule's outputs + the state it left
+                cx.run_graph(ds);
+                ds.clear();
+                std::fprintf(stderr, "TRACE G3 pos0=%d L=0 go=%.17g sst=%.17g\n", (int) pos0,
+                             trace_rows((const float*) s.gdn_out_c.ptr, (size_t) nt, (size_t) ZV),
+                             trace_rows((const float*) s.S[l].ptr, 1, s.S[l].bytes / 4));
+            }
             {
                 mtl::Dispatch d;
                 d.p = &pipes.p_gated_norm_c;
@@ -745,6 +878,13 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                 ds.push_back(d);
             }
             push_c_gemv(ds, pipes, m.W(L(l, "ssm_out.weight")), s.gdn_out_c, s.yc, nt, ZV);
+            if (trc && l == 0) {   // debug cut G4: the gated norm's z and the mixer output y
+                cx.run_graph(ds);
+                ds.clear();
+                std::fprintf(stderr, "TRACE G4 pos0=%d L=0 z=%.17g y=%.17g\n", (int) pos0,
+                             trace_rows((const float*) s.z_c.ptr, (size_t) nt, (size_t) ZV),
+                             trace_rows((const float*) s.yc.ptr, (size_t) nt, (size_t) N));
+            }
         } else {
             push_c_gemv(ds, pipes, m.W(L(l, "attn_q.weight")), s.hc, s.qg_c, nt, N);
             push_c_gemv(ds, pipes, m.W(L(l, "attn_k.weight")), s.hc, s.k_c, nt, N);
@@ -805,6 +945,12 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             d.barrier = true;
             ds.push_back(d);
         }
+        if (trc && l == 0) {   // debug cut G5: the residual after the mixer's add
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G5 pos0=%d L=0 x=%.17g\n", (int) pos0,
+                         trace_rows((const float*) s.xc.ptr, (size_t) nt, (size_t) N));
+        }
         {
             mtl::Dispatch d;
             d.p = &pipes.p_rms;
@@ -814,6 +960,12 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             d.tg[0] = 128;
             d.barrier = true;
             ds.push_back(d);
+        }
+        if (trc && l == 0) {   // debug cut G6: the post-norm rows the MoE reads
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G6 pos0=%d L=0 h=%.17g\n", (int) pos0,
+                         trace_rows((const float*) s.hc.ptr, (size_t) nt, (size_t) N));
         }
 
         // Router + top-K
@@ -827,6 +979,14 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             d.tg[0] = 256;
             d.barrier = true;
             ds.push_back(d);
+        }
+        if (trc && l == 0) {   // debug cut G7: the router logits and the top-k pick
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G7 pos0=%d L=0 ro=%.17g ids=%.17g wts=%.17g\n", (int) pos0,
+                         trace_rows((const float*) s.router_c.ptr, (size_t) nt, (size_t) g.n_expert),
+                         trace_rows((const float*) s.ids_c.ptr, (size_t) nt, (size_t) K),
+                         trace_rows((const float*) s.wts_c.ptr, (size_t) nt, (size_t) K));
         }
 
         // Entry tables in one dispatch (k_tables: threadgroup atomics inside; plain stores out), then the
@@ -855,6 +1015,12 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             d.barrier = true;
             ds.push_back(d);
         }
+        if (trc && l == 0) {   // debug cut G8: the routed experts' swiglu output (pos-ordered rows)
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G8 pos0=%d L=0 eh=%.17g\n", (int) pos0,
+                         trace_rows_pos((const float*) s.eh_c.ptr, s.pos_c.as<int>(), n_ent, (size_t) FF));
+        }
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_gate_shexp.weight")), s.hc, s.sg_c, nt, N);
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_up_shexp.weight")), s.hc, s.su_c, nt, N);
         {
@@ -870,6 +1036,15 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
         push_c_expc(ds, pipes, m.W(L(l, "ffn_down_exps.weight")), s.eh_c, s.srt_in_d, s.scr, 256 * sizeof(int), 0, s.ey_c, FF);
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_down_shexp.weight")), s.sh_c, s.sy_c, nt, FS);
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_gate_inp_shexp.weight")), s.hc, s.sgate_c, nt, N);
+        if (trc && l == 0) {   // debug cut G9: the down projections + the shared expert + its gate (pos-ordered ey)
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G9 pos0=%d L=0 sh=%.17g sy=%.17g sgate=%.17g ey=%.17g\n", (int) pos0,
+                         trace_rows((const float*) s.sh_c.ptr, (size_t) nt, (size_t) FS),
+                         trace_rows((const float*) s.sy_c.ptr, (size_t) nt, (size_t) N),
+                         trace_rows((const float*) s.sgate_c.ptr, (size_t) nt, 1),
+                         trace_rows_pos((const float*) s.ey_c.ptr, s.pos_c.as<int>(), n_ent, (size_t) N));
+        }
         {
             mtl::Dispatch d;
             d.p = &pipes.p_moe_sum_c;
@@ -881,9 +1056,14 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             d.barrier = true;
             ds.push_back(d);
         }
+        if (trc && l == 0) {   // debug cut G10: the residual after the MoE add
+            cx.run_graph(ds);
+            ds.clear();
+            std::fprintf(stderr, "TRACE G10 pos0=%d L=0 x=%.17g\n", (int) pos0,
+                         trace_rows((const float*) s.xc.ptr, (size_t) nt, (size_t) N));
+        }
 
-        if (env_flag("STRATA_Q36M_TRACE")) {   // debug: run this layer alone and checksum every row
-            if (pos0 == 0 && l == 0) std::fprintf(stderr, "TRACE BEGIN C\n");
+        if (trc) {   // debug: run this layer alone and checksum every row
             cx.run_graph(ds);
             ds.clear();
             double xs = 0.0, hs = 0.0;
@@ -901,7 +1081,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
         }
     }
 
-    if (env_flag("STRATA_Q36M_TRACE")) return 0.0;   // the per-layer sub-graphs already ran
+    if (trc) return 0.0;   // the per-layer sub-graphs already ran
     return cx.run_graph(ds);
 }
 
