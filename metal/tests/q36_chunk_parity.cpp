@@ -2,9 +2,10 @@
 // must match bit for bit, stage by stage, on synthetic inputs: the engine's chunked prefill keeps the
 // token-by-token path's exact arithmetic, so every stage compares equal with memcmp.
 //
-//   q36_chunk_parity    embed rows, dense gemv (F32 / Q8_0 / Q4_K, both tpb shapes), the n_in=2048 lpr8
-//                       gemv, top-k routing, the expert entry tables + grouped expert gemv, conv tiles,
-//                       the delta rule, gated norm, the MoE combine
+//   q36_chunk_parity    embed rows, dense gemv (F32 / Q8_0 / Q4_K / Q5_K / Q6_K), the n_in=2048 lpr8
+//                       gemv, top-k routing, the expert entry tables (k_tables vs the old four-dispatch
+//                       chain) + grouped expert gemv (Q4_K / IQ2_XS / IQ3_XXS), conv tiles, the delta
+//                       rule, gated norm, the MoE combine, the full MoE chain as one graph vs separate
 #include "mtl_rt.h"
 #include "ref_quant.h"
 
@@ -36,30 +37,41 @@ struct GemvParam {
 
 int g_fails = 0;
 
+// garbage bytes as half scales give NaN (~1/32 of blocks): clear the exponent bits of every odd byte so
+// the dequanted scales stay finite and the NaN-tracking stays meaningful
+template <class C> static void sanitize(C& c) {
+    for (size_t i = 1; i < c.size(); i += 2) c[i] &= 0x83;
+}
+static void sanitize(mtl::Buffer& b) {
+    unsigned char* p = (unsigned char*) b.ptr;
+    for (size_t i = 1; i < b.bytes; i += 2) p[i] &= 0x83;
+}
+
+static inline bool feq(float a, float b) {
+    return a == b || (std::isnan(a) && std::isnan(b));   // both-NaN counts as equal (bit patterns may differ)
+}
+
 void check(const char* stage, const void* a, const void* b, size_t bytes) {
-    if (std::memcmp(a, b, bytes) == 0) {
-        std::printf("  %-14s OK\n", stage);
-        return;
-    }
     const float* x = (const float*) a;
     const float* y = (const float*) b;
     const size_t n = bytes / 4;
-    size_t first = n, count = 0;
+    size_t first = n, count = 0, nans = 0;
     for (size_t i = 0; i < n; ++i) {
-        if (x[i] != y[i]) {
+        if (std::isnan(x[i]) || std::isnan(y[i])) {
+            ++nans;
+            continue;   // NaN cells are tracked separately: they mean out-of-bounds/garbage reads upstream
+        }
+        if (!feq(x[i], y[i])) {
             if (first == n) first = i;
             ++count;
         }
     }
-    std::printf("  %-14s FAIL: %zu/%zu differ, first at %zu (%.9g vs %.9g)", stage, count, n, first,
-                first < n ? x[first] : 0.0f, first < n ? y[first] : 0.0f);
-    size_t shown = 0;
-    for (size_t i = first; i < n && shown < 4; ++i)
-        if (x[i] != y[i]) {
-            std::printf("; [%zu] %.9g vs %.9g", i, x[i], y[i]);
-            ++shown;
-        }
-    std::printf("\n");
+    if (count == 0 && nans == 0) {
+        std::printf("  %-14s OK\n", stage);
+        return;
+    }
+    std::printf("  %-14s FAIL: %zu real diffs (first at %zu: %.9g vs %.9g), %zu NaN cells\n", stage, count,
+                first < n ? first : 0, first < n ? x[first] : 0.0f, first < n ? y[first] : 0.0f, nans);
     ++g_fails;
 }
 
@@ -69,12 +81,51 @@ void check_scattered(const char* stage, const float* decode_rows, const float* e
         for (int k = 0; k < K; ++k) {
             const float* a = decode_rows + (size_t)(t * K + k) * FF;
             const float* b = entry_rows + (size_t) pos[t * K + k] * FF;
-            if (std::memcmp(a, b, 4 * FF) != 0) {
-                std::printf("  %-14s FAIL at token %d slot %d\n", stage, t, k);
-                ++g_fails;
-                return;
-            }
+            for (int o = 0; o < FF; ++o)
+                if (!feq(a[o], b[o])) {
+                    std::printf("  %-14s FAIL at token %d slot %d dim %d (%.9g vs %.9g)\n", stage, t, k, o, a[o], b[o]);
+                    ++g_fails;
+                    return;
+                }
         }
+    }
+    std::printf("  %-14s OK\n", stage);
+}
+
+// the chunk's entry-major rows against another entry-major set, matched by each (token, slot)'s row (the
+// placement rank order can differ between runs; the VALUES must not)
+void check_scattered2(const char* stage, const float* a_rows, const int* pos_a, const float* b_rows,
+                      const int* pos_b) {
+    for (int t = 0; t < T; ++t)
+        for (int k = 0; k < K; ++k) {
+            const float* a = a_rows + (size_t) pos_a[t * K + k] * FF;
+            const float* b = b_rows + (size_t) pos_b[t * K + k] * FF;
+            for (int o = 0; o < FF; ++o)
+                if (!feq(a[o], b[o])) {
+                    std::printf("  %-14s FAIL at token %d slot %d dim %d (%.9g vs %.9g)\n", stage, t, k, o, a[o],
+                                b[o]);
+                    ++g_fails;
+                    return;
+                }
+        }
+    std::printf("  %-14s OK\n", stage);
+}
+
+// k_tables' placement invariant: pos is a permutation of the entry rows, each row -> its entry index and
+// token, each entry inside its expert's [off, off + cnt) run (the rank order itself varies run to run)
+void check_placement(const char* stage, const int* ids, const int* cnt_off, const int* srt_gu, const int* srt_d,
+                     const int* pos, int n_ent) {
+    std::vector<char> seen((size_t) n_ent, 0);
+    for (int i = 0; i < n_ent; ++i) {
+        const int row = pos[i], e = ids[i];
+        const bool bad = row < 0 || row >= n_ent || seen[row] || srt_d[row] != i || srt_gu[row] != i / K
+                         || row < cnt_off[256 + e] || row >= cnt_off[256 + e] + cnt_off[e];
+        if (bad) {
+            std::printf("  %-14s FAIL at entry %d (row %d, expert %d)\n", stage, i, row, e);
+            ++g_fails;
+            return;
+        }
+        seen[row] = 1;
     }
     std::printf("  %-14s OK\n", stage);
 }
@@ -101,6 +152,7 @@ int main() {
     mtl::Pipeline p_g_iq2 = pipe("k_gemv_T_IQ2_XS"), p_g_iq3 = pipe("k_gemv_T_IQ3_XXS");
     mtl::Pipeline p_swiglu = pipe("k_swiglu");
     mtl::Pipeline p_rms = pipe("k_rms");
+    mtl::Pipeline p_tables = pipe("k_tables");
     mtl::Pipeline p_conv = pipe("k_conv"), p_convc = pipe("k_conv_chunk");
     mtl::Pipeline p_gdn = pipe("k_gdn"), p_gdnc = pipe("k_gdn_chunk");
     mtl::Pipeline p_gn = pipe("k_gated_norm"), p_gnc = pipe("k_gated_norm_chunk");
@@ -262,6 +314,7 @@ int main() {
         for (int i = 0; i < T * NIN; ++i) hin.as<float>()[i] = r.sym();
         mtl::Buffer W = cx.alloc(RB * NOUT);
         for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym();
+        sanitize(W);
         mtl::Buffer zeros = cx.alloc(4 * T);
         mtl::Buffer y1 = cx.alloc(4 * T * NOUT), y2 = cx.alloc(4 * T * NOUT);
         std::vector<mtl::Dispatch> ds;
@@ -298,6 +351,7 @@ int main() {
         for (int i = 0; i < T * NIN; ++i) hin.as<float>()[i] = r.sym();
         mtl::Buffer W = cx.alloc(RB * NOUT);
         for (size_t i = 0; i < W.bytes; ++i) W.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        sanitize(W);
         mtl::Buffer y1 = cx.alloc(4 * T * NOUT), y2 = cx.alloc(4 * T * NOUT);
         std::vector<mtl::Dispatch> ds;
         for (int t = 0; t < T; ++t) {
@@ -357,6 +411,7 @@ int main() {
         const uint64_t EB = RB * FF;
         mtl::Buffer W = cx.alloc(NEXP * EB);
         for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym();
+        sanitize(W);
         mtl::Buffer eg1 = cx.alloc(4 * T * K * FF), eg2 = cx.alloc(4 * T * K * FF);
         mtl::Buffer scr = cx.alloc(4 * 3 * 256), srt_gu = cx.alloc(4 * T * K), srt_d = cx.alloc(4 * T * K);
         std::vector<mtl::Dispatch> ds;
@@ -422,6 +477,7 @@ int main() {
         mtl::Pipeline& gd = which == 0 ? p_g_iq2 : p_g_iq3;
         mtl::Buffer W = cx.alloc(NEXP * EB);
         for (size_t i = 0; i < W.bytes; ++i) W.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        sanitize(W);
         mtl::Buffer eg1 = cx.alloc(4 * T * K * FF), eg2 = cx.alloc(4 * T * K * FF);
         mtl::Buffer scr = cx.alloc(4 * 3 * 256), srt_gu = cx.alloc(4 * T * K), srt_d = cx.alloc(4 * T * K);
         std::vector<mtl::Dispatch> ds;
@@ -745,14 +801,15 @@ int main() {
         check("sk rows", att1.ptr, att2.ptr, 4 * T * H * 256);
     }
 
-    // ---- 14. the full layer chain as ONE barrier-ordered graph (the engine's structure) vs the same
-    // dispatches as separate graphs (the stage tests' structure): embed -> rms -> the GDN layer's products ->
-    // add -> post-norm -> router -> route -> the atomic entry tables -> grouped experts -> combine.  All the
-    // kernels are proven exact stage by stage; this stage asks whether the ONE-GRAPH barrier ordering keeps
-    // them exact too (the atomics + the table-dependent gemvs are the only cross-dispatch hazards).
+    // ---- 14. the full MoE chain as ONE barrier-ordered graph (the engine's structure) vs the same
+    // dispatches as separate graphs (the stage tests' structure): embed -> rms -> the router gemv -> route
+    // -> k_tables -> grouped experts -> swiglu.  All the kernels are proven exact stage by stage (and the
+    // old four-dispatch atomic table chain RACED inside one graph - k_expc read stale tables); this stage
+    // asks whether the ONE-GRAPH barrier ordering keeps k_tables + the table-dependent gemvs exact too.
     {
         mtl::Buffer W_e = cx.alloc(32 * (uint64_t) (N / 32) * 34);   // Q8_0 embedding rows, vocab 32
         for (size_t i = 0; i < W_e.bytes; ++i) W_e.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        sanitize(W_e);
         const uint64_t RBE = (uint64_t) (N / 32) * 34;
         int toks[T];
         for (int& t : toks) t = (int) (r.uni() * 32);
@@ -764,6 +821,8 @@ int main() {
         mtl::Buffer W_g = cx.alloc(NEXP * EBO), W_u = cx.alloc(NEXP * EBO);
         for (size_t i = 0; i < W_g.bytes; ++i) W_g.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
         for (size_t i = 0; i < W_u.bytes; ++i) W_u.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        sanitize(W_g);
+        sanitize(W_u);
         mtl::Buffer w_norm = cx.alloc(4 * N);
 
         // the layer's shared inputs: post-norm hidden is produced in-graph; build the router/expert inputs
@@ -816,39 +875,18 @@ int main() {
             d3.tg[0] = 256;
             d3.barrier = true;
             ds.push_back(d3);
-            mtl::Dispatch dz;
-            dz.p = &p_zero;
-            dz.args = {mtl::Arg::B(scr), mtl::Arg::V(3 * 256)};
-            dz.grid[0] = 6;
-            dz.tg[0] = 128;
-            dz.barrier = true;
-            ds.push_back(dz);
-            mtl::Dispatch dh;
-            dh.p = &p_hist;
-            dh.args = {mtl::Arg::B(ids), mtl::Arg::B(scr), mtl::Arg::V(T * K)};
-            dh.grid[0] = 1;
-            dh.tg[0] = 256;
-            dh.barrier = true;
-            ds.push_back(dh);
-            mtl::Dispatch df;
-            df.p = &p_off;
-            df.args = {mtl::Arg::B(scr), mtl::Arg::B(scr, 512 * 4), mtl::Arg::V(NEXP)};
-            df.grid[0] = 1;
-            df.tg[0] = 1;
-            df.barrier = true;
-            ds.push_back(df);
-            mtl::Dispatch dpl;
-            dpl.p = &p_place;
-            dpl.args = {mtl::Arg::B(ids), mtl::Arg::B(scr, 256 * 4), mtl::Arg::B(scr, 512 * 4), mtl::Arg::B(srt),
-                        mtl::Arg::B(srt), mtl::Arg::B(pos), mtl::Arg::V(K), mtl::Arg::V(T * K)};
-            dpl.grid[0] = 1;
-            dpl.tg[0] = 256;
-            dpl.barrier = true;
-            ds.push_back(dpl);
+            mtl::Dispatch dt;
+            dt.p = &p_tables;
+            dt.args = {mtl::Arg::B(ids), mtl::Arg::B(scr), mtl::Arg::B(srt), mtl::Arg::B(srt), mtl::Arg::B(pos),
+                       mtl::Arg::V(NEXP), mtl::Arg::V(K), mtl::Arg::V(T * K)};
+            dt.grid[0] = 1;
+            dt.tg[0] = 256;
+            dt.barrier = true;
+            ds.push_back(dt);
             GemvParam pe{RBO, EBO, N, FF, (unsigned long) N};
             mtl::Dispatch d4;
             d4.p = &p_expc_iq2;
-            d4.args = {mtl::Arg::B(W_g), mtl::Arg::B(hc), mtl::Arg::B(srt), mtl::Arg::B(scr, 512 * 4),
+            d4.args = {mtl::Arg::B(W_g), mtl::Arg::B(hc), mtl::Arg::B(srt), mtl::Arg::B(scr, 256 * 4),
                        mtl::Arg::B(scr), mtl::Arg::B(eg), mtl::Arg::V(pe)};
             d4.grid[0] = (FF + 7) / 8;
             d4.grid[1] = NEXP;
@@ -857,7 +895,7 @@ int main() {
             ds.push_back(d4);
             mtl::Dispatch d5;
             d5.p = &p_expc_iq2;
-            d5.args = {mtl::Arg::B(W_u), mtl::Arg::B(hc), mtl::Arg::B(srt), mtl::Arg::B(scr, 512 * 4),
+            d5.args = {mtl::Arg::B(W_u), mtl::Arg::B(hc), mtl::Arg::B(srt), mtl::Arg::B(scr, 256 * 4),
                        mtl::Arg::B(scr), mtl::Arg::B(eu), mtl::Arg::V(pe)};
             d5.grid[0] = (FF + 7) / 8;
             d5.grid[1] = NEXP;
@@ -877,11 +915,67 @@ int main() {
         chain(many, xc2, hc2, yc2, r2, id2, wt2, scr2, sg2, su2, sh2, ey2, pos2, sr2);
         cx.run_graph(one);
         for (const auto& d : many) cx.run_graph({d});
+        // the tables' rank order can differ between the two runs (threadgroup scheduling); the VALUES must
+        // not - so the placement is checked as the invariant and the expert rows matched through pos
         check("chain router", r1.ptr, r2.ptr, 4 * T * NEXP);
         check("chain route ids", id1.ptr, id2.ptr, 4 * T * K);
-        check("chain srt_gu", sr1.ptr, sr2.ptr, 4 * T * K);
-        check("chain experts", sg1.ptr, sg2.ptr, 4 * T * K * FF);
-        check("chain combine-in", sh1.ptr, sh2.ptr, 4 * T * K * FF);
+        check("chain route wts", wt1.ptr, wt2.ptr, 4 * T * K);
+        check("chain scr", scr1.ptr, scr2.ptr, 4 * 2 * 256);
+        check_placement("chain place 1", id1.as<int>(), scr1.as<int>(), sr1.as<int>(), sr1.as<int>(),
+                        pos1.as<int>(), T * K);
+        check_placement("chain place 2", id2.as<int>(), scr2.as<int>(), sr2.as<int>(), sr2.as<int>(),
+                        pos2.as<int>(), T * K);
+        check_scattered2("chain experts", sg1.as<float>(), pos1.as<int>(), sg2.as<float>(), pos2.as<int>());
+        check_scattered2("chain combine-in", sh1.as<float>(), pos1.as<int>(), sh2.as<float>(), pos2.as<int>());
+    }
+
+    // ---- 15. k_tables (one dispatch, threadgroup atomics) vs the old zero/hist/exp_off/place chain (kept
+    // in the MSL file for this): the counts and offsets must be identical, the placement must satisfy the
+    // invariant (the old chain's own rank order is free to differ)
+    {
+        mtl::Buffer ids3 = cx.alloc(4 * T * K);
+        std::memcpy(ids3.ptr, ids2.ptr, 4 * T * K);
+        mtl::Buffer scr_t = cx.alloc(4 * 2 * 256), scr_o = cx.alloc(4 * 3 * 256);
+        mtl::Buffer gu_t = cx.alloc(4 * T * K), gu_o = cx.alloc(4 * T * K);
+        mtl::Buffer sd_t = cx.alloc(4 * T * K), sd_o = cx.alloc(4 * T * K);
+        mtl::Buffer pos_t = cx.alloc(4 * T * K), pos_o = cx.alloc(4 * T * K);
+        mtl::Dispatch dt;
+        dt.p = &p_tables;
+        dt.args = {mtl::Arg::B(ids3), mtl::Arg::B(scr_t), mtl::Arg::B(gu_t), mtl::Arg::B(sd_t), mtl::Arg::B(pos_t),
+                   mtl::Arg::V(NEXP), mtl::Arg::V(K), mtl::Arg::V(T * K)};
+        dt.grid[0] = 1;
+        dt.tg[0] = 256;
+        cx.run_graph({dt});
+        mtl::Dispatch dz;
+        dz.p = &p_zero;
+        dz.args = {mtl::Arg::B(scr_o), mtl::Arg::V(3 * 256)};
+        dz.grid[0] = (3 * 256 + 127) / 128;
+        dz.tg[0] = 128;
+        dz.barrier = true;
+        mtl::Dispatch dh;
+        dh.p = &p_hist;
+        dh.args = {mtl::Arg::B(ids3), mtl::Arg::B(scr_o), mtl::Arg::V(T * K)};
+        dh.grid[0] = (T * K + 255) / 256;
+        dh.tg[0] = 256;
+        dh.barrier = true;
+        mtl::Dispatch doff;
+        doff.p = &p_off;
+        doff.args = {mtl::Arg::B(scr_o), mtl::Arg::B(scr_o, 512 * 4), mtl::Arg::V(NEXP)};
+        doff.grid[0] = 1;
+        doff.tg[0] = 1;
+        doff.barrier = true;
+        mtl::Dispatch dp;
+        dp.p = &p_place;
+        dp.args = {mtl::Arg::B(ids3), mtl::Arg::B(scr_o, 256 * 4), mtl::Arg::B(scr_o, 512 * 4), mtl::Arg::B(gu_o),
+                   mtl::Arg::B(sd_o), mtl::Arg::B(pos_o), mtl::Arg::V(K), mtl::Arg::V(T * K)};
+        dp.grid[0] = (T * K + 255) / 256;
+        dp.tg[0] = 256;
+        dp.barrier = true;
+        cx.run_graph({dz, dh, doff, dp});
+        check("tables cnt", scr_t.ptr, scr_o.ptr, 4 * 256);
+        check("tables off", (const char*) scr_t.ptr + 4 * 256, (const char*) scr_o.ptr + 4 * 512, 4 * 256);
+        check_placement("tables place", ids3.as<int>(), scr_t.as<int>(), gu_t.as<int>(), sd_t.as<int>(),
+                        pos_t.as<int>(), T * K);
     }
 
     std::printf(g_fails ? "FAILURES: %d\n" : "all stages bit-identical\n", g_fails);

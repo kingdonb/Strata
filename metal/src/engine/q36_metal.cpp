@@ -137,7 +137,7 @@ struct Pipelines {
     mtl::Pipeline p_attn_sk_part, p_attn_sk_merge;
     // prompt-chunk pipelines (init_prompt, when --prefill is on)
     std::map<int, mtl::Pipeline> p_emb_c, p_gemv_c, p_expc;
-    mtl::Pipeline p_route_c, p_zero, p_hist, p_exp_off, p_place, p_moe_sum_c, p_conv_c, p_gdn_c, p_gated_norm_c, p_attn_prep_c;
+    mtl::Pipeline p_route_c, p_tables, p_moe_sum_c, p_conv_c, p_gdn_c, p_gated_norm_c, p_attn_prep_c;
     mtl::Buffer zero_ids;   // nt zeros: the decode lpr8's per-token dummy expert id (chunk dense products)
     std::map<int, mtl::Pipeline> p_gemv;
     std::map<int, mtl::Pipeline> p_gemv_lpr8;
@@ -242,10 +242,7 @@ struct Pipelines {
         get_expc(T_IQ4_XS, "k_expc_T_IQ4_XS");
 
         p_route_c = cx.pipeline(lib, "k_route_chunk");
-        p_zero = cx.pipeline(lib, "k_zero");
-        p_hist = cx.pipeline(lib, "k_hist");
-        p_exp_off = cx.pipeline(lib, "k_exp_off");
-        p_place = cx.pipeline(lib, "k_place");
+        p_tables = cx.pipeline(lib, "k_tables");
         p_moe_sum_c = cx.pipeline(lib, "k_moe_sum_chunk");
         p_conv_c = cx.pipeline(lib, "k_conv_chunk");
         p_gdn_c = cx.pipeline(lib, "k_gdn_chunk");
@@ -604,7 +601,7 @@ void push_c_gemv(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const T
 
 // Routed experts of a chunk: k_expc over the placed per-expert entry runs (every expert's weights read
 // once per chunk); x rows are selected per entry through srt_in; off/cnt are byte offsets into the
-// engine's small scratch (the k_exp_off / k_hist results).
+// engine's small scratch (the k_tables results: counts at 0, offsets at 256 ints).
 void push_c_expc(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const Tensor& w, const mtl::Buffer& x,
                  const mtl::Buffer& srt_in, const mtl::Buffer& scr, size_t off_bytes, size_t cnt_bytes,
                  const mtl::Buffer& y, int x_stride) {
@@ -819,48 +816,22 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             ds.push_back(d);
         }
 
-        // Entry tables: zero the counters, count per expert, exclusive offsets, place the entries
+        // Entry tables in one dispatch (k_tables: threadgroup atomics inside; plain stores out), then the
+        // grouped experts read them across the ordinary barrier
         {
             mtl::Dispatch d;
-            d.p = &pipes.p_zero;
-            d.args = {mtl::Arg::B(s.scr), mtl::Arg::V(3 * 256)};
-            d.grid[0] = (3 * 256 + 127) / 128;
-            d.tg[0] = 128;
-            d.barrier = true;
-            ds.push_back(d);
-        }
-        {
-            mtl::Dispatch d;
-            d.p = &pipes.p_hist;
-            d.args = {mtl::Arg::B(s.ids_c), mtl::Arg::B(s.scr), mtl::Arg::V(n_ent)};
-            d.grid[0] = (uint32_t)((n_ent + 255) / 256);
-            d.tg[0] = 256;
-            d.barrier = true;
-            ds.push_back(d);
-        }
-        {
-            mtl::Dispatch d;
-            d.p = &pipes.p_exp_off;
-            d.args = {mtl::Arg::B(s.scr), mtl::Arg::B(s.scr, 512 * sizeof(int)), mtl::Arg::V((int) g.n_expert)};
+            d.p = &pipes.p_tables;
+            d.args = {mtl::Arg::B(s.ids_c), mtl::Arg::B(s.scr), mtl::Arg::B(s.srt_in_gu), mtl::Arg::B(s.srt_in_d),
+                      mtl::Arg::B(s.pos_c), mtl::Arg::V((int) g.n_expert), mtl::Arg::V(K), mtl::Arg::V(n_ent)};
             d.grid[0] = 1;
-            d.tg[0] = 1;
-            d.barrier = true;
-            ds.push_back(d);
-        }
-        {
-            mtl::Dispatch d;
-            d.p = &pipes.p_place;
-            d.args = {mtl::Arg::B(s.ids_c), mtl::Arg::B(s.scr, 256 * sizeof(int)), mtl::Arg::B(s.scr, 512 * sizeof(int)),
-                      mtl::Arg::B(s.srt_in_gu), mtl::Arg::B(s.srt_in_d), mtl::Arg::B(s.pos_c), mtl::Arg::V(K), mtl::Arg::V(n_ent)};
-            d.grid[0] = (uint32_t)((n_ent + 255) / 256);
             d.tg[0] = 256;
             d.barrier = true;
             ds.push_back(d);
         }
 
         // Routed experts (grouped, every expert's weights read once per chunk) + shared expert
-        push_c_expc(ds, pipes, m.W(L(l, "ffn_gate_exps.weight")), s.hc, s.srt_in_gu, s.scr, 512 * sizeof(int), 0, s.eg_c, N);
-        push_c_expc(ds, pipes, m.W(L(l, "ffn_up_exps.weight")), s.hc, s.srt_in_gu, s.scr, 512 * sizeof(int), 0, s.eu_c, N);
+        push_c_expc(ds, pipes, m.W(L(l, "ffn_gate_exps.weight")), s.hc, s.srt_in_gu, s.scr, 256 * sizeof(int), 0, s.eg_c, N);
+        push_c_expc(ds, pipes, m.W(L(l, "ffn_up_exps.weight")), s.hc, s.srt_in_gu, s.scr, 256 * sizeof(int), 0, s.eu_c, N);
         {
             const int n_val = n_ent * FF;
             mtl::Dispatch d;
@@ -883,7 +854,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             d.barrier = true;
             ds.push_back(d);
         }
-        push_c_expc(ds, pipes, m.W(L(l, "ffn_down_exps.weight")), s.eh_c, s.srt_in_d, s.scr, 512 * sizeof(int), 0, s.ey_c, FF);
+        push_c_expc(ds, pipes, m.W(L(l, "ffn_down_exps.weight")), s.eh_c, s.srt_in_d, s.scr, 256 * sizeof(int), 0, s.ey_c, FF);
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_down_shexp.weight")), s.sh_c, s.sy_c, nt, FS);
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_gate_inp_shexp.weight")), s.hc, s.sgate_c, nt, N);
         {
@@ -1098,7 +1069,7 @@ int run(int argc, char** argv) {
         s.router_c = cx.alloc(CT * g.n_expert * sizeof(float));
         s.ids_c = cx.alloc(CT * K * sizeof(int));
         s.wts_c = cx.alloc(CT * K * sizeof(float));
-        s.scr = cx.alloc(3 * 256 * sizeof(int));
+        s.scr = cx.alloc(2 * 256 * sizeof(int));
         s.srt_in_gu = cx.alloc(CT * K * sizeof(int));
         s.srt_in_d = cx.alloc(CT * K * sizeof(int));
         s.pos_c = cx.alloc(CT * K * sizeof(int));

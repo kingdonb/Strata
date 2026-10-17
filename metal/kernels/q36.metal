@@ -889,7 +889,9 @@ kernel void k_exp_off(device const int* cnt [[buffer(0)]],
 
 // Entry placement: entry i = (t, k) lands at row = off[e] + its rank among the entries of the same expert
 // (device atomics; the rank order varies, the numbers do not - each token's K outputs are combined in its
-// own fixed slot order by k_moe_sum_chunk).
+// own fixed slot order by k_moe_sum_chunk).  Kept for the parity test; the engine's chunk graph uses
+// k_tables instead - the chain of four dispatches with relaxed atomics and memory barriers between them
+// did not order on the M2 (the grouped experts read stale tables inside one barrier-ordered graph).
 kernel void k_place(device const int* ids [[buffer(0)]],
                     device uint* run [[buffer(1)]],
                     device const int* off [[buffer(2)]],
@@ -925,6 +927,55 @@ kernel void k_moe_sum_chunk(device float* x [[buffer(0)]],
     float acc = 0.0f;
     for (int s = 0; s < k; ++s) acc += w[(ulong) t * k + s] * y[(ulong) pos[(ulong) t * k + s] * n_out + i];
     x[(ulong) t * n + i] += acc + sigm(gs[t]) * ys[(ulong) t * n + i];
+}
+
+// The chunk's entry tables in ONE dispatch: one threadgroup of 256 threads does zero, count (threadgroup
+// atomics - the moe_mm pattern), the exclusive offsets, and the placement; the tables leave as plain
+// stores for the grouped experts' plain loads in the NEXT dispatch (across its memory barrier - the
+// dependency pattern the whole decode path is built on).  The engine's earlier four-dispatch version
+// (device atomics + inter-dispatch memory barriers) raced: k_expc read stale tables inside one
+// barrier-ordered graph, and the expert rows came back NaN-garbage.
+kernel void k_tables(device const int* ids [[buffer(0)]],
+                     device int* cnt_off [[buffer(1)]],       // [0..256) counts, [256..512) offsets
+                     device int* srt_in_gu [[buffer(2)]],
+                     device int* srt_in_d [[buffer(3)]],
+                     device int* pos [[buffer(4)]],
+                     constant int& n_expert [[buffer(5)]],
+                     constant int& K [[buffer(6)]],
+                     constant int& n_ent [[buffer(7)]],
+                     uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup atomic_uint sh_cnt[256];
+    threadgroup atomic_uint sh_run[256];
+    threadgroup int sh_off[256];
+    if (n_expert > 256) return;
+
+    sh_cnt[tid] = 0u;
+    sh_run[tid] = 0u;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < (uint) n_ent; i += 256)
+        atomic_fetch_add_explicit(&sh_cnt[ids[i]], 1u, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        int acc = 0;
+        for (int e = 0; e < n_expert; ++e) {
+            sh_off[e] = acc;
+            acc += (int) atomic_load_explicit(&sh_cnt[e], memory_order_relaxed);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < (uint) n_ent; i += 256) {
+        const int t = (int) i / K;
+        const int e = ids[i];
+        const uint row = (uint) sh_off[e] + atomic_fetch_add_explicit(&sh_run[e], 1u, memory_order_relaxed);
+        srt_in_gu[row] = t;
+        srt_in_d[row] = (int) i;
+        pos[i] = (int) row;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < (uint) n_expert) {
+        cnt_off[tid] = (int) atomic_load_explicit(&sh_cnt[tid], memory_order_relaxed);
+        cnt_off[256 + tid] = sh_off[tid];
+    }
 }
 
 // Conv for T tokens, tiles of 16 side by side (q36_engine.cu's k_conv_seq tile mode, k_conv's math):
