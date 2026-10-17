@@ -497,3 +497,127 @@ kernel void k_topk_router(device const float* router [[buffer(0)]],
     }
 }
 
+// ---------------------------------------------------------------------------
+// Split-K attention (q36_engine.cu's k_attn_part / k_attn_merge, on Metal): the attention scores no longer
+// live in threadgroup memory, so k_attn's 32 KB / 8,192-token threadgroup ceiling is gone and the context
+// is limited by the KV cache only.  One partial per (query row, chunk of SK_CELLS cells): the chunk's
+// scores, running max m and sum l, and the chunk's P.V accumulator; k_attn_sk_merge folds the chunks (the
+// softmax rescale) and applies the sigmoid gate.  The math and its order match the CUDA engine's kernels,
+// so long-context attention agrees with q36_engine.cu; at n_pos <= 8192 the original k_attn stays the
+// default (the decode path is unchanged there).  Query rows are (t * H + h): the decode step passes one
+// token (t = 0), the prompt chunks pass a row-block.  HD is attention.key_length - 256 on qwen35moe, and
+// the host refuses this path with anything else.
+constexpr int SK_HD = 256;
+constexpr int SK_CELLS = 256;
+
+// 256-thread reductions (8 simdgroups; block_sum above assumes 128 threads).  Both end with a full
+// threadgroup barrier, so writes made before the call (k_attn_sk_part's sc[]) are visible to every thread
+// after it returns - the same guarantee block_sum gives k_attn.
+static inline float sk_max(float v, threadgroup float* sh, ushort lane, ushort sgid) {
+    v = simd_max(v);
+    if (lane == 0) sh[sgid] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgid == 0) {
+        float tot = (lane < 8) ? sh[lane] : -INFINITY;
+        tot = simd_max(tot);
+        if (lane == 0) sh[0] = tot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return sh[0];
+}
+
+static inline float sk_sum(float v, threadgroup float* sh, ushort lane, ushort sgid) {
+    v = simd_sum(v);
+    if (lane == 0) sh[sgid] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgid == 0) {
+        float tot = (lane < 8) ? sh[lane] : 0.0f;
+        tot = simd_sum(tot);
+        if (lane == 0) sh[0] = tot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return sh[0];
+}
+
+kernel void k_attn_sk_part(device const float* q [[buffer(0)]],
+                           device const float* kc [[buffer(1)]],
+                           device const float* vc [[buffer(2)]],
+                           constant int& H [[buffer(3)]],
+                           constant int& HKV [[buffer(4)]],
+                           constant int& ctx [[buffer(5)]],
+                           constant float& scale [[buffer(6)]],
+                           constant int& n_chunk [[buffer(7)]],
+                           constant int& pos0 [[buffer(8)]],
+                           device float* pacc [[buffer(9)]],
+                           device float* pm [[buffer(10)]],
+                           device float* pl [[buffer(11)]],
+                           uint3 g [[threadgroup_position_in_grid]],
+                           uint tid [[thread_index_in_threadgroup]],
+                           ushort lane [[thread_index_in_simdgroup]],
+                           ushort sgid [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sh[8];
+    threadgroup float qs[SK_HD];
+    threadgroup float sc[SK_CELLS];
+    const int c = (int) g.x, row = (int) g.y;
+    const int t = row / H, h = row - t * H, kvh = h / (H / HKV);
+    const int npos = pos0 + t + 1;   // this query row sees the cells [0, pos0 + t]
+    const int p0 = c * SK_CELLS;
+    // whole threadgroup exits together: p0 and npos are threadgroup-uniform, no barrier is skipped midway
+    if (p0 >= npos) return;
+
+    const int j = (int) tid;
+    qs[j] = q[(ulong) row * SK_HD + j];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const int p = p0 + j;
+    float s = -INFINITY;
+    if (p < npos) {
+        device const float* kp = kc + ((ulong) kvh * ctx + p) * SK_HD;
+        float a = 0.0f;
+        for (int i = 0; i < SK_HD; ++i) a += qs[i] * kp[i];
+        s = a * scale;
+    }
+    const float m = sk_max(s, sh, lane, sgid);
+    const float e = (p < npos) ? exp(s - m) : 0.0f;
+    sc[j] = e;
+    const float l = sk_sum(e, sh, lane, sgid);   // its trailing barrier publishes every thread's sc[j]
+
+    const int n = min(SK_CELLS, npos - p0);
+    float acc = 0.0f;
+    device const float* vp = vc + ((ulong) kvh * ctx + p0) * SK_HD + j;
+    for (int k = 0; k < n; ++k) acc += sc[k] * vp[(ulong) k * SK_HD];
+
+    const ulong o = (ulong) row * (ulong) n_chunk + (ulong) c;
+    pacc[o * SK_HD + j] = acc;
+    if (tid == 0) {
+        pm[o] = m;
+        pl[o] = l;
+    }
+}
+
+kernel void k_attn_sk_merge(device const float* pacc [[buffer(0)]],
+                            device const float* pm [[buffer(1)]],
+                            device const float* pl [[buffer(2)]],
+                            device const float* gate [[buffer(3)]],
+                            device float* out [[buffer(4)]],
+                            constant int& H [[buffer(5)]],
+                            constant int& n_chunk [[buffer(6)]],
+                            constant int& pos0 [[buffer(7)]],
+                            uint row [[threadgroup_position_in_grid]],
+                            uint tid [[thread_index_in_threadgroup]]) {
+    const int t = (int) row / H, h = (int) row - t * H;
+    const int npos = pos0 + t + 1;
+    const int nc = (npos + SK_CELLS - 1) / SK_CELLS;
+    float M = -INFINITY;
+    for (int c = 0; c < nc; ++c) M = max(M, pm[(ulong) row * (ulong) n_chunk + c]);
+    float num = 0.0f, den = 0.0f;
+    for (int c = 0; c < nc; ++c) {
+        const ulong o = (ulong) row * (ulong) n_chunk + (ulong) c;
+        const float w = exp(pm[o] - M);
+        num += w * pacc[o * SK_HD + tid];
+        den += w * pl[o];
+    }
+    const ulong gi = (ulong) row * SK_HD + tid;
+    out[gi] = num / den * sigm(gate[gi]);
+}
+

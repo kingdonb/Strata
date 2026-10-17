@@ -101,6 +101,7 @@ struct State {
     int ctx = 4096, pos = 0;
     mtl::Buffer x, h, y, qkv, z, alpha, beta, conv_out, gdn_out, qg, k, v, q, gate, att, router, eg, eu, eh, ey, sg, su, sh, sy, sgate, wts, logits;
     mtl::Buffer ids;
+    mtl::Buffer sk_pacc, sk_pm, sk_pl;   // split-K attention partials (k_attn_sk_part / k_attn_sk_merge)
     std::vector<mtl::Buffer> conv_state, S, kc, vc;
 
     void reset() {
@@ -114,10 +115,22 @@ struct State {
 
 std::string L(int64_t l, const char* s) { return "blk." + std::to_string(l) + "." + s; }
 
+bool env_flag(const char* name) {
+    const char* e = std::getenv(name);
+    return e && *e && std::atoi(e) != 0;
+}
+
+// k_attn's scores are threadgroup memory, capped at 32 KB: 8,192 cells.  Above that (or forced by
+// STRATA_Q36M_ATTN_SK, the parity knob) the split-K kernels take over; SK_HD must be the head_dim.
+constexpr int SK_CELLS = 256;
+constexpr int SK_ROWS_MAX = 256;   // query rows per split-K dispatch (decode: n_head; prompt chunks row-block)
+constexpr int SK_TG_CAP = 8192;    // the longest context the plain k_attn path serves
+
 struct Pipelines {
     int lib = -1;
     mtl::Buffer dummy_ids;
     mtl::Pipeline p_rms, p_conv, p_gdn_gb, p_gdn, p_gated_norm, p_attn_prep, p_attn, p_swiglu, p_add, p_moe_sum, p_topk_router;
+    mtl::Pipeline p_attn_sk_part, p_attn_sk_merge;
     std::map<int, mtl::Pipeline> p_gemv;
     std::map<int, mtl::Pipeline> p_gemv_lpr8;
     std::map<int, mtl::Pipeline> p_row;
@@ -134,6 +147,8 @@ struct Pipelines {
         p_gated_norm = cx.pipeline(lib, "k_gated_norm");
         p_attn_prep = cx.pipeline(lib, "k_attn_prep");
         p_attn = cx.pipeline(lib, "k_attn");
+        p_attn_sk_part = cx.pipeline(lib, "k_attn_sk_part");
+        p_attn_sk_merge = cx.pipeline(lib, "k_attn_sk_merge");
         p_swiglu = cx.pipeline(lib, "k_swiglu");
         p_add = cx.pipeline(lib, "k_add");
         p_moe_sum = cx.pipeline(lib, "k_moe_sum");
@@ -213,7 +228,7 @@ void push_gemv(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const Ten
     ds.push_back(d);
 }
 
-void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s, int tok, std::vector<int>& ids_host) {
+void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s, int tok, std::vector<int>& ids_host, bool sk_force = false) {
     const auto& g = m.g;
     const int N = (int) g.n_embd, K = (int) m.top_k, FF = (int) g.n_ff, FS = (int) g.n_ff_shexp;
 
@@ -321,20 +336,48 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
                 d.barrier = true;
                 ds.push_back(d);
             }
-            // Attn
+            // Attn.  Above the 8,192-cell threadgroup ceiling (or with STRATA_Q36M_ATTN_SK=1, the parity
+            // knob) the split-K kernels run instead: 256-cell partials + merge, q36_engine.cu's math.
             {
                 const int H_val = H, HKV_val = HKV, D_val = D, n_pos_val = s.pos + 1, ctx_val = s.ctx;
                 const float scale_val = 1.0f / std::sqrt((float) D);
-                mtl::Dispatch d;
-                d.p = &pipes.p_attn;
-                d.args = {mtl::Arg::B(s.q), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]), mtl::Arg::B(s.gate),
-                          mtl::Arg::B(s.att), mtl::Arg::V(H_val), mtl::Arg::V(HKV_val), mtl::Arg::V(D_val),
-                          mtl::Arg::V(n_pos_val), mtl::Arg::V(ctx_val), mtl::Arg::V(scale_val)};
-                d.grid[0] = H;
-                d.tg[0] = 128;
-                d.tg_mem = (s.pos + 1) * sizeof(float);
-                d.barrier = true;
-                ds.push_back(d);
+                if (sk_force || n_pos_val > SK_TG_CAP) {
+                    if (D_val != 256) {
+                        std::fprintf(stderr, "q36_metal: split-K attention needs head_dim 256, model has %d\n", D_val);
+                        std::exit(1);
+                    }
+                    const int n_chunk = (n_pos_val + SK_CELLS - 1) / SK_CELLS;
+                    mtl::Dispatch d;
+                    d.p = &pipes.p_attn_sk_part;
+                    d.args = {mtl::Arg::B(s.q), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]),
+                              mtl::Arg::V(H_val), mtl::Arg::V(HKV_val), mtl::Arg::V(ctx_val), mtl::Arg::V(scale_val),
+                              mtl::Arg::V(n_chunk), mtl::Arg::V(s.pos),
+                              mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl)};
+                    d.grid[0] = (uint32_t) n_chunk;
+                    d.grid[1] = (uint32_t) H_val;
+                    d.tg[0] = SK_CELLS;
+                    d.barrier = true;
+                    ds.push_back(d);
+                    mtl::Dispatch dm;
+                    dm.p = &pipes.p_attn_sk_merge;
+                    dm.args = {mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl), mtl::Arg::B(s.gate), mtl::Arg::B(s.att),
+                               mtl::Arg::V(H_val), mtl::Arg::V(n_chunk), mtl::Arg::V(s.pos)};
+                    dm.grid[0] = (uint32_t) H_val;
+                    dm.tg[0] = SK_CELLS;
+                    dm.barrier = true;
+                    ds.push_back(dm);
+                } else {
+                    mtl::Dispatch d;
+                    d.p = &pipes.p_attn;
+                    d.args = {mtl::Arg::B(s.q), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]), mtl::Arg::B(s.gate),
+                              mtl::Arg::B(s.att), mtl::Arg::V(H_val), mtl::Arg::V(HKV_val), mtl::Arg::V(D_val),
+                              mtl::Arg::V(n_pos_val), mtl::Arg::V(ctx_val), mtl::Arg::V(scale_val)};
+                    d.grid[0] = H;
+                    d.tg[0] = 128;
+                    d.tg_mem = (s.pos + 1) * sizeof(float);
+                    d.barrier = true;
+                    ds.push_back(d);
+                }
             }
             push_gemv(ds, pipes, m.W(L(l, "attn_output.weight")), s.att, s.y, nullptr, 1, 0, true);
         }
@@ -509,6 +552,7 @@ int run(int argc, char** argv) {
     if (const strata::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
     if (const strata::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
     if (const strata::MetaValue* v = gm.meta().get(p + "rope.dimension_count")) m.n_rot = (int) v->u;
+    const bool sk_force = env_flag("STRATA_Q36M_ATTN_SK");
 
     // Wrap GGUF tensors no-copy directly into Metal buffers
     uint64_t total_weight_bytes = 0;
@@ -568,6 +612,34 @@ int run(int argc, char** argv) {
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
                  total_weight_bytes / (1024.0 * 1024.0 * 1024.0));
 
+    // Working-set refusal with the numbers (the CUDA engine refuses a count that cannot fit, with the
+    // numbers): weights + KV cache + recurrent state + split-K scratch + a reserve for the activations.
+    // Only enforced above the 8,192-token context the threadgroup attention could reach - at or below it
+    // every setup runs exactly as before - and STRATA_Q36M_MEM_OK=1 overrides it.
+    {
+        uint64_t kv_bytes = 0, sst_bytes = 0, conv_bytes = 0;
+        for (int64_t l = 0; l < m.g.n_layers; ++l) {
+            if (strata::core::is_qsa_layer(m.g, l)) {
+                kv_bytes += 2 * (uint64_t) m.g.n_head_kv * ctx * m.g.head_dim * sizeof(float);
+            } else {
+                sst_bytes += (uint64_t) m.g.ssm_v_heads * m.g.ssm_state_size * m.g.ssm_state_size * sizeof(float);
+                conv_bytes += (uint64_t) (m.g.ssm_d_conv - 1) * m.g.ssm_conv_channels * sizeof(float);
+            }
+        }
+        const uint64_t scratch_bytes = (uint64_t) ((ctx + SK_CELLS - 1) / SK_CELLS) * SK_ROWS_MAX * (SK_CELLS + 2) * sizeof(float);
+        const uint64_t est = total_weight_bytes + kv_bytes + sst_bytes + conv_bytes + scratch_bytes + (256ull << 20);
+        const uint64_t rec = cx.recommended_working_set();
+        if (ctx > SK_TG_CAP && est > rec && !env_flag("STRATA_Q36M_MEM_OK")) {
+            std::fprintf(stderr,
+                         "strata metal q36: ctx %d takes ~%.2f GB (weights %.2f + kv %.2f + ssm state %.2f + "
+                         "conv %.2f + attn scratch %.2f + reserve 0.25) past the recommended working set "
+                         "%.2f GB - lower --ctx or set STRATA_Q36M_MEM_OK=1\n",
+                         ctx, est / 1e9, total_weight_bytes / 1e9, kv_bytes / 1e9, sst_bytes / 1e9,
+                         conv_bytes / 1e9, scratch_bytes / 1e9, rec / 1e9);
+            return 1;
+        }
+    }
+
     // Allocate runtime state buffers
     State s;
     s.ctx = ctx;
@@ -601,6 +673,15 @@ int run(int argc, char** argv) {
     s.wts = cx.alloc(K * sizeof(float));
     s.logits = cx.alloc(g.n_vocab * sizeof(float));
     s.ids = cx.alloc(K * sizeof(int));
+
+    // Split-K attention scratch: one partial per (query row, 256-cell chunk), up to SK_ROWS_MAX rows per
+    // dispatch (decode uses n_head of them; the prompt chunks row-block to the same bound).
+    {
+        const int n_chunk_max = (ctx + SK_CELLS - 1) / SK_CELLS;
+        s.sk_pacc = cx.alloc((size_t) SK_ROWS_MAX * n_chunk_max * SK_CELLS * sizeof(float));
+        s.sk_pm = cx.alloc((size_t) SK_ROWS_MAX * n_chunk_max * sizeof(float));
+        s.sk_pl = cx.alloc((size_t) SK_ROWS_MAX * n_chunk_max * sizeof(float));
+    }
 
     for (int64_t l = 0; l < g.n_layers; ++l) {
         if (strata::core::is_qsa_layer(g, l)) {
@@ -766,7 +847,7 @@ int run(int argc, char** argv) {
 
             const auto t_prompt0 = std::chrono::steady_clock::now();
             for (size_t i = reuse; i < ids.size(); ++i) {
-                forward_token(cx, pipes, m, s, ids[i], ids_host);
+                forward_token(cx, pipes, m, s, ids[i], ids_host, sk_force);
             }
             live_tokens = ids;
             const double prompt_ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_prompt0).count() * 1000.0;
@@ -799,7 +880,7 @@ int run(int argc, char** argv) {
                     break;
                 }
 
-                forward_token(cx, pipes, m, s, cur_tok, ids_host);
+                forward_token(cx, pipes, m, s, cur_tok, ids_host, sk_force);
                 cur_tok = sample_next(temperature, top_p);
             }
 
@@ -851,7 +932,7 @@ int run(int argc, char** argv) {
     std::fprintf(stderr, "strata metal q36: evaluating prompt (%zu tokens) ...\n", prompt.size());
     const auto t_prompt0 = std::chrono::steady_clock::now();
     for (int tok : prompt) {
-        forward_token(cx, pipes, m, s, tok, ids_host);
+        forward_token(cx, pipes, m, s, tok, ids_host, sk_force);
     }
     const double prompt_time = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_prompt0).count();
     std::fprintf(stderr, "strata metal q36: prompt evaluated in %.2f s (%.1f tok/s)\n",
@@ -867,7 +948,7 @@ int run(int argc, char** argv) {
     std::fflush(stdout);
 
     for (int step = 1; step < n_gen; ++step) {
-        forward_token(cx, pipes, m, s, cur_tok, ids_host);
+        forward_token(cx, pipes, m, s, cur_tok, ids_host, sk_force);
         cur_tok = sample_next(0.0f, 1.0f);
         std::printf(" %d", cur_tok);
         std::fflush(stdout);
