@@ -120,4 +120,5 @@ target_compile_definitions(strata_metal_kernels PRIVATE
 target_link_libraries(strata_metal_kernels PUBLIC strata_metal_host mtl_rt)
 
 add_executable(strata ${S}/program/generate.cpp)
+target_compile_definitions(strata PRIVATE STRATA_HAVE_QWEN35=1)
 target_link_libraries(strata PRIVATE strata_metal_kernels strata_metal_host strata_metal_kernels)

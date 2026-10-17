@@ -29,11 +29,14 @@ td.log
 /.venv/
 /build/
 /third_party/llama.cpp
+/third_party/metal-cpp/
+strata-server.out
 /models/
 /packs/
 /mtp/
 /run-*.bat
 /run-*.sh
+/stop-*.sh
 /strata-*.json
 /strata-*.log
 /build-strata.bat
