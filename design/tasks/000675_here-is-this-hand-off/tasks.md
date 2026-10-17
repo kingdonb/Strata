@@ -3,9 +3,19 @@
 All work on branch `feat/qwen36-metal`, built and tested on the Mac (`/opt/homebrew/bin/cmake --build
 build-metal`). No CUDA/HIP/SYCL files are touched.
 
+Reviewer answers (approved design): M2 is the only test Mac (user runs intermediary tests on pushed
+intermediates); do what upstream did on the prefill default (flip after measured gates — default flip lands
+only after the Mac run passes); solo-path MTP with fixed `--mtp 2` is fine; include the opt-in FP16 KV cache;
+host-sampling check in scope (GPU argmax / top-k prefilter only if profiling shows ≥2 ms/token).
+
+NOTE (sandbox constraint): this sandbox is Linux — nothing Metal compiles or runs here. Every phase ends with
+a push to `feat/qwen36-metal` and a request to the user to build + run the phase's gates on the M2 before the
+next phase proceeds. Host C++ gets a `g++ -fsyntax-only` pass where headers allow it; MSL is checked by
+careful mirroring of proven kernels and by the Mac compile test.
+
 ## Phase A — Split-K attention, uncap the context window
 
-- [ ] Add `k_attn_part` + `k_attn_merge` to `metal/kernels/q36.metal`, copying the partial layout
+- [~] Add `k_attn_part` + `k_attn_merge` to `metal/kernels/q36.metal`, copying the partial layout
       (256-cell chunks, acc/m/l) from `src/qwen35/q36_engine.cu` (~L298-355)
 - [ ] Wire dispatch in `metal/src/engine/q36_metal.cpp`: split-K only when `n_pos > 8192`; keep `k_attn`
       default below; add a test-only env knob to force split-K at short ctx
