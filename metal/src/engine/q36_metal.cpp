@@ -286,11 +286,13 @@ void push_gemv(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const Ten
     ds.push_back(d);
 }
 
-void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s, int tok, std::vector<int>& ids_host, bool sk_force = false) {
+void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s, int tok, std::vector<int>& ids_host, bool sk_force = false, bool prompt_step = false) {
     const auto& g = m.g;
     const int N = (int) g.n_embd, K = (int) m.top_k, FF = (int) g.n_ff, FS = (int) g.n_ff_shexp;
+    const bool tr = prompt_step && env_flag("STRATA_Q36M_TRACE");   // debug: per-layer sub-graphs + checksums
 
     std::vector<mtl::Dispatch> ds;
+    if (tr && s.pos == 0) std::fprintf(stderr, "TRACE BEGIN D\n");
 
     // Embedding lookup
     {
@@ -522,6 +524,17 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
             d.tg[0] = 128;
             d.barrier = true;
             ds.push_back(d);
+        }
+
+        if (tr) {   // debug: run this layer alone and checksum the token's rows (row sums in index order)
+            cx.run_graph(ds);
+            ds.clear();
+            double xs = 0.0, hs = 0.0;
+            const float* xp = (const float*) s.x.ptr;
+            for (int i = 0; i < N; ++i) xs += xp[i];
+            const float* hp = (const float*) s.h.ptr;
+            for (int i = 0; i < N; ++i) hs += hp[i];
+            std::fprintf(stderr, "TRACE D pos=%d L=%d x=%.17g h=%.17g\n", (int) s.pos, (int) l, xs, hs);
         }
     }
 
@@ -868,8 +881,27 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             d.barrier = true;
             ds.push_back(d);
         }
+
+        if (env_flag("STRATA_Q36M_TRACE")) {   // debug: run this layer alone and checksum every row
+            if (pos0 == 0 && l == 0) std::fprintf(stderr, "TRACE BEGIN C\n");
+            cx.run_graph(ds);
+            ds.clear();
+            double xs = 0.0, hs = 0.0;
+            const float* xp = (const float*) s.xc.ptr;
+            const float* hp = (const float*) s.hc.ptr;
+            for (int t = 0; t < nt; ++t) {
+                double rx = 0.0, rh = 0.0;
+                for (int i = 0; i < N; ++i) rx += xp[(size_t) t * N + i];
+                for (int i = 0; i < N; ++i) rh += hp[(size_t) t * N + i];
+                xs += rx;
+                hs += rh;
+            }
+            std::fprintf(stderr, "TRACE C nt=%d pos0=%lld L=%lld x=%.17g h=%.17g\n", nt, (long long) pos0,
+                         (long long) l, xs, hs);
+        }
     }
 
+    if (env_flag("STRATA_Q36M_TRACE")) return 0.0;   // the per-layer sub-graphs already ran
     return cx.run_graph(ds);
 }
 
@@ -1283,7 +1315,7 @@ int run(int argc, char** argv) {
                 }
             }
             for (; pi < ids.size(); ++pi) {
-                forward_token(cx, pipes, m, s, ids[pi], ids_host, sk_force);
+                forward_token(cx, pipes, m, s, ids[pi], ids_host, sk_force, true);
             }
             live_tokens = ids;
             const double prompt_ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_prompt0).count() * 1000.0;
@@ -1379,7 +1411,7 @@ int run(int argc, char** argv) {
             }
         }
         for (; pi < prompt.size(); ++pi) {
-            forward_token(cx, pipes, m, s, prompt[pi], ids_host, sk_force);
+            forward_token(cx, pipes, m, s, prompt[pi], ids_host, sk_force, true);
         }
     }
     const double prompt_time = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_prompt0).count();
