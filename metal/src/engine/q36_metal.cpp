@@ -104,7 +104,7 @@ struct State {
     mtl::Buffer sk_pacc, sk_pm, sk_pl;   // split-K attention partials (k_attn_sk_part / k_attn_sk_merge)
     // prompt-chunk buffers (allocated when --prefill is on; CT = the chunk size)
     mtl::Buffer toks_c, xc, hc, yc, qkv_c, z_c, alpha_c, beta_c, conv_out_c, gdn_out_c, qg_c, k_c, v_c, q_c, gate_c, att_c;
-    mtl::Buffer router_c, ids_c, wts_c, scr, srt_in_gu, srt_in_d, pos_c;
+    mtl::Buffer router_c, ids_c, wts_c, scr, srt_in_gu, srt_in_d, pos_c, zero_ids;
     mtl::Buffer eg_c, eu_c, eh_c, ey_c, sg_c, su_c, sh_c, sy_c, sgate_c;
     std::vector<mtl::Buffer> conv_state, S, kc, vc;
 
@@ -136,7 +136,7 @@ struct Pipelines {
     mtl::Pipeline p_rms, p_conv, p_gdn_gb, p_gdn, p_gated_norm, p_attn_prep, p_attn, p_swiglu, p_add, p_moe_sum, p_topk_router;
     mtl::Pipeline p_attn_sk_part, p_attn_sk_merge;
     // prompt-chunk pipelines (init_prompt, when --prefill is on)
-    std::map<int, mtl::Pipeline> p_emb_c, p_gemv_c, p_gemv_lpr8_c, p_expc;
+    std::map<int, mtl::Pipeline> p_emb_c, p_gemv_c, p_expc;
     mtl::Pipeline p_route_c, p_zero, p_hist, p_exp_off, p_place, p_moe_sum_c, p_conv_c, p_gdn_c, p_gated_norm_c, p_attn_prep_c;
     std::map<int, mtl::Pipeline> p_gemv;
     std::map<int, mtl::Pipeline> p_gemv_lpr8;
@@ -204,7 +204,6 @@ struct Pipelines {
     void init_prompt(mtl::Context& cx) {
         auto get_emb_c = [&](int ty, const char* fn) { p_emb_c[ty] = cx.pipeline(lib, fn); };
         auto get_gemv_c = [&](int ty, const char* fn) { p_gemv_c[ty] = cx.pipeline(lib, fn); };
-        auto get_gemv_lpr8_c = [&](int ty, const char* fn) { p_gemv_lpr8_c[ty] = cx.pipeline(lib, fn); };
         auto get_expc = [&](int ty, const char* fn) { p_expc[ty] = cx.pipeline(lib, fn); };
 
         get_emb_c(T_F32, "k_emb_chunk_T_F32");
@@ -228,11 +227,6 @@ struct Pipelines {
         get_gemv_c(T_IQ2_XS, "k_gemv_c_T_IQ2_XS");
         get_gemv_c(T_IQ3_XXS, "k_gemv_c_T_IQ3_XXS");
         get_gemv_c(T_IQ4_XS, "k_gemv_c_T_IQ4_XS");
-
-        get_gemv_lpr8_c(T_Q4_K, "k_gemv_lpr8_c_T_Q4_K");
-        get_gemv_lpr8_c(T_Q5_K, "k_gemv_lpr8_c_T_Q5_K");
-        get_gemv_lpr8_c(T_Q6_K, "k_gemv_lpr8_c_T_Q6_K");
-        get_gemv_lpr8_c(T_IQ2_XS, "k_gemv_lpr8_c_T_IQ2_XS");
 
         get_expc(T_F32, "k_expc_T_F32");
         get_expc(T_BF16, "k_expc_T_BF16");
@@ -552,12 +546,36 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
     ++s.pos;
 }
 
-// Dense projection of a chunk: the weights read once per threadgroup-window (tpb tokens walked inside).
-// The big outputs take the whole chunk in one threadgroup-row; the small ones 32 tokens per row (more
-// threadgroups, and their weights are too small for the re-reads to matter).
+// Dense projection of a chunk.  The n_in != 2048 products run through k_gemv_c: the tokens walked inside
+// the threadgroup, each weight row read once, each (token, output) summed in the decode kernel's exact
+// order.  The n_in == 2048 products run through the DECODE k_gemv_lpr8 with grid[1] = nt instead - its
+// serial deq path compiles to different fma contraction inside a token loop (~1 ulp; the parity test), and
+// greedy decoding turns a 1-ulp logit difference into different tokens - so the decode kernel's own shape
+// is the exact one, and the re-read weights stay L2-resident across the chunk's tokens.
 void push_c_gemv(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const Tensor& w, const mtl::Buffer& x,
                  const mtl::Buffer& y, int nt, int x_stride) {
     const int n_in = (int) w.shape[0], n_out = (int) w.shape[1];
+    if (n_in == 2048) {
+        auto it_l = pipes.p_gemv_lpr8.find(w.type);
+        if (it_l != pipes.p_gemv_lpr8.end()) {
+            GemvParam prm;
+            prm.row_bytes = w.row_bytes;
+            prm.expert_bytes = 0;
+            prm.n_in = n_in;
+            prm.n_out = n_out;
+            prm.x_stride = (uint64_t) x_stride;
+            mtl::Dispatch d;
+            d.p = &it_l->second;
+            d.grid[0] = (uint32_t)((n_out + 15) / 16);
+            d.grid[1] = (uint32_t) nt;
+            d.tg[0] = 128;
+            d.barrier = true;
+            d.args = {mtl::Arg::B(w.b, w.offset), mtl::Arg::B(x), mtl::Arg::B(y), mtl::Arg::B(pipes.zero_ids),
+                      mtl::Arg::V(prm)};
+            ds.push_back(d);
+            return;
+        }
+    }
     auto it_c = pipes.p_gemv_c.find(w.type);
     if (it_c == pipes.p_gemv_c.end()) {
         std::fprintf(stderr, "q36_metal: unhandled chunk GEMV type %d\n", w.type);
@@ -572,17 +590,10 @@ void push_c_gemv(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const T
     prm.x_stride = (uint64_t) x_stride;
 
     mtl::Dispatch d;
-    auto it_l = (n_in == 2048) ? pipes.p_gemv_lpr8_c.find(w.type) : pipes.p_gemv_lpr8_c.end();
-    if (it_l != pipes.p_gemv_lpr8_c.end()) {
-        d.p = &it_l->second;
-        d.grid[0] = (uint32_t)((n_out + 15) / 16);
-        d.tg[0] = 128;
-    } else {
-        d.p = &it_c->second;
-        d.grid[0] = (uint32_t)((n_out + 7) / 8);
-        d.tg[0] = 256;   // 8 simdgroups: the kernel's row = tg.x * 8 + sgid
-    }
+    d.p = &it_c->second;
+    d.grid[0] = (uint32_t)((n_out + 7) / 8);
     d.grid[1] = (uint32_t)((nt + tpb - 1) / tpb);
+    d.tg[0] = 256;   // 8 simdgroups: the kernel's row = tg.x * 8 + sgid
     d.barrier = true;
     d.args = {mtl::Arg::B(w.b, w.offset), mtl::Arg::B(x), mtl::Arg::B(y), mtl::Arg::V(prm),
               mtl::Arg::V(tpb), mtl::Arg::V(0), mtl::Arg::V(nt)};
@@ -1089,6 +1100,7 @@ int run(int argc, char** argv) {
         s.srt_in_gu = cx.alloc(CT * K * sizeof(int));
         s.srt_in_d = cx.alloc(CT * K * sizeof(int));
         s.pos_c = cx.alloc(CT * K * sizeof(int));
+        s.zero_ids = cx.alloc(CT * sizeof(int));   // stays zero: the decode lpr8's per-token dummy expert id
         s.eg_c = cx.alloc(CT * K * FF * sizeof(float));
         s.eu_c = cx.alloc(CT * K * FF * sizeof(float));
         s.eh_c = cx.alloc(CT * K * FF * sizeof(float));

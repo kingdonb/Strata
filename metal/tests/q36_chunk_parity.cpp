@@ -91,7 +91,7 @@ int main() {
     mtl::Pipeline p_row = pipe("k_row_T_Q8_0"), p_emb = pipe("k_emb_chunk_T_Q8_0");
     mtl::Pipeline p_g_f32 = pipe("k_gemv_T_F32"), p_g_q8 = pipe("k_gemv_T_Q8_0"), p_g_q4k = pipe("k_gemv_T_Q4_K");
     mtl::Pipeline p_gc_f32 = pipe("k_gemv_c_T_F32"), p_gc_q8 = pipe("k_gemv_c_T_Q8_0"), p_gc_q4k = pipe("k_gemv_c_T_Q4_K");
-    mtl::Pipeline p_lpr8 = pipe("k_gemv_lpr8_T_Q4_K"), p_lpr8c = pipe("k_gemv_lpr8_c_T_Q4_K");
+    mtl::Pipeline p_lpr8 = pipe("k_gemv_lpr8_T_Q4_K");
     mtl::Pipeline p_topk = pipe("k_topk_router"), p_route = pipe("k_route_chunk");
     mtl::Pipeline p_zero = pipe("k_zero"), p_hist = pipe("k_hist"), p_off = pipe("k_exp_off"), p_place = pipe("k_place");
     mtl::Pipeline p_expc = pipe("k_expc_T_Q4_K");
@@ -246,7 +246,9 @@ int main() {
         check("gemv q4_K", y1.ptr, y2.ptr, 4 * T * NOUT);
     }
 
-    // ---- 5. the n_in = 2048 lpr8 gemv (Q4_K), tpb = T and tpb = 2 ------------------------------------------
+    // ---- 5. the n_in = 2048 lpr8 gemv: the engine's chunk path dispatches the DECODE kernel itself with
+    // grid[1] = nt (a token-loop twin differed by ~1 ulp: the serial deq path contracts fma differently
+    // inside a loop).  This stage guards that path: decode kernel per token vs decode kernel, grid[1] = T.
     {
         const int NIN = 2048, NOUT = 64;
         const uint64_t RB = 8ull * 144;
@@ -254,42 +256,31 @@ int main() {
         for (int i = 0; i < T * NIN; ++i) hin.as<float>()[i] = r.sym();
         mtl::Buffer W = cx.alloc(RB * NOUT);
         for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym();
-        mtl::Buffer y1 = cx.alloc(4 * T * NOUT), y2 = cx.alloc(4 * T * NOUT), y3 = cx.alloc(4 * T * NOUT);
-        for (int pass = 0; pass < 2; ++pass) {
-            const int tpb = pass == 0 ? T : 2;
-            std::vector<mtl::Dispatch> ds;
-            for (int t = 0; t < T; ++t) {
-                GemvParam p{RB, 0, NIN, NOUT, 0};
-                mtl::Dispatch d;
-                d.p = &p_lpr8;
-                d.args = {mtl::Arg::B(W), mtl::Arg::B(hin, 4 * (size_t) t * NIN), mtl::Arg::B(y1, 4 * (size_t) t * NOUT),
-                          mtl::Arg::B(dummy_ids), mtl::Arg::V(p)};
-                d.grid[0] = (NOUT + 15) / 16;
-                d.grid[1] = 1;
-                d.tg[0] = 128;
-                d.barrier = true;
-                ds.push_back(d);
-            }
-            cx.run_graph(ds);
-            GemvParam p{RB, 0, NIN, NOUT, (unsigned long) NIN};
+        mtl::Buffer zeros = cx.alloc(4 * T);
+        mtl::Buffer y1 = cx.alloc(4 * T * NOUT), y2 = cx.alloc(4 * T * NOUT);
+        std::vector<mtl::Dispatch> ds;
+        for (int t = 0; t < T; ++t) {
+            GemvParam p{RB, 0, NIN, NOUT, 0};
             mtl::Dispatch d;
-            d.p = &p_lpr8c;
-            d.args = {mtl::Arg::B(W), mtl::Arg::B(hin), mtl::Arg::B(y2), mtl::Arg::V(p), mtl::Arg::V(tpb),
-                      mtl::Arg::V(0), mtl::Arg::V(T)};
+            d.p = &p_lpr8;
+            d.args = {mtl::Arg::B(W), mtl::Arg::B(hin, 4 * (size_t) t * NIN), mtl::Arg::B(y1, 4 * (size_t) t * NOUT),
+                      mtl::Arg::B(dummy_ids), mtl::Arg::V(p)};
             d.grid[0] = (NOUT + 15) / 16;
-            d.grid[1] = (T + tpb - 1) / tpb;
+            d.grid[1] = 1;
             d.tg[0] = 128;
-            cx.run_graph({d});
-            // run the chunk kernel again into y3: a run-to-run difference would be a race, not arithmetic
-            mtl::Dispatch d2 = d;
-            d2.args = {mtl::Arg::B(W), mtl::Arg::B(hin), mtl::Arg::B(y3), mtl::Arg::V(p), mtl::Arg::V(tpb),
-                       mtl::Arg::V(0), mtl::Arg::V(T)};
-            cx.run_graph({d2});
-            char name[32];
-            std::snprintf(name, sizeof(name), "lpr8 q4_K tpb=%d", tpb);
-            check(name, y1.ptr, y2.ptr, 4 * T * NOUT);
-            check("lpr8 rerun", y2.ptr, y3.ptr, 4 * T * NOUT);
+            d.barrier = true;
+            ds.push_back(d);
         }
+        cx.run_graph(ds);
+        GemvParam p{RB, 0, NIN, NOUT, (unsigned long) NIN};
+        mtl::Dispatch d;
+        d.p = &p_lpr8;
+        d.args = {mtl::Arg::B(W), mtl::Arg::B(hin), mtl::Arg::B(y2), mtl::Arg::B(zeros), mtl::Arg::V(p)};
+        d.grid[0] = (NOUT + 15) / 16;
+        d.grid[1] = T;
+        d.tg[0] = 128;
+        cx.run_graph({d});
+        check("lpr8 grid[1]=T", y1.ptr, y2.ptr, 4 * T * NOUT);
     }
 
     // ---- 6. top-k routing ----------------------------------------------------------------------------------

@@ -737,55 +737,12 @@ INST_GEMV_C(T_IQ2_XS)
 INST_GEMV_C(T_IQ3_XXS)
 INST_GEMV_C(T_IQ4_XS)
 
-// The n_in = 2048 products of the chunk: k_gemv_lpr8 with the tokens inside; each token's 2,048 inputs
-// are cached in threadgroup memory (8 KB) one token at a time.  Same per (token, output) order as
-// k_gemv_lpr8 (one block of QK per lane, xor-butterfly over the 8 lanes).
-template <int F>
-kernel void k_gemv_lpr8_c(device const uchar* W [[buffer(0)]],
-                          device const float* x [[buffer(1)]],
-                          device float* y [[buffer(2)]],
-                          constant GemvParam& p [[buffer(3)]],
-                          constant int& tpb [[buffer(4)]],
-                          constant int& t0 [[buffer(5)]],
-                          constant int& nt [[buffer(6)]],
-                          uint3 tg [[threadgroup_position_in_grid]],
-                          uint tid [[thread_index_in_threadgroup]],
-                          ushort lane [[thread_index_in_simdgroup]],
-                          ushort sgid [[simdgroup_index_in_threadgroup]]) {
-    constexpr int QK = fmt<F>::QK;
-    constexpr int BB = fmt<F>::BB;
-
-    threadgroup float sh_x[2048];
-    const int r_in_sg = lane / 8;
-    const int li = lane % 8;
-    const int o = int(tg.x * 16 + sgid * 4 + r_in_sg);
-    device const uchar* row = W + (ulong) o * p.row_bytes;
-    device const uchar* b = row + (ulong) li * BB;
-
-    const int tb = t0 + (int) tg.y * tpb;
-    const int te = min(tb + tpb, t0 + nt);
-    for (int t = tb; t < te; ++t) {
-        device const float4* xs4 = (device const float4*)(x + (ulong) (t - t0) * p.x_stride);
-        threadgroup float4* sh_x4 = (threadgroup float4*)sh_x;
-        for (int i = tid; i < 512; i += 128) sh_x4[i] = xs4[i];
-        // every thread reaches both barriers: the o >= n_out simdgroups only skip the arithmetic
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (o < p.n_out) {
-            float acc = deq_dot_block<F>(b, sh_x + li * QK, nullptr);
-            acc += simd_shuffle_xor(acc, 4);
-            acc += simd_shuffle_xor(acc, 2);
-            acc += simd_shuffle_xor(acc, 1);
-            if (li == 0) y[(ulong) (t - t0) * p.n_out + o] = acc;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);   // sh_x is rewritten by the next token
-    }
-}
-
-#define INST_GEMV_LPR8_C(T) template [[host_name("k_gemv_lpr8_c_" #T)]] kernel decltype(k_gemv_lpr8_c<T>) k_gemv_lpr8_c<T>;
-INST_GEMV_LPR8_C(T_Q4_K)
-INST_GEMV_LPR8_C(T_Q5_K)
-INST_GEMV_LPR8_C(T_Q6_K)
-INST_GEMV_LPR8_C(T_IQ2_XS)
+// The n_in = 2048 products of the chunk do NOT get a token-loop kernel: the serial deq_dot path that the
+// threadgroup-cached x forces compiles to different fma contraction inside a token loop than in the decode
+// kernel's straight-line shape (the parity test: ~1 ulp on most outputs), and greedy decoding turns a
+// 1-ulp logit difference into different tokens on near-ties.  The engine dispatches the DECODE kernel
+// itself with grid[1] = nt instead (push_c_gemv): bit-identical by construction, and the re-read weights
+// stay in the L2 across the chunk's tokens of one layer.
 
 // Routed experts for the chunk, grouped per expert so every expert's weights are read once: the chunk's
 // T x K entries are placed by k_place into per-expert runs; this kernel walks an expert's entries with
@@ -1097,7 +1054,8 @@ kernel void k_gated_norm_chunk(device float* o [[buffer(0)]],
 }
 
 // Attention prep for T tokens: k_attn_prep over grid (T, H + HKV); q / gate rows land at (t * H + head),
-// the split-K kernels' row order; k / v land in the shared KV cache at position pos0 + t.
+// the split-K kernels' row order; k / v land in the shared KV cache at position pos0 + t.  Buffer indices
+// are the args' positions (the runtime binds them positionally).
 kernel void k_attn_prep_chunk(device const float* qg [[buffer(0)]],
                               device const float* kx [[buffer(1)]],
                               device const float* vx [[buffer(2)]],
@@ -1108,13 +1066,13 @@ kernel void k_attn_prep_chunk(device const float* qg [[buffer(0)]],
                               device float* kc [[buffer(7)]],
                               device float* vc [[buffer(8)]],
                               constant int& H [[buffer(9)]],
-                              constant int& HKV [[buffer(16)]],
-                              constant int& D [[buffer(10)]],
-                              constant int& n_rot [[buffer(11)]],
-                              constant int& pos0 [[buffer(12)]],
-                              constant int& ctx [[buffer(13)]],
-                              constant float& base [[buffer(14)]],
-                              constant float& eps [[buffer(15)]],
+                              constant int& HKV [[buffer(10)]],
+                              constant int& D [[buffer(11)]],
+                              constant int& n_rot [[buffer(12)]],
+                              constant int& pos0 [[buffer(13)]],
+                              constant int& ctx [[buffer(14)]],
+                              constant float& base [[buffer(15)]],
+                              constant float& eps [[buffer(16)]],
                               uint3 g [[threadgroup_position_in_grid]],
                               uint tid [[thread_index_in_threadgroup]],
                               ushort lane [[thread_index_in_simdgroup]],
