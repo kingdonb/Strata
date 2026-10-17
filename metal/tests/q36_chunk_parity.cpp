@@ -99,6 +99,8 @@ int main() {
     mtl::Pipeline p_expc = pipe("k_expc_T_Q4_K");
     mtl::Pipeline p_expc_iq2 = pipe("k_expc_T_IQ2_XS"), p_expc_iq3 = pipe("k_expc_T_IQ3_XXS");
     mtl::Pipeline p_g_iq2 = pipe("k_gemv_T_IQ2_XS"), p_g_iq3 = pipe("k_gemv_T_IQ3_XXS");
+    mtl::Pipeline p_swiglu = pipe("k_swiglu");
+    mtl::Pipeline p_rms = pipe("k_rms");
     mtl::Pipeline p_conv = pipe("k_conv"), p_convc = pipe("k_conv_chunk");
     mtl::Pipeline p_gdn = pipe("k_gdn"), p_gdnc = pipe("k_gdn_chunk");
     mtl::Pipeline p_gn = pipe("k_gated_norm"), p_gnc = pipe("k_gated_norm_chunk");
@@ -741,6 +743,145 @@ int main() {
         }
         cx.run_graph(ds2);
         check("sk rows", att1.ptr, att2.ptr, 4 * T * H * 256);
+    }
+
+    // ---- 14. the full layer chain as ONE barrier-ordered graph (the engine's structure) vs the same
+    // dispatches as separate graphs (the stage tests' structure): embed -> rms -> the GDN layer's products ->
+    // add -> post-norm -> router -> route -> the atomic entry tables -> grouped experts -> combine.  All the
+    // kernels are proven exact stage by stage; this stage asks whether the ONE-GRAPH barrier ordering keeps
+    // them exact too (the atomics + the table-dependent gemvs are the only cross-dispatch hazards).
+    {
+        mtl::Buffer W_e = cx.alloc(32 * (uint64_t) (N / 32) * 34);   // Q8_0 embedding rows, vocab 32
+        for (size_t i = 0; i < W_e.bytes; ++i) W_e.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        const uint64_t RBE = (uint64_t) (N / 32) * 34;
+        int toks[T];
+        for (int& t : toks) t = (int) (r.uni() * 32);
+        mtl::Buffer toks_b = cx.alloc(sizeof(toks));
+        std::memcpy(toks_b.ptr, toks, sizeof(toks));
+
+        const uint64_t RBO = 74ull;   // IQ2_XS rows of n_in = N = 256
+        const uint64_t EBO = RBO * FF;
+        mtl::Buffer W_g = cx.alloc(NEXP * EBO), W_u = cx.alloc(NEXP * EBO);
+        for (size_t i = 0; i < W_g.bytes; ++i) W_g.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        for (size_t i = 0; i < W_u.bytes; ++i) W_u.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        mtl::Buffer w_norm = cx.alloc(4 * N);
+
+        // the layer's shared inputs: post-norm hidden is produced in-graph; build the router/expert inputs
+        // from it.  Run the chain TWICE into separate buffer sets: once as ONE graph, once as N graphs.
+        mtl::Buffer xc1 = cx.alloc(4 * T * N), hc1 = cx.alloc(4 * T * N), yc1 = cx.alloc(4 * T * N);
+        mtl::Buffer xc2 = cx.alloc(4 * T * N), hc2 = cx.alloc(4 * T * N), yc2 = cx.alloc(4 * T * N);
+        mtl::Buffer r1 = cx.alloc(4 * T * NEXP), r2 = cx.alloc(4 * T * NEXP);
+        mtl::Buffer id1 = cx.alloc(4 * T * K), wt1 = cx.alloc(4 * T * K);
+        mtl::Buffer id2 = cx.alloc(4 * T * K), wt2 = cx.alloc(4 * T * K);
+        mtl::Buffer scr1 = cx.alloc(4 * 3 * 256), scr2 = cx.alloc(4 * 3 * 256);
+        mtl::Buffer sg1 = cx.alloc(4 * T * K * FF), sg2 = cx.alloc(4 * T * K * FF);
+        mtl::Buffer su1 = cx.alloc(4 * T * K * FF), su2 = cx.alloc(4 * T * K * FF);
+        mtl::Buffer sh1 = cx.alloc(4 * T * K * FF), sh2 = cx.alloc(4 * T * K * FF);
+        mtl::Buffer ey1 = cx.alloc(4 * T * K * N), ey2 = cx.alloc(4 * T * K * N);
+        mtl::Buffer pos1 = cx.alloc(4 * T * K), pos2 = cx.alloc(4 * T * K);
+        mtl::Buffer sr1 = cx.alloc(4 * T * K), sr2 = cx.alloc(4 * T * K);
+        mtl::Pipeline p_emb = pipe("k_emb_chunk_T_Q8_0");
+        mtl::Pipeline p_gc_iq2 = pipe("k_gemv_c_T_IQ2_XS");
+
+        auto chain = [&](std::vector<mtl::Dispatch>& ds, mtl::Buffer& xc, mtl::Buffer& hc, mtl::Buffer& yc,
+                         mtl::Buffer& ro, mtl::Buffer& ids, mtl::Buffer& wts, mtl::Buffer& scr, mtl::Buffer& eg,
+                         mtl::Buffer& eu, mtl::Buffer& eh, mtl::Buffer& ey, mtl::Buffer& pos, mtl::Buffer& srt) {
+            mtl::Dispatch d0;
+            d0.p = &p_emb;
+            d0.args = {mtl::Arg::B(W_e), mtl::Arg::B(toks_b), mtl::Arg::B(xc), mtl::Arg::V(RBE), mtl::Arg::V(N), mtl::Arg::V(N)};
+            d0.grid[0] = T;
+            d0.tg[0] = 128;
+            d0.barrier = true;
+            ds.push_back(d0);
+            mtl::Dispatch d1;
+            d1.p = &p_rms;
+            d1.args = {mtl::Arg::B(xc), mtl::Arg::B(w_norm), mtl::Arg::B(hc), mtl::Arg::V(N), mtl::Arg::V(eps)};
+            d1.grid[0] = T;
+            d1.tg[0] = 128;
+            d1.barrier = true;
+            ds.push_back(d1);
+            mtl::Dispatch d2;
+            d2.p = &p_gc_iq2;
+            d2.args = {mtl::Arg::B(W_g), mtl::Arg::B(hc), mtl::Arg::B(ro),
+                       mtl::Arg::V(GemvParam{RBO, 0, N, NEXP, (unsigned long) N}), mtl::Arg::V(1), mtl::Arg::V(0), mtl::Arg::V(T)};
+            d2.grid[0] = (NEXP + 7) / 8;
+            d2.grid[1] = 1;
+            d2.tg[0] = 256;
+            d2.barrier = true;
+            ds.push_back(d2);
+            mtl::Dispatch d3;
+            d3.p = &p_route;
+            d3.args = {mtl::Arg::B(ro), mtl::Arg::B(ids), mtl::Arg::B(wts), mtl::Arg::V(NEXP), mtl::Arg::V(K)};
+            d3.grid[0] = T;
+            d3.tg[0] = 256;
+            d3.barrier = true;
+            ds.push_back(d3);
+            mtl::Dispatch dz;
+            dz.p = &p_zero;
+            dz.args = {mtl::Arg::B(scr), mtl::Arg::V(3 * 256)};
+            dz.grid[0] = 6;
+            dz.tg[0] = 128;
+            dz.barrier = true;
+            ds.push_back(dz);
+            mtl::Dispatch dh;
+            dh.p = &p_hist;
+            dh.args = {mtl::Arg::B(ids), mtl::Arg::B(scr), mtl::Arg::V(T * K)};
+            dh.grid[0] = 1;
+            dh.tg[0] = 256;
+            dh.barrier = true;
+            ds.push_back(dh);
+            mtl::Dispatch df;
+            df.p = &p_off;
+            df.args = {mtl::Arg::B(scr), mtl::Arg::B(scr, 512 * 4), mtl::Arg::V(NEXP)};
+            df.grid[0] = 1;
+            df.tg[0] = 1;
+            df.barrier = true;
+            ds.push_back(df);
+            mtl::Dispatch dpl;
+            dpl.p = &p_place;
+            dpl.args = {mtl::Arg::B(ids), mtl::Arg::B(scr, 256 * 4), mtl::Arg::B(scr, 512 * 4), mtl::Arg::B(srt),
+                        mtl::Arg::B(srt), mtl::Arg::B(pos), mtl::Arg::V(K), mtl::Arg::V(T * K)};
+            dpl.grid[0] = 1;
+            dpl.tg[0] = 256;
+            dpl.barrier = true;
+            ds.push_back(dpl);
+            GemvParam pe{RBO, EBO, N, FF, (unsigned long) N};
+            mtl::Dispatch d4;
+            d4.p = &p_expc_iq2;
+            d4.args = {mtl::Arg::B(W_g), mtl::Arg::B(hc), mtl::Arg::B(srt), mtl::Arg::B(scr, 512 * 4),
+                       mtl::Arg::B(scr), mtl::Arg::B(eg), mtl::Arg::V(pe)};
+            d4.grid[0] = (FF + 7) / 8;
+            d4.grid[1] = NEXP;
+            d4.tg[0] = 256;
+            d4.barrier = true;
+            ds.push_back(d4);
+            mtl::Dispatch d5;
+            d5.p = &p_expc_iq2;
+            d5.args = {mtl::Arg::B(W_u), mtl::Arg::B(hc), mtl::Arg::B(srt), mtl::Arg::B(scr, 512 * 4),
+                       mtl::Arg::B(scr), mtl::Arg::B(eu), mtl::Arg::V(pe)};
+            d5.grid[0] = (FF + 7) / 8;
+            d5.grid[1] = NEXP;
+            d5.tg[0] = 256;
+            d5.barrier = true;
+            ds.push_back(d5);
+            mtl::Dispatch dsw;
+            dsw.p = &p_swiglu;
+            dsw.args = {mtl::Arg::B(eg), mtl::Arg::B(eu), mtl::Arg::B(eh), mtl::Arg::V(T * K * FF)};
+            dsw.grid[0] = (T * K * FF + 127) / 128;
+            dsw.tg[0] = 128;
+            dsw.barrier = true;
+            ds.push_back(dsw);
+        };
+        std::vector<mtl::Dispatch> one, many;
+        chain(one, xc1, hc1, yc1, r1, id1, wt1, scr1, sg1, su1, sh1, ey1, pos1, sr1);
+        chain(many, xc2, hc2, yc2, r2, id2, wt2, scr2, sg2, su2, sh2, ey2, pos2, sr2);
+        cx.run_graph(one);
+        for (const auto& d : many) cx.run_graph({d});
+        check("chain router", r1.ptr, r2.ptr, 4 * T * NEXP);
+        check("chain route ids", id1.ptr, id2.ptr, 4 * T * K);
+        check("chain srt_gu", sr1.ptr, sr2.ptr, 4 * T * K);
+        check("chain experts", sg1.ptr, sg2.ptr, 4 * T * K * FF);
+        check("chain combine-in", sh1.ptr, sh2.ptr, 4 * T * K * FF);
     }
 
     std::printf(g_fails ? "FAILURES: %d\n" : "all stages bit-identical\n", g_fails);
