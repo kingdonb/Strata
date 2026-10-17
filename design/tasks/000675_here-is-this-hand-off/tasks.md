@@ -15,6 +15,9 @@ careful mirroring of proven kernels and by the Mac compile test.
 
 ## Phase A — Split-K attention, uncap the context window
 
+(pushed through 67f098fb; the two verification bullets below are the user's Mac round — everything else in
+Phases A and B is code-complete and awaiting it)
+
 - [x] Add `k_attn_part` + `k_attn_merge` to `metal/kernels/q36.metal`, copying the partial layout
       (256-cell chunks, acc/m/l) from `src/qwen35/q36_engine.cu` (~L298-355) — `k_attn_sk_part` /
       `k_attn_sk_merge` pushed in 65037a91
@@ -56,10 +59,18 @@ careful mirroring of proven kernels and by the Mac compile test.
 
 ## Phase C — MTP speculative decoding
 
+(Paused at the phase gate: A+B await the Mac verification round before MTP builds on the chunk machinery.
+The design is settled — CUDA's spec_step mirrored: redo-row draft call (redo = the last window's accepted
+drafts, seeded by that window's hmain rows), chained draft seeded by the block's own shnorm output, verify
+window [x, d1..d2] with per-row head + argmax, accept-prefix rewind = checkpoint S/conv + re-run kept rows
+through the chunk path (bit-identical), the MTP block as an attention layer with its own KV cache.
+Greedy-only, `--mtp 2`, off by default; drafts skipped when produced + 3 > max_new or near ctx end, so a
+burst is never cut mid-way and no stop-race rewind is needed in v1.)
+
 - [ ] Load `blk.40` nextn weights (`nextn.enorm/hnorm/shared_head_norm`, `eh_proj`, block layer weights) when
       `--mtp > 0`; keep the current skip when off
 - [ ] MTP draft step: one MTP-layer forward proposing up to 2 tokens
-- [ ] Verify window (≤3 rows) through the Phase B chunk machinery: accept prefix, resample at first mismatch;
+- [ ] Verify window (≤3 rows) through the chunk machinery: accept prefix, resample at first mismatch;
       stop tokens, `STOP` cancel, length and ctx-end guards respected
 - [ ] Gate: `--mtp 2` greedy text identical to `--mtp 0` on the 10 parity prompts; measured decode tok/s ratio
       on the same Mac/day; keep opt-in unless ≥1.2x measured

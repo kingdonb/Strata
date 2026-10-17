@@ -119,4 +119,46 @@ and its math order matches the CUDA engine (cross-backend parity).
   `qwen35::run(argc, argv)`; the Python server (`serve/server.py`) spawns this process and parses
   `READY/T/DONE` — engine-local flags ride through argv, no server change expected.
 - The same serve protocol means the CUDA gates in `tools/qwen35/` double as Metal gates — reuse them before
-  writing new harnesses.
+  writing new harnesses (`q36_solo_gate.py --exe ./build-metal/strata --args "--native <model> ..."`).
+
+## Implementation notes (Phases A+B, as built)
+
+- **Bit-identical chunking instead of upstream's BF16 re-round.** Upstream's CUDA chunk path dequantizes
+  weights to BF16 and runs cuBLAS (hence its KL 4e-3 vs the 512 baseline). Metal has no cuBLAS; instead the
+  chunk kernels walk the tokens INSIDE the threadgroup so each weight row is read once AND each
+  (token, output) keeps the decode GEMV's exact summation order (units lane-strided over 32 lanes, `deq_dot`
+  per unit, `simd_sum`; lpr8: one QK-block per 8 lanes, xor-butterfly). Chunked prefill is therefore
+  bit-identical to token-by-token by construction — the parity gate is strict equality, no tolerance needed.
+- **The last prompt token is never chunked** — it runs as a decode window (that is where the logits come
+  from), mirroring mac-kern's prompt chain. State sequence stays exactly the token-by-token sequence.
+- **Metal kernel rules learned the hard way (all verified against existing kernels):**
+  - `k_gemv`'s row mapping `o = tg.x*8 + sgid` needs 256-thread threadgroups (8 simdgroups) — dispatching
+    with tg=128 silently computes only half the rows. The chunk GEMV helpers set tg=256 for that shape,
+    tg=128 for the lpr8 shape (16 rows via `sgid*4 + lane/8`).
+  - `k_gemv_lpr8` checks `o >= n_out` AFTER the threadgroup x-cache barrier for a reason: an early return
+    before a barrier diverges the threadgroup. The chunk lpr8 variant moved the check inside the loop and
+    guards only the arithmetic (`if (o < n_out)`), keeping both barriers unconditional.
+  - Per-token loops over threadgroup scratch (sh_q/sh_k in `k_gdn_chunk`) need a barrier at the END of each
+    token: thread X's next-token write of its own column races thread Y's still-running reads otherwise.
+    Decode kernels don't show this because they process one token per launch.
+  - Device atomics: `atomic_fetch_add_explicit((device atomic_uint*)&p[i], 1u, memory_order_relaxed)` on a
+    plain `device uint*` buffer, as `moe_mm.metal`'s histogram does; no extra include.
+  - The 256-thread reductions are new helpers (`sk_max`/`sk_sum`, 8 simdgroups); the old `block_sum` is
+    hardwired to 128 threads (4 simdgroups).
+- **Entry tables replace a host-side sort** (the routing is computed on the GPU; a host sort would need a
+  sync inside the graph): k_hist (atomic counts) → k_exp_off (one-thread exclusive scan; integer-exact) →
+  k_place (atomic rank → row; writes srt_in_gu/srt_in_d/pos). Placement order varies run to run but no
+  digit can change: each token's K expert outputs are combined in its own fixed slot order.
+- **k_conv_chunk history**: tile 0 analytically stores the chunk's last K-1 inputs at dispatch start (from
+  qkv + a saved copy of the old history), the CUDA `k_conv_seq` rule — a short chunk (T < K-1) mixes old
+  history back in; the shift-register values after the loop are NOT the old history.
+- **Split-K scratch is bounded** by SK_ROWS_MAX=256 query rows per dispatch (decode uses 24; the chunk
+  row-blocks); the kernels take `row0` (the block's first global row) and index scratch row-locally.
+- **The working-set refusal** counts `cx.allocated()` (weights wraps + all state + scratch + chunk buffers)
+  + a 0.25 GB reserve against `recommendedMaxWorkingSetSize`, and fires only for ctx > 8192 or when chunk
+  buffers are allocated — nothing that worked before can newly refuse; `STRATA_Q36M_MEM_OK=1` overrides.
+- **Sandbox constraint held throughout:** no Metal compile here; host C++ was checked with
+  `g++ -fsyntax-only -I metal/src -I include -I src`; the MSL is checked on the Mac by the extended
+  `q36_compile_test` (every new pipeline is created there) and then by the gates.
+- **Deferred default flip:** `--prefill` defaults OFF until the Mac gates pass; the flip commit (default 512,
+  upstream-style) is one line once tokens are confirmed identical.
