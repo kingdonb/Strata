@@ -507,8 +507,8 @@ kernel void k_topk_router(device const float* router [[buffer(0)]],
 // default (the decode path is unchanged there).  Query rows are (t * H + h): the decode step passes one
 // token (t = 0), the prompt chunks pass a row-block.  HD is attention.key_length - 256 on qwen35moe, and
 // the host refuses this path with anything else.
-constexpr int SK_HD = 256;
-constexpr int SK_CELLS = 256;
+enum { SK_HD = 256 };
+enum { SK_CELLS = 256 };
 
 // 256-thread reductions (8 simdgroups; block_sum above assumes 128 threads).  Both end with a full
 // threadgroup barrier, so writes made before the call (k_attn_sk_part's sc[]) are visible to every thread
@@ -608,7 +608,7 @@ kernel void k_attn_sk_merge(device const float* pacc [[buffer(0)]],
                             uint row [[threadgroup_position_in_grid]],
                             uint tid [[thread_index_in_threadgroup]]) {
     const int grow = row0 + (int) row;
-    const int t = grow / H, h = grow - t * H;
+    const int t = grow / H;
     const int npos = pos0 + t + 1;
     const int nc = (npos + SK_CELLS - 1) / SK_CELLS;
     float M = -INFINITY;
