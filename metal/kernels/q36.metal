@@ -949,8 +949,8 @@ kernel void k_tables(device const int* ids [[buffer(0)]],
     threadgroup int sh_off[256];
     if (n_expert > 256) return;
 
-    sh_cnt[tid] = 0u;
-    sh_run[tid] = 0u;
+    atomic_store_explicit(&sh_cnt[tid], 0u, memory_order_relaxed);
+    atomic_store_explicit(&sh_run[tid], 0u, memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = tid; i < (uint) n_ent; i += 256)
         atomic_fetch_add_explicit(&sh_cnt[ids[i]], 1u, memory_order_relaxed);
