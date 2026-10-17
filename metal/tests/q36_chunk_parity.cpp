@@ -44,11 +44,22 @@ void check(const char* stage, const void* a, const void* b, size_t bytes) {
     const float* x = (const float*) a;
     const float* y = (const float*) b;
     const size_t n = bytes / 4;
-    size_t first = n;
-    for (size_t i = 0; i < n; ++i)
-        if (x[i] != y[i]) { first = i; break; }
-    std::printf("  %-14s FAIL at %zu/%zu (%.9g vs %.9g)\n", stage, first, n, first < n ? x[first] : 0.0f,
-                first < n ? y[first] : 0.0f);
+    size_t first = n, count = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (x[i] != y[i]) {
+            if (first == n) first = i;
+            ++count;
+        }
+    }
+    std::printf("  %-14s FAIL: %zu/%zu differ, first at %zu (%.9g vs %.9g)", stage, count, n, first,
+                first < n ? x[first] : 0.0f, first < n ? y[first] : 0.0f);
+    size_t shown = 0;
+    for (size_t i = first; i < n && shown < 4; ++i)
+        if (x[i] != y[i]) {
+            std::printf("; [%zu] %.9g vs %.9g", i, x[i], y[i]);
+            ++shown;
+        }
+    std::printf("\n");
     ++g_fails;
 }
 
@@ -88,6 +99,8 @@ int main() {
     mtl::Pipeline p_gdn = pipe("k_gdn"), p_gdnc = pipe("k_gdn_chunk");
     mtl::Pipeline p_gn = pipe("k_gated_norm"), p_gnc = pipe("k_gated_norm_chunk");
     mtl::Pipeline p_sum = pipe("k_moe_sum"), p_sumc = pipe("k_moe_sum_chunk");
+    mtl::Pipeline p_prep = pipe("k_attn_prep"), p_prep_c = pipe("k_attn_prep_chunk");
+    mtl::Pipeline p_sk_part = pipe("k_attn_sk_part"), p_sk_merge = pipe("k_attn_sk_merge");
 
     ref::Rng r(20260717);
     mtl::Buffer dummy_ids = cx.alloc(sizeof(int));
@@ -129,7 +142,7 @@ int main() {
         check("embed", y1.ptr, y2.ptr, 4 * T * N);
     }
 
-    // ---- 2. dense gemv: the decode kernel per token vs the chunk kernel (tpb = T, then tpb = 2) ------------
+    // ---- 2. dense gemv: the decode kernel per token vs the chunk kernel (tpb = T and tpb = 2) ---------------
     {
         const int NOUT = 64;
         const uint64_t RB = 4ull * N;
@@ -160,6 +173,7 @@ int main() {
             d.grid[0] = (NOUT + 7) / 8;
             d.grid[1] = (T + tpb - 1) / tpb;
             d.tg[0] = 256;
+            cx.run_graph({d});
             char name[32];
             std::snprintf(name, sizeof(name), "gemv f32 tpb=%d", tpb);
             check(name, y1.ptr, y2.ptr, 4 * T * NOUT);
@@ -240,7 +254,7 @@ int main() {
         for (int i = 0; i < T * NIN; ++i) hin.as<float>()[i] = r.sym();
         mtl::Buffer W = cx.alloc(RB * NOUT);
         for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym();
-        mtl::Buffer y1 = cx.alloc(4 * T * NOUT), y2 = cx.alloc(4 * T * NOUT);
+        mtl::Buffer y1 = cx.alloc(4 * T * NOUT), y2 = cx.alloc(4 * T * NOUT), y3 = cx.alloc(4 * T * NOUT);
         for (int pass = 0; pass < 2; ++pass) {
             const int tpb = pass == 0 ? T : 2;
             std::vector<mtl::Dispatch> ds;
@@ -266,9 +280,15 @@ int main() {
             d.grid[1] = (T + tpb - 1) / tpb;
             d.tg[0] = 128;
             cx.run_graph({d});
+            // run the chunk kernel again into y3: a run-to-run difference would be a race, not arithmetic
+            mtl::Dispatch d2 = d;
+            d2.args = {mtl::Arg::B(W), mtl::Arg::B(hin), mtl::Arg::B(y3), mtl::Arg::V(p), mtl::Arg::V(tpb),
+                       mtl::Arg::V(0), mtl::Arg::V(T)};
+            cx.run_graph({d2});
             char name[32];
             std::snprintf(name, sizeof(name), "lpr8 q4_K tpb=%d", tpb);
             check(name, y1.ptr, y2.ptr, 4 * T * NOUT);
+            check("lpr8 rerun", y2.ptr, y3.ptr, 4 * T * NOUT);
         }
     }
 
@@ -507,6 +527,124 @@ int main() {
         d.tg[0] = 128;
         cx.run_graph({d});
         check("moe combine", x1.ptr, x2.ptr, 4 * T * N);
+    }
+
+    // ---- 12. attention prep over the chunk vs per token (q / gate rows, the KV cells) ------------------------
+    {
+        const int CTX = 32, NROT = HD;
+        const float base = 10000.0f;
+        mtl::Buffer qg = cx.alloc(4 * T * H * 2 * HD), kx = cx.alloc(4 * T * HKV * HD), vx = cx.alloc(4 * T * HKV * HD);
+        mtl::Buffer qw = cx.alloc(4 * HD), kw = cx.alloc(4 * HD);
+        for (int i = 0; i < T * H * 2 * HD; ++i) qg.as<float>()[i] = r.sym();
+        for (int i = 0; i < T * HKV * HD; ++i) {
+            kx.as<float>()[i] = r.sym();
+            vx.as<float>()[i] = r.sym();
+        }
+        for (int i = 0; i < HD; ++i) {
+            qw.as<float>()[i] = 1.0f + 0.2f * r.sym();
+            kw.as<float>()[i] = 1.0f + 0.2f * r.sym();
+        }
+        mtl::Buffer q1 = cx.alloc(4 * T * H * HD), gate1 = cx.alloc(4 * T * H * HD);
+        mtl::Buffer q2 = cx.alloc(4 * T * H * HD), gate2 = cx.alloc(4 * T * H * HD);
+        mtl::Buffer kc1 = cx.alloc(4 * HKV * CTX * HD), vc1 = cx.alloc(4 * HKV * CTX * HD);
+        mtl::Buffer kc2 = cx.alloc(4 * HKV * CTX * HD), vc2 = cx.alloc(4 * HKV * CTX * HD);
+        std::vector<mtl::Dispatch> ds;
+        for (int t = 0; t < T; ++t) {
+            mtl::Dispatch d;
+            d.p = &p_prep;
+            d.args = {mtl::Arg::B(qg, 4 * (size_t) t * H * 2 * HD), mtl::Arg::B(kx, 4 * (size_t) t * HKV * HD),
+                      mtl::Arg::B(vx, 4 * (size_t) t * HKV * HD), mtl::Arg::B(qw), mtl::Arg::B(kw),
+                      mtl::Arg::B(q1, 4 * (size_t) t * H * HD), mtl::Arg::B(gate1, 4 * (size_t) t * H * HD),
+                      mtl::Arg::B(kc1), mtl::Arg::B(vc1), mtl::Arg::V(H), mtl::Arg::V(HD), mtl::Arg::V(NROT),
+                      mtl::Arg::V(t), mtl::Arg::V(CTX), mtl::Arg::V(base), mtl::Arg::V(eps)};
+            d.grid[0] = H + HKV;
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+        cx.run_graph(ds);
+        mtl::Dispatch d;
+        d.p = &p_prep_c;
+        d.args = {mtl::Arg::B(qg), mtl::Arg::B(kx), mtl::Arg::B(vx), mtl::Arg::B(qw), mtl::Arg::B(kw),
+                  mtl::Arg::B(q2), mtl::Arg::B(gate2), mtl::Arg::B(kc2), mtl::Arg::B(vc2), mtl::Arg::V(H),
+                  mtl::Arg::V(HKV), mtl::Arg::V(HD), mtl::Arg::V(NROT), mtl::Arg::V(0), mtl::Arg::V(CTX),
+                  mtl::Arg::V(base), mtl::Arg::V(eps)};
+        d.grid[0] = T;
+        d.grid[1] = H + HKV;
+        d.tg[0] = 128;
+        cx.run_graph({d});
+        check("prep q", q1.ptr, q2.ptr, 4 * T * H * HD);
+        check("prep gate", gate1.ptr, gate2.ptr, 4 * T * H * HD);
+        check("prep kc", kc1.ptr, kc2.ptr, 4 * HKV * CTX * HD);
+        check("prep vc", vc1.ptr, vc2.ptr, 4 * HKV * CTX * HD);
+    }
+
+    // ---- 13. split-K attention rows: per-token form vs the row-blocked chunk form (row0 = 0 and 16) ----------
+    {
+        const int CTX = 64;
+        const float scale = 1.0f / std::sqrt((float) 256);
+        mtl::Buffer q_a = cx.alloc(4 * T * H * 256);
+        for (int i = 0; i < T * H * 256; ++i) q_a.as<float>()[i] = r.sym();
+        mtl::Buffer kc = cx.alloc(4 * HKV * CTX * 256), vc = cx.alloc(4 * HKV * CTX * 256);
+        for (int i = 0; i < HKV * CTX * 256; ++i) {
+            kc.as<float>()[i] = r.sym();
+            vc.as<float>()[i] = r.sym();
+        }
+        mtl::Buffer gate_all = cx.alloc(4 * T * H * 256);
+        for (int i = 0; i < T * H * 256; ++i) gate_all.as<float>()[i] = r.sym();
+        mtl::Buffer att1 = cx.alloc(4 * T * H * 256), att2 = cx.alloc(4 * T * H * 256);
+        mtl::Buffer pacc_s = cx.alloc(4 * 256 * 256), pm_s = cx.alloc(4 * 256), pl_s = cx.alloc(4 * 256);
+        const int n_chunk = 1;   // every row's npos <= T <= 256 here: one cell chunk
+
+        std::vector<mtl::Dispatch> ds;
+        for (int t = 0; t < T; ++t) {
+            mtl::Dispatch dp;
+            dp.p = &p_sk_part;
+            dp.args = {mtl::Arg::B(q_a, 4 * (size_t) t * H * 256), mtl::Arg::B(kc), mtl::Arg::B(vc),
+                       mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(CTX), mtl::Arg::V(scale), mtl::Arg::V(n_chunk),
+                       mtl::Arg::V(t), mtl::Arg::V(0), mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s)};
+            dp.grid[0] = n_chunk;
+            dp.grid[1] = H;
+            dp.tg[0] = 256;
+            dp.barrier = true;
+            ds.push_back(dp);
+            mtl::Dispatch dm;
+            dm.p = &p_sk_merge;
+            dm.args = {mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s),
+                       mtl::Arg::B(gate_all, 4 * (size_t) t * H * 256), mtl::Arg::B(att1, 4 * (size_t) t * H * 256),
+                       mtl::Arg::V(H), mtl::Arg::V(n_chunk), mtl::Arg::V(t), mtl::Arg::V(0)};
+            dm.grid[0] = H;
+            dm.tg[0] = 256;
+            dm.barrier = true;
+            ds.push_back(dm);
+        }
+        cx.run_graph(ds);
+
+        // the chunk form in two row blocks, exercising row0 = 16 on the second
+        std::vector<mtl::Dispatch> ds2;
+        for (int pass = 0; pass < 2; ++pass) {
+            const int row0 = pass * 16;
+            mtl::Dispatch dp;
+            dp.p = &p_sk_part;
+            dp.args = {mtl::Arg::B(q_a), mtl::Arg::B(kc), mtl::Arg::B(vc), mtl::Arg::V(H), mtl::Arg::V(HKV),
+                       mtl::Arg::V(CTX), mtl::Arg::V(scale), mtl::Arg::V(n_chunk), mtl::Arg::V(0), mtl::Arg::V(row0),
+                       mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s)};
+            dp.grid[0] = n_chunk;
+            dp.grid[1] = 16;
+            dp.tg[0] = 256;
+            dp.barrier = true;
+            ds2.push_back(dp);
+            mtl::Dispatch dm;
+            dm.p = &p_sk_merge;
+            dm.args = {mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s), mtl::Arg::B(gate_all),
+                       mtl::Arg::B(att2), mtl::Arg::V(H), mtl::Arg::V(n_chunk), mtl::Arg::V(0), mtl::Arg::V(row0)};
+            dm.grid[0] = 16;
+            dm.tg[0] = 256;
+            dm.barrier = true;
+            ds2.push_back(dm);
+        }
+        cx.run_graph(ds2);
+        check("sk rows", att1.ptr, att2.ptr, 4 * T * H * 256);
     }
 
     std::printf(g_fails ? "FAILURES: %d\n" : "all stages bit-identical\n", g_fails);
