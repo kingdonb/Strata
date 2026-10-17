@@ -102,6 +102,10 @@ struct State {
     mtl::Buffer x, h, y, qkv, z, alpha, beta, conv_out, gdn_out, qg, k, v, q, gate, att, router, eg, eu, eh, ey, sg, su, sh, sy, sgate, wts, logits;
     mtl::Buffer ids;
     mtl::Buffer sk_pacc, sk_pm, sk_pl;   // split-K attention partials (k_attn_sk_part / k_attn_sk_merge)
+    // prompt-chunk buffers (allocated when --prefill is on; CT = the chunk size)
+    mtl::Buffer toks_c, xc, hc, yc, qkv_c, z_c, alpha_c, beta_c, conv_out_c, gdn_out_c, qg_c, k_c, v_c, q_c, gate_c, att_c;
+    mtl::Buffer router_c, ids_c, wts_c, scr, srt_in_gu, srt_in_d, pos_c;
+    mtl::Buffer eg_c, eu_c, eh_c, ey_c, sg_c, su_c, sh_c, sy_c, sgate_c;
     std::vector<mtl::Buffer> conv_state, S, kc, vc;
 
     void reset() {
@@ -131,6 +135,9 @@ struct Pipelines {
     mtl::Buffer dummy_ids;
     mtl::Pipeline p_rms, p_conv, p_gdn_gb, p_gdn, p_gated_norm, p_attn_prep, p_attn, p_swiglu, p_add, p_moe_sum, p_topk_router;
     mtl::Pipeline p_attn_sk_part, p_attn_sk_merge;
+    // prompt-chunk pipelines (init_prompt, when --prefill is on)
+    std::map<int, mtl::Pipeline> p_emb_c, p_gemv_c, p_gemv_lpr8_c, p_expc;
+    mtl::Pipeline p_route_c, p_zero, p_hist, p_exp_off, p_place, p_moe_sum_c, p_conv_c, p_gdn_c, p_gated_norm_c, p_attn_prep_c;
     std::map<int, mtl::Pipeline> p_gemv;
     std::map<int, mtl::Pipeline> p_gemv_lpr8;
     std::map<int, mtl::Pipeline> p_row;
@@ -190,6 +197,64 @@ struct Pipelines {
         get_row(T_IQ2_XS, "k_row_T_IQ2_XS");
         get_row(T_IQ3_XXS, "k_row_T_IQ3_XXS");
         get_row(T_IQ4_XS, "k_row_T_IQ4_XS");
+    }
+
+    // The prompt-chunk kernels (k_*_chunk / k_gemv_c / k_expc): compiled and created only when --prefill
+    // turns the chunk path on, so the plain engine's startup does less and its behavior is unchanged.
+    void init_prompt(mtl::Context& cx) {
+        auto get_emb_c = [&](int ty, const char* fn) { p_emb_c[ty] = cx.pipeline(lib, fn); };
+        auto get_gemv_c = [&](int ty, const char* fn) { p_gemv_c[ty] = cx.pipeline(lib, fn); };
+        auto get_gemv_lpr8_c = [&](int ty, const char* fn) { p_gemv_lpr8_c[ty] = cx.pipeline(lib, fn); };
+        auto get_expc = [&](int ty, const char* fn) { p_expc[ty] = cx.pipeline(lib, fn); };
+
+        get_emb_c(T_F32, "k_emb_chunk_T_F32");
+        get_emb_c(T_BF16, "k_emb_chunk_T_BF16");
+        get_emb_c(T_Q8_0, "k_emb_chunk_T_Q8_0");
+        get_emb_c(T_Q3_K, "k_emb_chunk_T_Q3_K");
+        get_emb_c(T_Q4_K, "k_emb_chunk_T_Q4_K");
+        get_emb_c(T_Q5_K, "k_emb_chunk_T_Q5_K");
+        get_emb_c(T_Q6_K, "k_emb_chunk_T_Q6_K");
+        get_emb_c(T_IQ2_XS, "k_emb_chunk_T_IQ2_XS");
+        get_emb_c(T_IQ3_XXS, "k_emb_chunk_T_IQ3_XXS");
+        get_emb_c(T_IQ4_XS, "k_emb_chunk_T_IQ4_XS");
+
+        get_gemv_c(T_F32, "k_gemv_c_T_F32");
+        get_gemv_c(T_BF16, "k_gemv_c_T_BF16");
+        get_gemv_c(T_Q8_0, "k_gemv_c_T_Q8_0");
+        get_gemv_c(T_Q3_K, "k_gemv_c_T_Q3_K");
+        get_gemv_c(T_Q4_K, "k_gemv_c_T_Q4_K");
+        get_gemv_c(T_Q5_K, "k_gemv_c_T_Q5_K");
+        get_gemv_c(T_Q6_K, "k_gemv_c_T_Q6_K");
+        get_gemv_c(T_IQ2_XS, "k_gemv_c_T_IQ2_XS");
+        get_gemv_c(T_IQ3_XXS, "k_gemv_c_T_IQ3_XXS");
+        get_gemv_c(T_IQ4_XS, "k_gemv_c_T_IQ4_XS");
+
+        get_gemv_lpr8_c(T_Q4_K, "k_gemv_lpr8_c_T_Q4_K");
+        get_gemv_lpr8_c(T_Q5_K, "k_gemv_lpr8_c_T_Q5_K");
+        get_gemv_lpr8_c(T_Q6_K, "k_gemv_lpr8_c_T_Q6_K");
+        get_gemv_lpr8_c(T_IQ2_XS, "k_gemv_lpr8_c_T_IQ2_XS");
+
+        get_expc(T_F32, "k_expc_T_F32");
+        get_expc(T_BF16, "k_expc_T_BF16");
+        get_expc(T_Q8_0, "k_expc_T_Q8_0");
+        get_expc(T_Q3_K, "k_expc_T_Q3_K");
+        get_expc(T_Q4_K, "k_expc_T_Q4_K");
+        get_expc(T_Q5_K, "k_expc_T_Q5_K");
+        get_expc(T_Q6_K, "k_expc_T_Q6_K");
+        get_expc(T_IQ2_XS, "k_expc_T_IQ2_XS");
+        get_expc(T_IQ3_XXS, "k_expc_T_IQ3_XXS");
+        get_expc(T_IQ4_XS, "k_expc_T_IQ4_XS");
+
+        p_route_c = cx.pipeline(lib, "k_route_chunk");
+        p_zero = cx.pipeline(lib, "k_zero");
+        p_hist = cx.pipeline(lib, "k_hist");
+        p_exp_off = cx.pipeline(lib, "k_exp_off");
+        p_place = cx.pipeline(lib, "k_place");
+        p_moe_sum_c = cx.pipeline(lib, "k_moe_sum_chunk");
+        p_conv_c = cx.pipeline(lib, "k_conv_chunk");
+        p_gdn_c = cx.pipeline(lib, "k_gdn_chunk");
+        p_gated_norm_c = cx.pipeline(lib, "k_gated_norm_chunk");
+        p_attn_prep_c = cx.pipeline(lib, "k_attn_prep_chunk");
     }
 };
 
@@ -351,7 +416,7 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
                     d.p = &pipes.p_attn_sk_part;
                     d.args = {mtl::Arg::B(s.q), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]),
                               mtl::Arg::V(H_val), mtl::Arg::V(HKV_val), mtl::Arg::V(ctx_val), mtl::Arg::V(scale_val),
-                              mtl::Arg::V(n_chunk), mtl::Arg::V(s.pos),
+                              mtl::Arg::V(n_chunk), mtl::Arg::V(s.pos), mtl::Arg::V(0),
                               mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl)};
                     d.grid[0] = (uint32_t) n_chunk;
                     d.grid[1] = (uint32_t) H_val;
@@ -361,7 +426,7 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
                     mtl::Dispatch dm;
                     dm.p = &pipes.p_attn_sk_merge;
                     dm.args = {mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl), mtl::Arg::B(s.gate), mtl::Arg::B(s.att),
-                               mtl::Arg::V(H_val), mtl::Arg::V(n_chunk), mtl::Arg::V(s.pos)};
+                               mtl::Arg::V(H_val), mtl::Arg::V(n_chunk), mtl::Arg::V(s.pos), mtl::Arg::V(0)};
                     dm.grid[0] = (uint32_t) H_val;
                     dm.tg[0] = SK_CELLS;
                     dm.barrier = true;
@@ -487,6 +552,343 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
     ++s.pos;
 }
 
+// Dense projection of a chunk: the weights read once per threadgroup-window (tpb tokens walked inside).
+// The big outputs take the whole chunk in one threadgroup-row; the small ones 32 tokens per row (more
+// threadgroups, and their weights are too small for the re-reads to matter).
+void push_c_gemv(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const Tensor& w, const mtl::Buffer& x,
+                 const mtl::Buffer& y, int nt, int x_stride) {
+    const int n_in = (int) w.shape[0], n_out = (int) w.shape[1];
+    auto it_c = pipes.p_gemv_c.find(w.type);
+    if (it_c == pipes.p_gemv_c.end()) {
+        std::fprintf(stderr, "q36_metal: unhandled chunk GEMV type %d\n", w.type);
+        std::exit(1);
+    }
+    const int tpb = (n_out >= 1024) ? nt : std::min(nt, 32);
+    GemvParam prm;
+    prm.row_bytes = w.row_bytes;
+    prm.expert_bytes = 0;
+    prm.n_in = n_in;
+    prm.n_out = n_out;
+    prm.x_stride = (uint64_t) x_stride;
+
+    mtl::Dispatch d;
+    auto it_l = (n_in == 2048) ? pipes.p_gemv_lpr8_c.find(w.type) : pipes.p_gemv_lpr8_c.end();
+    if (it_l != pipes.p_gemv_lpr8_c.end()) {
+        d.p = &it_l->second;
+        d.grid[0] = (uint32_t)((n_out + 15) / 16);
+        d.tg[0] = 128;
+    } else {
+        d.p = &it_c->second;
+        d.grid[0] = (uint32_t)((n_out + 7) / 8);
+        d.tg[0] = 256;   // 8 simdgroups: the kernel's row = tg.x * 8 + sgid
+    }
+    d.grid[1] = (uint32_t)((nt + tpb - 1) / tpb);
+    d.barrier = true;
+    d.args = {mtl::Arg::B(w.b, w.offset), mtl::Arg::B(x), mtl::Arg::B(y), mtl::Arg::V(prm),
+              mtl::Arg::V(tpb), mtl::Arg::V(0), mtl::Arg::V(nt)};
+    ds.push_back(d);
+}
+
+// Routed experts of a chunk: k_expc over the placed per-expert entry runs (every expert's weights read
+// once per chunk); x rows are selected per entry through srt_in; off/cnt are byte offsets into the
+// engine's small scratch (the k_exp_off / k_hist results).
+void push_c_expc(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const Tensor& w, const mtl::Buffer& x,
+                 const mtl::Buffer& srt_in, const mtl::Buffer& scr, size_t off_bytes, size_t cnt_bytes,
+                 const mtl::Buffer& y, int x_stride) {
+    const int n_in = (int) w.shape[0], n_out = (int) w.shape[1];
+    const size_t eb = w.shape.size() == 3 ? w.row_bytes * (size_t) w.shape[1] : 0;
+    auto it = pipes.p_expc.find(w.type);
+    if (it == pipes.p_expc.end()) {
+        std::fprintf(stderr, "q36_metal: unhandled chunk expert type %d\n", w.type);
+        std::exit(1);
+    }
+    GemvParam prm;
+    prm.row_bytes = w.row_bytes;
+    prm.expert_bytes = eb;
+    prm.n_in = n_in;
+    prm.n_out = n_out;
+    prm.x_stride = (uint64_t) x_stride;
+
+    mtl::Dispatch d;
+    d.p = &it->second;
+    d.grid[0] = (uint32_t)((n_out + 7) / 8);
+    d.grid[1] = (uint32_t)(w.shape.size() == 3 ? w.shape[2] : 1);
+    d.tg[0] = 256;   // 8 simdgroups: the kernel's row = tg.x * 8 + sgid
+    d.barrier = true;
+    d.args = {mtl::Arg::B(w.b, w.offset), mtl::Arg::B(x), mtl::Arg::B(srt_in), mtl::Arg::B(scr, off_bytes),
+              mtl::Arg::B(scr, cnt_bytes), mtl::Arg::B(y), mtl::Arg::V(prm)};
+    ds.push_back(d);
+}
+
+// Runs the chunk's nt tokens (absolute positions pos0 + t) through the chunk kernels, updating the same
+// recurrent states, conv histories and KV caches the decode path uses.  Every (token, output) is summed
+// in the decode kernels' exact order, so the states match a token-by-token run bit for bit.  The prompt's
+// LAST token is not chunked - the caller runs it as a decode window, which is also where the logits come
+// from.  Returns the GPU seconds.
+double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s,
+                            const int* toks, int nt, int64_t pos0) {
+    const auto& g = m.g;
+    const int N = (int) g.n_embd, K = (int) m.top_k, FF = (int) g.n_ff, FS = (int) g.n_ff_shexp;
+    const int C = (int) g.ssm_conv_channels, ZV = (int) g.ssm_value_dim;
+    const int HV = (int) g.ssm_v_heads, HK = (int) g.ssm_k_heads, DS = (int) g.ssm_state_size;
+    const int H = (int) g.n_head, HKV = (int) g.n_head_kv, D = (int) g.head_dim;
+    const int n_ent = nt * K;
+
+    if (D != 256) {   // k_attn_prep_chunk's threadgroup buffer and the split-K kernels are 256-wide
+        std::fprintf(stderr, "q36_metal: chunk prefill needs head_dim 256, model has %d\n", D);
+        std::exit(1);
+    }
+    if (g.ssm_d_conv - 1 > 16) {   // k_conv_chunk's shift register
+        std::fprintf(stderr, "q36_metal: chunk prefill needs ssm_d_conv <= 17, model has %d\n", (int) g.ssm_d_conv);
+        std::exit(1);
+    }
+    if (g.n_expert > 256) {   // k_route_chunk's threadgroup score array
+        std::fprintf(stderr, "q36_metal: chunk prefill needs n_expert <= 256, model has %d\n", (int) g.n_expert);
+        std::exit(1);
+    }
+
+    std::vector<mtl::Dispatch> ds;
+    std::memcpy(s.toks_c.as<int>(), toks, (size_t) nt * sizeof(int));
+
+    // Embedding rows
+    {
+        const Tensor& e = m.W("token_embd.weight");
+        auto it = pipes.p_emb_c.find(e.type);
+        if (it == pipes.p_emb_c.end()) {
+            std::fprintf(stderr, "q36_metal: unhandled token_embd type %d\n", e.type);
+            std::exit(1);
+        }
+        mtl::Dispatch d;
+        d.p = &it->second;
+        d.args = {mtl::Arg::B(e.b, e.offset), mtl::Arg::B(s.toks_c), mtl::Arg::B(s.xc),
+                  mtl::Arg::V(e.row_bytes), mtl::Arg::V(N), mtl::Arg::V(N)};
+        d.grid[0] = (uint32_t) nt;
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+
+    for (int64_t l = 0; l < g.n_layers; ++l) {
+        // RMSNorm (one threadgroup per token row)
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_rms;
+            d.args = {mtl::Arg::B(s.xc), mtl::Arg::B(m.F(L(l, "attn_norm.weight"))), mtl::Arg::B(s.hc),
+                      mtl::Arg::V(N), mtl::Arg::V(m.eps)};
+            d.grid[0] = (uint32_t) nt;
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+
+        if (!strata::core::is_qsa_layer(g, l)) {
+            push_c_gemv(ds, pipes, m.W(L(l, "attn_qkv.weight")), s.hc, s.qkv_c, nt, N);
+            push_c_gemv(ds, pipes, m.W(L(l, "attn_gate.weight")), s.hc, s.z_c, nt, N);
+            push_c_gemv(ds, pipes, m.W(L(l, "ssm_beta.weight")), s.hc, s.beta_c, nt, N);
+            push_c_gemv(ds, pipes, m.W(L(l, "ssm_alpha.weight")), s.hc, s.alpha_c, nt, N);
+            {
+                const int Kd = (int) g.ssm_d_conv;
+                mtl::Dispatch d;
+                d.p = &pipes.p_conv_c;
+                d.args = {mtl::Arg::B(s.qkv_c), mtl::Arg::B(s.conv_state[l]), mtl::Arg::B(m.F(L(l, "ssm_conv1d.weight"))),
+                          mtl::Arg::B(s.conv_out_c), mtl::Arg::V(C), mtl::Arg::V(Kd), mtl::Arg::V(nt)};
+                d.grid[0] = (uint32_t)((C + 127) / 128);
+                d.grid[1] = (uint32_t)((nt + 15) / 16);
+                d.tg[0] = 128;
+                d.barrier = true;
+                ds.push_back(d);
+            }
+            {
+                mtl::Dispatch d;
+                d.p = &pipes.p_gdn_c;
+                d.args = {mtl::Arg::B(s.conv_out_c), mtl::Arg::B(s.alpha_c), mtl::Arg::B(m.F(L(l, "ssm_dt.bias"))),
+                          mtl::Arg::B(m.F(L(l, "ssm_a"))), mtl::Arg::B(s.beta_c), mtl::Arg::B(s.S[l]),
+                          mtl::Arg::B(s.gdn_out_c), mtl::Arg::V(HK), mtl::Arg::V(DS), mtl::Arg::V(HV),
+                          mtl::Arg::V(C), mtl::Arg::V(m.eps), mtl::Arg::V(nt)};
+                d.grid[0] = (uint32_t) HV;
+                d.tg[0] = 128;
+                d.barrier = true;
+                ds.push_back(d);
+            }
+            {
+                mtl::Dispatch d;
+                d.p = &pipes.p_gated_norm_c;
+                d.args = {mtl::Arg::B(s.gdn_out_c), mtl::Arg::B(m.F(L(l, "ssm_norm.weight"))), mtl::Arg::B(s.z_c),
+                          mtl::Arg::V(DS), mtl::Arg::V(ZV), mtl::Arg::V(m.eps)};
+                d.grid[0] = (uint32_t) nt;
+                d.grid[1] = (uint32_t) HV;
+                d.tg[0] = 128;
+                d.barrier = true;
+                ds.push_back(d);
+            }
+            push_c_gemv(ds, pipes, m.W(L(l, "ssm_out.weight")), s.gdn_out_c, s.yc, nt, ZV);
+        } else {
+            push_c_gemv(ds, pipes, m.W(L(l, "attn_q.weight")), s.hc, s.qg_c, nt, N);
+            push_c_gemv(ds, pipes, m.W(L(l, "attn_k.weight")), s.hc, s.k_c, nt, N);
+            push_c_gemv(ds, pipes, m.W(L(l, "attn_v.weight")), s.hc, s.v_c, nt, N);
+            {
+                mtl::Dispatch d;
+                d.p = &pipes.p_attn_prep_c;
+                d.args = {mtl::Arg::B(s.qg_c), mtl::Arg::B(s.k_c), mtl::Arg::B(s.v_c),
+                          mtl::Arg::B(m.F(L(l, "attn_q_norm.weight"))), mtl::Arg::B(m.F(L(l, "attn_k_norm.weight"))),
+                          mtl::Arg::B(s.q_c), mtl::Arg::B(s.gate_c), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]),
+                          mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(D), mtl::Arg::V(m.n_rot), mtl::Arg::V((int) pos0),
+                          mtl::Arg::V(s.ctx), mtl::Arg::V(m.rope_base), mtl::Arg::V(m.eps)};
+                d.grid[0] = (uint32_t) nt;
+                d.grid[1] = (uint32_t)(H + HKV);
+                d.tg[0] = 128;
+                d.barrier = true;
+                ds.push_back(d);
+            }
+            // Attention over the chunk's rows, SK_ROWS_MAX rows at a time (scratch is bounded by that)
+            {
+                const float scale_val = 1.0f / std::sqrt((float) D);
+                const int rows = nt * H;
+                for (int rb = 0; rb < rows; rb += SK_ROWS_MAX) {
+                    const int rb_rows = std::min(SK_ROWS_MAX, rows - rb);
+                    const int t_last = (rb + rb_rows - 1) / H;
+                    const int n_chunk = (int)((pos0 + t_last + 1 + SK_CELLS - 1) / SK_CELLS);
+                    mtl::Dispatch d;
+                    d.p = &pipes.p_attn_sk_part;
+                    d.args = {mtl::Arg::B(s.q_c), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]),
+                              mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(s.ctx), mtl::Arg::V(scale_val),
+                              mtl::Arg::V(n_chunk), mtl::Arg::V((int) pos0), mtl::Arg::V(rb),
+                              mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl)};
+                    d.grid[0] = (uint32_t) n_chunk;
+                    d.grid[1] = (uint32_t) rb_rows;
+                    d.tg[0] = SK_CELLS;
+                    d.barrier = true;
+                    ds.push_back(d);
+                    mtl::Dispatch dm;
+                    dm.p = &pipes.p_attn_sk_merge;
+                    dm.args = {mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl), mtl::Arg::B(s.gate_c),
+                               mtl::Arg::B(s.att_c), mtl::Arg::V(H), mtl::Arg::V(n_chunk), mtl::Arg::V((int) pos0), mtl::Arg::V(rb)};
+                    dm.grid[0] = (uint32_t) rb_rows;
+                    dm.tg[0] = SK_CELLS;
+                    dm.barrier = true;
+                    ds.push_back(dm);
+                }
+            }
+            push_c_gemv(ds, pipes, m.W(L(l, "attn_output.weight")), s.att_c, s.yc, nt, H * D);
+        }
+
+        // Residual add + post norm
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_add;
+            d.args = {mtl::Arg::B(s.xc), mtl::Arg::B(s.yc), mtl::Arg::V(nt * N)};
+            d.grid[0] = (uint32_t)((nt * N + 127) / 128);
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_rms;
+            d.args = {mtl::Arg::B(s.xc), mtl::Arg::B(m.F(L(l, "post_attention_norm.weight"))), mtl::Arg::B(s.hc),
+                      mtl::Arg::V(N), mtl::Arg::V(m.eps)};
+            d.grid[0] = (uint32_t) nt;
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+
+        // Router + top-K
+        push_c_gemv(ds, pipes, m.W(L(l, "ffn_gate_inp.weight")), s.hc, s.router_c, nt, N);
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_route_c;
+            d.args = {mtl::Arg::B(s.router_c), mtl::Arg::B(s.ids_c), mtl::Arg::B(s.wts_c),
+                      mtl::Arg::V((int) g.n_expert), mtl::Arg::V(K)};
+            d.grid[0] = (uint32_t) nt;
+            d.tg[0] = 256;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+
+        // Entry tables: zero the counters, count per expert, exclusive offsets, place the entries
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_zero;
+            d.args = {mtl::Arg::B(s.scr), mtl::Arg::V(3 * 256)};
+            d.grid[0] = (3 * 256 + 127) / 128;
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_hist;
+            d.args = {mtl::Arg::B(s.ids_c), mtl::Arg::B(s.scr), mtl::Arg::V(n_ent)};
+            d.grid[0] = (uint32_t)((n_ent + 255) / 256);
+            d.tg[0] = 256;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_exp_off;
+            d.args = {mtl::Arg::B(s.scr), mtl::Arg::B(s.scr, 512 * sizeof(int)), mtl::Arg::V((int) g.n_expert)};
+            d.grid[0] = 1;
+            d.tg[0] = 1;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_place;
+            d.args = {mtl::Arg::B(s.ids_c), mtl::Arg::B(s.scr, 256 * sizeof(int)), mtl::Arg::B(s.scr, 512 * sizeof(int)),
+                      mtl::Arg::B(s.srt_in_gu), mtl::Arg::B(s.srt_in_d), mtl::Arg::B(s.pos_c), mtl::Arg::V(K), mtl::Arg::V(n_ent)};
+            d.grid[0] = (uint32_t)((n_ent + 255) / 256);
+            d.tg[0] = 256;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+
+        // Routed experts (grouped, every expert's weights read once per chunk) + shared expert
+        push_c_expc(ds, pipes, m.W(L(l, "ffn_gate_exps.weight")), s.hc, s.srt_in_gu, s.scr, 512 * sizeof(int), 0, s.eg_c, N);
+        push_c_expc(ds, pipes, m.W(L(l, "ffn_up_exps.weight")), s.hc, s.srt_in_gu, s.scr, 512 * sizeof(int), 0, s.eu_c, N);
+        {
+            const int n_val = n_ent * FF;
+            mtl::Dispatch d;
+            d.p = &pipes.p_swiglu;
+            d.args = {mtl::Arg::B(s.eg_c), mtl::Arg::B(s.eu_c), mtl::Arg::B(s.eh_c), mtl::Arg::V(n_val)};
+            d.grid[0] = (uint32_t)((n_val + 127) / 128);
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+        push_c_gemv(ds, pipes, m.W(L(l, "ffn_gate_shexp.weight")), s.hc, s.sg_c, nt, N);
+        push_c_gemv(ds, pipes, m.W(L(l, "ffn_up_shexp.weight")), s.hc, s.su_c, nt, N);
+        {
+            const int n_val = nt * FS;
+            mtl::Dispatch d;
+            d.p = &pipes.p_swiglu;
+            d.args = {mtl::Arg::B(s.sg_c), mtl::Arg::B(s.su_c), mtl::Arg::B(s.sh_c), mtl::Arg::V(n_val)};
+            d.grid[0] = (uint32_t)((n_val + 127) / 128);
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+        push_c_expc(ds, pipes, m.W(L(l, "ffn_down_exps.weight")), s.eh_c, s.srt_in_d, s.scr, 512 * sizeof(int), 0, s.ey_c, FF);
+        push_c_gemv(ds, pipes, m.W(L(l, "ffn_down_shexp.weight")), s.sh_c, s.sy_c, nt, FS);
+        push_c_gemv(ds, pipes, m.W(L(l, "ffn_gate_inp_shexp.weight")), s.hc, s.sgate_c, nt, N);
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_moe_sum_c;
+            d.args = {mtl::Arg::B(s.xc), mtl::Arg::B(s.ey_c), mtl::Arg::B(s.wts_c), mtl::Arg::B(s.sy_c),
+                      mtl::Arg::B(s.sgate_c), mtl::Arg::B(s.pos_c), mtl::Arg::V(K), mtl::Arg::V(N), mtl::Arg::V(N)};
+            d.grid[0] = (uint32_t) nt;
+            d.grid[1] = (uint32_t)((N + 127) / 128);
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+    }
+
+    return cx.run_graph(ds);
+}
+
 std::vector<int> parse_ids(const std::string& s) {
     std::vector<int> v;
     size_t i = 0;
@@ -506,6 +908,7 @@ int run(int argc, char** argv) {
     std::string tokens_str;
     int n_gen = 64;
     int ctx = 4096;
+    int prefill_chunk = 0;   // --prefill N: the prompt-chunk size (0 = token-by-token, as before)
     bool serve_mode = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -520,8 +923,12 @@ int run(int argc, char** argv) {
             n_gen = std::atoi(argv[++i]);
         } else if ((a == "--ctx" || a == "--max-context") && i + 1 < argc) {
             ctx = std::atoi(argv[++i]);
+        } else if (a == "--prefill" && i + 1 < argc) {
+            prefill_chunk = std::atoi(argv[++i]);
         }
     }
+    if (prefill_chunk < 0) prefill_chunk = 0;
+    if (prefill_chunk == 0 && env_flag("STRATA_Q36M_PREFILL")) prefill_chunk = 512;
 
     if (model_path.empty()) {
         std::fprintf(stderr, "strata metal q36: specify --model <path.gguf>\n");
@@ -612,34 +1019,6 @@ int run(int argc, char** argv) {
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
                  total_weight_bytes / (1024.0 * 1024.0 * 1024.0));
 
-    // Working-set refusal with the numbers (the CUDA engine refuses a count that cannot fit, with the
-    // numbers): weights + KV cache + recurrent state + split-K scratch + a reserve for the activations.
-    // Only enforced above the 8,192-token context the threadgroup attention could reach - at or below it
-    // every setup runs exactly as before - and STRATA_Q36M_MEM_OK=1 overrides it.
-    {
-        uint64_t kv_bytes = 0, sst_bytes = 0, conv_bytes = 0;
-        for (int64_t l = 0; l < m.g.n_layers; ++l) {
-            if (strata::core::is_qsa_layer(m.g, l)) {
-                kv_bytes += 2 * (uint64_t) m.g.n_head_kv * ctx * m.g.head_dim * sizeof(float);
-            } else {
-                sst_bytes += (uint64_t) m.g.ssm_v_heads * m.g.ssm_state_size * m.g.ssm_state_size * sizeof(float);
-                conv_bytes += (uint64_t) (m.g.ssm_d_conv - 1) * m.g.ssm_conv_channels * sizeof(float);
-            }
-        }
-        const uint64_t scratch_bytes = (uint64_t) ((ctx + SK_CELLS - 1) / SK_CELLS) * SK_ROWS_MAX * (SK_CELLS + 2) * sizeof(float);
-        const uint64_t est = total_weight_bytes + kv_bytes + sst_bytes + conv_bytes + scratch_bytes + (256ull << 20);
-        const uint64_t rec = cx.recommended_working_set();
-        if (ctx > SK_TG_CAP && est > rec && !env_flag("STRATA_Q36M_MEM_OK")) {
-            std::fprintf(stderr,
-                         "strata metal q36: ctx %d takes ~%.2f GB (weights %.2f + kv %.2f + ssm state %.2f + "
-                         "conv %.2f + attn scratch %.2f + reserve 0.25) past the recommended working set "
-                         "%.2f GB - lower --ctx or set STRATA_Q36M_MEM_OK=1\n",
-                         ctx, est / 1e9, total_weight_bytes / 1e9, kv_bytes / 1e9, sst_bytes / 1e9,
-                         conv_bytes / 1e9, scratch_bytes / 1e9, rec / 1e9);
-            return 1;
-        }
-    }
-
     // Allocate runtime state buffers
     State s;
     s.ctx = ctx;
@@ -681,6 +1060,69 @@ int run(int argc, char** argv) {
         s.sk_pacc = cx.alloc((size_t) SK_ROWS_MAX * n_chunk_max * SK_CELLS * sizeof(float));
         s.sk_pm = cx.alloc((size_t) SK_ROWS_MAX * n_chunk_max * sizeof(float));
         s.sk_pl = cx.alloc((size_t) SK_ROWS_MAX * n_chunk_max * sizeof(float));
+    }
+
+    // Prompt-chunk buffers (--prefill N): sized for this run's largest chunk.  The prompt's last token is
+    // never chunked - it runs as a decode window, which is also where the logits come from.
+    if (prefill_chunk > 0) {
+        const size_t CT = (size_t) prefill_chunk;
+        s.toks_c = cx.alloc(CT * sizeof(int));
+        s.xc = cx.alloc(CT * N * sizeof(float));
+        s.hc = cx.alloc(CT * N * sizeof(float));
+        s.yc = cx.alloc(CT * N * sizeof(float));
+        s.qkv_c = cx.alloc(CT * g.ssm_conv_channels * sizeof(float));
+        s.conv_out_c = cx.alloc(CT * g.ssm_conv_channels * sizeof(float));
+        s.z_c = cx.alloc(CT * g.ssm_value_dim * sizeof(float));
+        s.gdn_out_c = cx.alloc(CT * g.ssm_value_dim * sizeof(float));
+        s.alpha_c = cx.alloc(CT * g.ssm_v_heads * sizeof(float));
+        s.beta_c = cx.alloc(CT * g.ssm_v_heads * sizeof(float));
+        s.qg_c = cx.alloc(CT * 2 * g.n_head * g.head_dim * sizeof(float));
+        s.k_c = cx.alloc(CT * g.n_head_kv * g.head_dim * sizeof(float));
+        s.v_c = cx.alloc(CT * g.n_head_kv * g.head_dim * sizeof(float));
+        s.q_c = cx.alloc(CT * g.n_head * g.head_dim * sizeof(float));
+        s.gate_c = cx.alloc(CT * g.n_head * g.head_dim * sizeof(float));
+        s.att_c = cx.alloc(CT * g.n_head * g.head_dim * sizeof(float));
+        s.router_c = cx.alloc(CT * g.n_expert * sizeof(float));
+        s.ids_c = cx.alloc(CT * K * sizeof(int));
+        s.wts_c = cx.alloc(CT * K * sizeof(float));
+        s.scr = cx.alloc(3 * 256 * sizeof(int));
+        s.srt_in_gu = cx.alloc(CT * K * sizeof(int));
+        s.srt_in_d = cx.alloc(CT * K * sizeof(int));
+        s.pos_c = cx.alloc(CT * K * sizeof(int));
+        s.eg_c = cx.alloc(CT * K * FF * sizeof(float));
+        s.eu_c = cx.alloc(CT * K * FF * sizeof(float));
+        s.eh_c = cx.alloc(CT * K * FF * sizeof(float));
+        s.ey_c = cx.alloc(CT * K * N * sizeof(float));
+        s.sg_c = cx.alloc(CT * g.n_ff_shexp * sizeof(float));
+        s.su_c = cx.alloc(CT * g.n_ff_shexp * sizeof(float));
+        s.sh_c = cx.alloc(CT * g.n_ff_shexp * sizeof(float));
+        s.sy_c = cx.alloc(CT * N * sizeof(float));
+        s.sgate_c = cx.alloc(CT * sizeof(float));
+        pipes.init_prompt(cx);
+        std::fprintf(stderr, "strata metal q36: prompt chunks of %d tokens on (chunk buffers %.2f GB)\n",
+                     prefill_chunk, (double) (CT * K * (size_t) (3 * FF + N + 4)) / (1024.0 * 1024.0 * 1024.0)
+                         + (double) (CT * (size_t) (6 * N + 2 * g.ssm_conv_channels + 2 * g.ssm_value_dim
+                                                    + 2 * g.ssm_v_heads + 2 * g.n_head * g.head_dim + 2 * g.n_head_kv * g.head_dim
+                                                    + 3 * g.n_head * g.head_dim + g.n_expert + 3 * g.n_ff_shexp + 1) * 4
+                                    + CT * K * 16 + 3 * 256 * 4) / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    // Working-set refusal with the numbers (the CUDA engine refuses a count that cannot fit, with the
+    // numbers): everything allocated above (weights, KV cache, recurrent state, split-K and chunk scratch)
+    // plus a reserve for sampling and transients.  Only enforced above the 8,192-token context the
+    // threadgroup attention could reach - at or below it every setup runs exactly as before - and
+    // STRATA_Q36M_MEM_OK=1 overrides it.
+    {
+        const uint64_t est = cx.allocated() + (256ull << 20);
+        const uint64_t rec = cx.recommended_working_set();
+        if (ctx > SK_TG_CAP && est > rec && !env_flag("STRATA_Q36M_MEM_OK")) {
+            std::fprintf(stderr,
+                         "strata metal q36: ctx %d takes ~%.2f GB allocated (+0.25 reserve) past the "
+                         "recommended working set %.2f GB - lower --ctx (or --prefill) or set "
+                         "STRATA_Q36M_MEM_OK=1\n",
+                         ctx, est / 1e9, rec / 1e9);
+            return 1;
+        }
     }
 
     for (int64_t l = 0; l < g.n_layers; ++l) {
@@ -846,8 +1288,18 @@ int run(int argc, char** argv) {
             }
 
             const auto t_prompt0 = std::chrono::steady_clock::now();
-            for (size_t i = reuse; i < ids.size(); ++i) {
-                forward_token(cx, pipes, m, s, ids[i], ids_host, sk_force);
+            size_t pi = reuse;
+            if (prefill_chunk > 0 && ids.size() >= 2) {
+                const size_t last = ids.size() - 1;   // the last prompt token runs as a decode window
+                while (pi < last) {
+                    const int nt = (int) std::min<size_t>((size_t) prefill_chunk, last - pi);
+                    forward_prompt_chunk(cx, pipes, m, s, ids.data() + pi, nt, s.pos);
+                    s.pos += nt;
+                    pi += nt;
+                }
+            }
+            for (; pi < ids.size(); ++pi) {
+                forward_token(cx, pipes, m, s, ids[pi], ids_host, sk_force);
             }
             live_tokens = ids;
             const double prompt_ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_prompt0).count() * 1000.0;
@@ -931,8 +1383,20 @@ int run(int argc, char** argv) {
 
     std::fprintf(stderr, "strata metal q36: evaluating prompt (%zu tokens) ...\n", prompt.size());
     const auto t_prompt0 = std::chrono::steady_clock::now();
-    for (int tok : prompt) {
-        forward_token(cx, pipes, m, s, tok, ids_host, sk_force);
+    {
+        size_t pi = 0;
+        if (prefill_chunk > 0 && prompt.size() >= 2) {
+            const size_t last = prompt.size() - 1;   // the last prompt token runs as a decode window
+            while (pi < last) {
+                const int nt = (int) std::min<size_t>((size_t) prefill_chunk, last - pi);
+                forward_prompt_chunk(cx, pipes, m, s, prompt.data() + pi, nt, s.pos);
+                s.pos += nt;
+                pi += nt;
+            }
+        }
+        for (; pi < prompt.size(); ++pi) {
+            forward_token(cx, pipes, m, s, prompt[pi], ids_host, sk_force);
+        }
     }
     const double prompt_time = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_prompt0).count();
     std::fprintf(stderr, "strata metal q36: prompt evaluated in %.2f s (%.1f tok/s)\n",

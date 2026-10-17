@@ -548,9 +548,10 @@ kernel void k_attn_sk_part(device const float* q [[buffer(0)]],
                            constant float& scale [[buffer(6)]],
                            constant int& n_chunk [[buffer(7)]],
                            constant int& pos0 [[buffer(8)]],
-                           device float* pacc [[buffer(9)]],
-                           device float* pm [[buffer(10)]],
-                           device float* pl [[buffer(11)]],
+                           constant int& row0 [[buffer(9)]],
+                           device float* pacc [[buffer(10)]],
+                           device float* pm [[buffer(11)]],
+                           device float* pl [[buffer(12)]],
                            uint3 g [[threadgroup_position_in_grid]],
                            uint tid [[thread_index_in_threadgroup]],
                            ushort lane [[thread_index_in_simdgroup]],
@@ -558,7 +559,7 @@ kernel void k_attn_sk_part(device const float* q [[buffer(0)]],
     threadgroup float sh[8];
     threadgroup float qs[SK_HD];
     threadgroup float sc[SK_CELLS];
-    const int c = (int) g.x, row = (int) g.y;
+    const int c = (int) g.x, row = row0 + (int) g.y;   // g.y is the row-block-local row; scratch is indexed by it
     const int t = row / H, h = row - t * H, kvh = h / (H / HKV);
     const int npos = pos0 + t + 1;   // this query row sees the cells [0, pos0 + t]
     const int p0 = c * SK_CELLS;
@@ -587,7 +588,7 @@ kernel void k_attn_sk_part(device const float* q [[buffer(0)]],
     device const float* vp = vc + ((ulong) kvh * ctx + p0) * SK_HD + j;
     for (int k = 0; k < n; ++k) acc += sc[k] * vp[(ulong) k * SK_HD];
 
-    const ulong o = (ulong) row * (ulong) n_chunk + (ulong) c;
+    const ulong o = (ulong) (row - row0) * (ulong) n_chunk + (ulong) c;
     pacc[o * SK_HD + j] = acc;
     if (tid == 0) {
         pm[o] = m;
@@ -603,9 +604,11 @@ kernel void k_attn_sk_merge(device const float* pacc [[buffer(0)]],
                             constant int& H [[buffer(5)]],
                             constant int& n_chunk [[buffer(6)]],
                             constant int& pos0 [[buffer(7)]],
+                            constant int& row0 [[buffer(8)]],
                             uint row [[threadgroup_position_in_grid]],
                             uint tid [[thread_index_in_threadgroup]]) {
-    const int t = (int) row / H, h = (int) row - t * H;
+    const int grow = row0 + (int) row;
+    const int t = grow / H, h = grow - t * H;
     const int npos = pos0 + t + 1;
     const int nc = (npos + SK_CELLS - 1) / SK_CELLS;
     float M = -INFINITY;
@@ -617,7 +620,548 @@ kernel void k_attn_sk_merge(device const float* pacc [[buffer(0)]],
         num += w * pacc[o * SK_HD + tid];
         den += w * pl[o];
     }
-    const ulong gi = (ulong) row * SK_HD + tid;
+    const ulong gi = (ulong) grow * SK_HD + tid;
     out[gi] = num / den * sigm(gate[gi]);
+}
+
+// ---------------------------------------------------------------------------
+// Prompt-chunk kernels: the chunk of T prompt tokens runs as T-wide dispatches instead of T separate
+// single-token graphs, with every weight read once per chunk.  Each (token, output) is accumulated in
+// exactly the decode kernels' order (units lane-strided, deq_dot per unit, simd_sum; the shift-register
+// conv and the in-place delta rule walk the tokens sequentially), so the chunk's states and the last
+// token's logits equal the token-by-token run's bit for bit.  The prompt's last token is NOT chunked: it
+// runs as a decode window (that is where the logits come from), like mac-kern's prompt chain.
+
+// Embedding rows: grid (T), one threadgroup per token; the same deq as k_row (identical values).
+template <int F>
+kernel void k_emb_chunk(device const uchar* W [[buffer(0)]],
+                        device const int* toks [[buffer(1)]],
+                        device float* out [[buffer(2)]],
+                        constant ulong& row_bytes [[buffer(3)]],
+                        constant int& n [[buffer(4)]],
+                        constant int& n_embd [[buffer(5)]],
+                        uint t [[threadgroup_position_in_grid]],
+                        uint tid [[thread_index_in_threadgroup]]) {
+    constexpr int UNIT = fmt<F>::UNIT;
+    constexpr int QK = fmt<F>::QK;
+    constexpr int BB = fmt<F>::BB;
+    constexpr int UPB = QK / UNIT;
+    constexpr int TAB = fmt<F>::TAB;
+
+    threadgroup uint tab[TAB];
+    load_tab<F>(tab, tid, 128);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    device const uchar* r = W + (ulong) toks[t] * row_bytes;
+    device float* dst = out + (ulong) t * n_embd;
+    const int total_units = n / UNIT;
+    thread float q[UNIT];
+    for (int u = tid; u < total_units; u += 128) {
+        const int blk = u / UPB;
+        const int ui = u % UPB;
+        device const uchar* b = r + (ulong) blk * BB;
+        const float scale = deq<F>(b, ui, q, tab);
+        device float* d = dst + u * UNIT;
+        for (int l = 0; l < UNIT; ++l) d[l] = scale * q[l];
+    }
+}
+
+#define INST_EMB_CHUNK(T) template [[host_name("k_emb_chunk_" #T)]] kernel decltype(k_emb_chunk<T>) k_emb_chunk<T>;
+INST_EMB_CHUNK(T_F32)
+INST_EMB_CHUNK(T_BF16)
+INST_EMB_CHUNK(T_Q8_0)
+INST_EMB_CHUNK(T_Q3_K)
+INST_EMB_CHUNK(T_Q4_K)
+INST_EMB_CHUNK(T_Q5_K)
+INST_EMB_CHUNK(T_Q6_K)
+INST_EMB_CHUNK(T_IQ2_XS)
+INST_EMB_CHUNK(T_IQ3_XXS)
+INST_EMB_CHUNK(T_IQ4_XS)
+
+// Dense projections for the chunk: k_gemv with the tokens walked INSIDE the threadgroup, so each weight
+// row is read from memory once no matter how many tokens follow.  grid (n_out/8, ceil(T/tpb)); tpb =
+// tokens per threadgroup-row (1 = the decode kernel's shape, one token per row; large = one threadgroup
+// per output window serving every token).  x rows are the chunk's activations at x_stride; y rows are
+// chunk-local (row (t - t0)).
+template <int F>
+kernel void k_gemv_c(device const uchar* W [[buffer(0)]],
+                     device const float* x [[buffer(1)]],
+                     device float* y [[buffer(2)]],
+                     constant GemvParam& p [[buffer(3)]],
+                     constant int& tpb [[buffer(4)]],
+                     constant int& t0 [[buffer(5)]],
+                     constant int& nt [[buffer(6)]],
+                     uint3 tg [[threadgroup_position_in_grid]],
+                     uint tid [[thread_index_in_threadgroup]],
+                     ushort lane [[thread_index_in_simdgroup]],
+                     ushort sgid [[simdgroup_index_in_threadgroup]]) {
+    constexpr int UNIT = fmt<F>::UNIT;
+    constexpr int QK = fmt<F>::QK;
+    constexpr int BB = fmt<F>::BB;
+    constexpr int UPB = QK / UNIT;
+    constexpr int TAB = fmt<F>::TAB;
+
+    threadgroup uint tab[TAB];
+    load_tab<F>(tab, tid, 128);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const int o = int(tg.x * 8 + sgid);
+    if (o >= p.n_out) return;
+    const int total_units = p.n_in / UNIT;
+    device const uchar* row = W + (ulong) o * p.row_bytes;
+    const int tb = t0 + (int) tg.y * tpb;
+    const int te = min(tb + tpb, t0 + nt);
+    for (int t = tb; t < te; ++t) {
+        device const float* xs = x + (ulong) (t - t0) * p.x_stride;
+        float acc = 0.0f;
+        for (int u = lane; u < total_units; u += 32) {
+            const int blk = u / UPB;
+            const int ui = u % UPB;
+            device const uchar* b = row + (ulong) blk * BB;
+            acc += deq_dot<F>(b, ui, xs + u * UNIT, tab);
+        }
+        acc = simd_sum(acc);
+        if (lane == 0) y[(ulong) (t - t0) * p.n_out + o] = acc;
+    }
+}
+
+#define INST_GEMV_C(T) template [[host_name("k_gemv_c_" #T)]] kernel decltype(k_gemv_c<T>) k_gemv_c<T>;
+INST_GEMV_C(T_F32)
+INST_GEMV_C(T_BF16)
+INST_GEMV_C(T_Q8_0)
+INST_GEMV_C(T_Q3_K)
+INST_GEMV_C(T_Q4_K)
+INST_GEMV_C(T_Q5_K)
+INST_GEMV_C(T_Q6_K)
+INST_GEMV_C(T_IQ2_XS)
+INST_GEMV_C(T_IQ3_XXS)
+INST_GEMV_C(T_IQ4_XS)
+
+// The n_in = 2048 products of the chunk: k_gemv_lpr8 with the tokens inside; each token's 2,048 inputs
+// are cached in threadgroup memory (8 KB) one token at a time.  Same per (token, output) order as
+// k_gemv_lpr8 (one block of QK per lane, xor-butterfly over the 8 lanes).
+template <int F>
+kernel void k_gemv_lpr8_c(device const uchar* W [[buffer(0)]],
+                          device const float* x [[buffer(1)]],
+                          device float* y [[buffer(2)]],
+                          constant GemvParam& p [[buffer(3)]],
+                          constant int& tpb [[buffer(4)]],
+                          constant int& t0 [[buffer(5)]],
+                          constant int& nt [[buffer(6)]],
+                          uint3 tg [[threadgroup_position_in_grid]],
+                          uint tid [[thread_index_in_threadgroup]],
+                          ushort lane [[thread_index_in_simdgroup]],
+                          ushort sgid [[simdgroup_index_in_threadgroup]]) {
+    constexpr int QK = fmt<F>::QK;
+    constexpr int BB = fmt<F>::BB;
+
+    threadgroup float sh_x[2048];
+    const int r_in_sg = lane / 8;
+    const int li = lane % 8;
+    const int o = int(tg.x * 16 + sgid * 4 + r_in_sg);
+    device const uchar* row = W + (ulong) o * p.row_bytes;
+    device const uchar* b = row + (ulong) li * BB;
+
+    const int tb = t0 + (int) tg.y * tpb;
+    const int te = min(tb + tpb, t0 + nt);
+    for (int t = tb; t < te; ++t) {
+        device const float4* xs4 = (device const float4*)(x + (ulong) (t - t0) * p.x_stride);
+        threadgroup float4* sh_x4 = (threadgroup float4*)sh_x;
+        for (int i = tid; i < 512; i += 128) sh_x4[i] = xs4[i];
+        // every thread reaches both barriers: the o >= n_out simdgroups only skip the arithmetic
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (o < p.n_out) {
+            float acc = deq_dot_block<F>(b, sh_x + li * QK, nullptr);
+            acc += simd_shuffle_xor(acc, 4);
+            acc += simd_shuffle_xor(acc, 2);
+            acc += simd_shuffle_xor(acc, 1);
+            if (li == 0) y[(ulong) (t - t0) * p.n_out + o] = acc;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);   // sh_x is rewritten by the next token
+    }
+}
+
+#define INST_GEMV_LPR8_C(T) template [[host_name("k_gemv_lpr8_c_" #T)]] kernel decltype(k_gemv_lpr8_c<T>) k_gemv_lpr8_c<T>;
+INST_GEMV_LPR8_C(T_Q4_K)
+INST_GEMV_LPR8_C(T_Q5_K)
+INST_GEMV_LPR8_C(T_Q6_K)
+INST_GEMV_LPR8_C(T_IQ2_XS)
+
+// Routed experts for the chunk, grouped per expert so every expert's weights are read once: the chunk's
+// T x K entries are placed by k_place into per-expert runs; this kernel walks an expert's entries with
+// each entry's (token, output) summed in k_gemv's exact order.  grid (n_out/8, n_expert); y rows are
+// entry-major (row = the entry's index).
+template <int F>
+kernel void k_expc(device const uchar* W [[buffer(0)]],
+                   device const float* x [[buffer(1)]],
+                   device const int* srt_in [[buffer(2)]],   // entry -> the input row it reads
+                   device const int* off [[buffer(3)]],      // expert -> first entry
+                   device const int* cnt [[buffer(4)]],      // expert -> entry count
+                   device float* y [[buffer(5)]],
+                   constant GemvParam& p [[buffer(6)]],
+                   uint3 tg [[threadgroup_position_in_grid]],
+                   uint tid [[thread_index_in_threadgroup]],
+                   ushort lane [[thread_index_in_simdgroup]],
+                   ushort sgid [[simdgroup_index_in_threadgroup]]) {
+    constexpr int UNIT = fmt<F>::UNIT;
+    constexpr int QK = fmt<F>::QK;
+    constexpr int BB = fmt<F>::BB;
+    constexpr int UPB = QK / UNIT;
+    constexpr int TAB = fmt<F>::TAB;
+
+    threadgroup uint tab[TAB];
+    load_tab<F>(tab, tid, 128);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const int o = int(tg.x * 8 + sgid);
+    if (o >= p.n_out) return;
+    const int e = (int) tg.y;
+    const int b0 = off[e], n_e = cnt[e];
+    device const uchar* row = W + (ulong) e * p.expert_bytes + (ulong) o * p.row_bytes;
+    const int total_units = p.n_in / UNIT;
+    for (int r = 0; r < n_e; ++r) {
+        const int entry = b0 + r;
+        device const float* xs = x + (ulong) srt_in[entry] * p.x_stride;
+        float acc = 0.0f;
+        for (int u = lane; u < total_units; u += 32) {
+            const int blk = u / UPB;
+            const int ui = u % UPB;
+            device const uchar* b = row + (ulong) blk * BB;
+            acc += deq_dot<F>(b, ui, xs + u * UNIT, tab);
+        }
+        acc = simd_sum(acc);
+        if (lane == 0) y[(ulong) entry * p.n_out + o] = acc;
+    }
+}
+
+#define INST_EXPC(T) template [[host_name("k_expc_" #T)]] kernel decltype(k_expc<T>) k_expc<T>;
+INST_EXPC(T_F32)
+INST_EXPC(T_BF16)
+INST_EXPC(T_Q8_0)
+INST_EXPC(T_Q3_K)
+INST_EXPC(T_Q4_K)
+INST_EXPC(T_Q5_K)
+INST_EXPC(T_Q6_K)
+INST_EXPC(T_IQ2_XS)
+INST_EXPC(T_IQ3_XXS)
+INST_EXPC(T_IQ4_XS)
+
+// Top-K routing for all T tokens in one launch: each token's work is k_topk_router's, done by its
+// threadgroup's first thread in the same order (parallel would reorder the softmax's sum).
+kernel void k_route_chunk(device const float* router [[buffer(0)]],
+                          device int* ids [[buffer(1)]],
+                          device float* wts [[buffer(2)]],
+                          constant int& n_expert [[buffer(3)]],
+                          constant int& K [[buffer(4)]],
+                          uint t [[threadgroup_position_in_grid]],
+                          uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float p[256];
+    if (tid != 0) return;
+    if (n_expert > 256) return;
+
+    device const float* r = router + (ulong) t * n_expert;
+    float mx = r[0];
+    for (int i = 1; i < n_expert; ++i) {
+        if (r[i] > mx) mx = r[i];
+    }
+
+    float sum = 0.0f;
+    for (int i = 0; i < n_expert; ++i) {
+        float val = exp(r[i] - mx);
+        p[i] = val;
+        sum += val;
+    }
+    float inv_sum = 1.0f / (sum > 0.0f ? sum : 1.0f);
+    for (int i = 0; i < n_expert; ++i) {
+        p[i] *= inv_sum;
+    }
+
+    int top_idx[16];
+    float top_val[16];
+    for (int k = 0; k < K; ++k) {
+        top_val[k] = -1.0f;
+        top_idx[k] = -1;
+    }
+    for (int i = 0; i < n_expert; ++i) {
+        float v = p[i];
+        if (v > top_val[K - 1] || (v == top_val[K - 1] && (top_idx[K - 1] < 0 || i < top_idx[K - 1]))) {
+            int pos = K - 1;
+            while (pos > 0 && (v > top_val[pos - 1] || (v == top_val[pos - 1] && i < top_idx[pos - 1]))) {
+                top_val[pos] = top_val[pos - 1];
+                top_idx[pos] = top_idx[pos - 1];
+                --pos;
+            }
+            top_val[pos] = v;
+            top_idx[pos] = i;
+        }
+    }
+
+    float wsum = 0.0f;
+    for (int k = 0; k < K; ++k) wsum += top_val[k];
+    float inv_wsum = 1.0f / (wsum > 0.0f ? wsum : 1.0f);
+    for (int k = 0; k < K; ++k) {
+        ids[(ulong) t * K + k] = top_idx[k];
+        wts[(ulong) t * K + k] = top_val[k] * inv_wsum;
+    }
+}
+
+kernel void k_zero(device int* buf [[buffer(0)]],
+                   constant int& n [[buffer(1)]],
+                   uint i [[thread_position_in_grid]]) {
+    if (i < (uint) n) buf[i] = 0;
+}
+
+kernel void k_hist(device const int* ids [[buffer(0)]],
+                   device uint* cnt [[buffer(1)]],
+                   constant int& n_ent [[buffer(2)]],
+                   uint i [[thread_position_in_grid]]) {
+    if (i < (uint) n_ent) atomic_fetch_add_explicit((device atomic_uint*)&cnt[ids[i]], 1u, memory_order_relaxed);
+}
+
+kernel void k_exp_off(device const int* cnt [[buffer(0)]],
+                      device int* off [[buffer(1)]],
+                      constant int& n_expert [[buffer(2)]],
+                      uint tid [[thread_index_in_threadgroup]]) {
+    if (tid != 0) return;
+    int acc = 0;
+    for (int e = 0; e < n_expert; ++e) {
+        off[e] = acc;
+        acc += cnt[e];
+    }
+}
+
+// Entry placement: entry i = (t, k) lands at row = off[e] + its rank among the entries of the same expert
+// (device atomics; the rank order varies, the numbers do not - each token's K outputs are combined in its
+// own fixed slot order by k_moe_sum_chunk).
+kernel void k_place(device const int* ids [[buffer(0)]],
+                    device uint* run [[buffer(1)]],
+                    device const int* off [[buffer(2)]],
+                    device int* srt_in_gu [[buffer(3)]],
+                    device int* srt_in_d [[buffer(4)]],
+                    device int* pos [[buffer(5)]],
+                    constant int& K [[buffer(6)]],
+                    constant int& n_ent [[buffer(7)]],
+                    uint i [[thread_position_in_grid]]) {
+    if (i >= (uint) n_ent) return;
+    const int t = (int) i / K;
+    const int e = ids[i];
+    const uint row = off[e] + atomic_fetch_add_explicit((device atomic_uint*)&run[e], 1u, memory_order_relaxed);
+    srt_in_gu[row] = t;
+    srt_in_d[row] = (int) i;
+    pos[i] = (int) row;
+}
+
+kernel void k_moe_sum_chunk(device float* x [[buffer(0)]],
+                            device const float* y [[buffer(1)]],
+                            device const float* w [[buffer(2)]],
+                            device const float* ys [[buffer(3)]],
+                            device const float* gs [[buffer(4)]],
+                            device const int* pos [[buffer(5)]],
+                            constant int& k [[buffer(6)]],
+                            constant int& n_out [[buffer(7)]],
+                            constant int& n [[buffer(8)]],
+                            uint3 g [[threadgroup_position_in_grid]],
+                            uint tid [[thread_index_in_threadgroup]]) {
+    const int t = (int) g.x;
+    const int i = (int) g.y * 128 + (int) tid;
+    if (i >= n) return;
+    float acc = 0.0f;
+    for (int s = 0; s < k; ++s) acc += w[(ulong) t * k + s] * y[(ulong) pos[(ulong) t * k + s] * n_out + i];
+    x[(ulong) t * n + i] += acc + sigm(gs[t]) * ys[(ulong) t * n + i];
+}
+
+// Conv for T tokens, tiles of 16 side by side (q36_engine.cu's k_conv_seq tile mode, k_conv's math):
+// per channel a K-1-deep shift register; tile 0's registers start at the held history, tile t > 0's at
+// the tile's own preceding inputs; tile 0, as the only history writer, stores the last K - 1 inputs.
+kernel void k_conv_chunk(device const float* qkv [[buffer(0)]],
+                         device float* state [[buffer(1)]],
+                         device const float* w [[buffer(2)]],
+                         device float* out [[buffer(3)]],
+                         constant int& C [[buffer(4)]],
+                         constant int& K [[buffer(5)]],
+                         constant int& T [[buffer(6)]],
+                         uint3 g [[threadgroup_position_in_grid]],
+                         uint tid [[thread_index_in_threadgroup]]) {
+    const int c = (int) g.x * 128 + (int) tid;
+    if (c >= C) return;
+    const int tile = (int) g.y;
+    const int t_first = tile * 16;
+    if (t_first >= T) return;
+    if (K - 1 > 16) return;   // threadgroup-uniform; the host refuses d_conv > 17 before dispatching
+    const int t_end = min(T, t_first + 16);
+
+    thread float v[16];
+    thread float oldv[16];
+    if (tile == 0) {
+        for (int k = 0; k < K - 1; ++k) {
+            v[k] = state[(ulong) k * C + c];
+            oldv[k] = v[k];
+        }
+        // tile 0 is the only history writer: the chunk's last K - 1 inputs (exactly the values the
+        // sequential loop would leave in the shift register), old history filling a short chunk
+        for (int k = 0; k < K - 1; ++k) {
+            const int idx = T - (K - 1) + k;
+            state[(ulong) k * C + c] = idx >= 0 ? qkv[(ulong) idx * C + c] : oldv[(K - 1) + idx];
+        }
+    } else {
+        for (int k = 0; k < K - 1; ++k) v[k] = qkv[(ulong) (t_first - (K - 1) + k) * C + c];
+    }
+
+    for (int t = t_first; t < t_end; ++t) {
+        const float x = qkv[(ulong) t * C + c];
+        float acc = 0.0f;
+        for (int k = 0; k < K - 1; ++k) acc += v[k] * w[(ulong) c * K + k];
+        acc += x * w[(ulong) c * K + K - 1];
+        for (int k = 0; k < K - 2; ++k) v[k] = v[k + 1];
+        v[K - 2] = x;
+        out[(ulong) t * C + c] = silu(acc);
+    }
+}
+
+// The gated delta rule for T tokens in one launch: k_gdn with the token loop inside.  The state rows stay
+// at the same device addresses across the tokens (L1-hot) and every token's arithmetic - the q/k RMS
+// norms' block reductions included - is exactly k_gdn's, so the states match the token-by-token run.
+kernel void k_gdn_chunk(device const float* conv [[buffer(0)]],
+                        device const float* alpha [[buffer(1)]],
+                        device const float* dt_bias [[buffer(2)]],
+                        device const float* ssm_a [[buffer(3)]],
+                        device const float* beta_raw [[buffer(4)]],
+                        device float* S [[buffer(5)]],
+                        device float* out [[buffer(6)]],
+                        constant int& HK [[buffer(7)]],
+                        constant int& D [[buffer(8)]],
+                        constant int& HV [[buffer(9)]],
+                        constant int& C [[buffer(10)]],
+                        constant float& eps [[buffer(11)]],
+                        constant int& T [[buffer(12)]],
+                        uint h [[threadgroup_position_in_grid]],
+                        uint tid [[thread_index_in_threadgroup]],
+                        ushort lane [[thread_index_in_simdgroup]],
+                        ushort sgid [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sh_q[128];
+    threadgroup float sh_k[128];
+    threadgroup float sh_red[4];
+
+    const int kh = h % HK;
+    for (int t = 0; t < T; ++t) {
+        device const float* conv_t = conv + (ulong) t * C;
+        const float qi = conv_t[kh * D + tid];
+        const float ki = conv_t[HK * D + kh * D + tid];
+        const float vi = conv_t[2 * HK * D + h * D + tid];
+
+        float qn = block_sum(qi * qi, sh_red, tid, lane, sgid);
+        float kn = block_sum(ki * ki, sh_red, tid, lane, sgid);
+
+        sh_q[tid] = qi * rsqrt(qn + eps) * (1.0f / sqrt(float(D)));
+        sh_k[tid] = ki * rsqrt(kn + eps);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        const float g = exp(softplus(alpha[(ulong) t * HV + h] + dt_bias[h]) * ssm_a[h]);
+        const float b = sigm(beta_raw[(ulong) t * HV + h]);
+
+        device float* Si = S + ((ulong) h * D + tid) * D;
+        float dot_k = 0.0f;
+        for (int j = 0; j < D; ++j) {
+            Si[j] *= g;
+            dot_k += Si[j] * sh_k[j];
+        }
+        const float d = (vi - dot_k) * b;
+        float o = 0.0f;
+        for (int j = 0; j < D; ++j) {
+            Si[j] += d * sh_k[j];
+            o += Si[j] * sh_q[j];
+        }
+        out[(ulong) t * HV * D + (ulong) h * D + tid] = o;
+        // the next token rewrites sh_q / sh_k: every thread's reads of this token's must finish first
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+// GDN output gating for T tokens: k_gated_norm over grid (T, HV).
+kernel void k_gated_norm_chunk(device float* o [[buffer(0)]],
+                               device const float* w [[buffer(1)]],
+                               device const float* z [[buffer(2)]],
+                               constant int& D [[buffer(3)]],
+                               constant int& ZV [[buffer(4)]],
+                               constant float& eps [[buffer(5)]],
+                               uint3 g [[threadgroup_position_in_grid]],
+                               uint tid [[thread_index_in_threadgroup]],
+                               ushort lane [[thread_index_in_simdgroup]],
+                               ushort sgid [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sh[4];
+    const int t = (int) g.x, h = (int) g.y;
+    device float* oh = o + (ulong) t * ZV + (ulong) h * D;
+    float v = oh[tid];
+    float s = block_sum(v * v, sh, tid, lane, sgid);
+    oh[tid] = v * rsqrt(s / float(D) + eps) * w[tid] * silu(z[(ulong) t * ZV + (ulong) h * D + tid]);
+}
+
+// Attention prep for T tokens: k_attn_prep over grid (T, H + HKV); q / gate rows land at (t * H + head),
+// the split-K kernels' row order; k / v land in the shared KV cache at position pos0 + t.
+kernel void k_attn_prep_chunk(device const float* qg [[buffer(0)]],
+                              device const float* kx [[buffer(1)]],
+                              device const float* vx [[buffer(2)]],
+                              device const float* qw [[buffer(3)]],
+                              device const float* kw [[buffer(4)]],
+                              device float* q [[buffer(5)]],
+                              device float* gate [[buffer(6)]],
+                              device float* kc [[buffer(7)]],
+                              device float* vc [[buffer(8)]],
+                              constant int& H [[buffer(9)]],
+                              constant int& HKV [[buffer(16)]],
+                              constant int& D [[buffer(10)]],
+                              constant int& n_rot [[buffer(11)]],
+                              constant int& pos0 [[buffer(12)]],
+                              constant int& ctx [[buffer(13)]],
+                              constant float& base [[buffer(14)]],
+                              constant float& eps [[buffer(15)]],
+                              uint3 g [[threadgroup_position_in_grid]],
+                              uint tid [[thread_index_in_threadgroup]],
+                              ushort lane [[thread_index_in_simdgroup]],
+                              ushort sgid [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sh[4];
+    threadgroup float buf[256];
+    const int t = (int) g.x;
+    const uint head = g.y;
+    const bool isq = head < (uint) H;
+    const int pos = pos0 + t;
+    device const float* src = isq ? qg + (ulong) t * H * 2 * D + (ulong) head * 2 * D
+                                  : kx + (ulong) t * HKV * D + (ulong)(head - H) * D;
+
+    float s = 0.0f;
+    for (int i = tid; i < D; i += 128) {
+        float val = src[i];
+        s += val * val;
+    }
+    s = block_sum(s, sh, tid, lane, sgid);
+    const float r = rsqrt(s / float(D) + eps);
+
+    for (int i = tid; i < D; i += 128) {
+        buf[i] = src[i] * r * (isq ? qw[i] : kw[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    device float* dst = isq ? q + (ulong) (t * H + (int) head) * D
+                            : kc + ((ulong)(head - H) * ctx + pos) * D;
+    const int half_rot = n_rot / 2;
+    for (int i = tid; i < D; i += 128) {
+        float v = buf[i];
+        if (i < n_rot) {
+            int p = (i < half_rot) ? i : i - half_rot;
+            float theta = float(pos) * pow(base, -2.0f * float(p) / float(n_rot));
+            float cs = cos(theta), sn = sin(theta);
+            v = (i < half_rot) ? buf[i] * cs - buf[i + half_rot] * sn : buf[i - half_rot] * sn + buf[i] * cs;
+        }
+        dst[i] = v;
+    }
+    if (isq) {
+        for (int i = tid; i < D; i += 128) {
+            gate[(ulong) (t * H + (int) head) * D + i] = qg[(ulong) t * H * 2 * D + (ulong) head * 2 * D + D + i];
+        }
+    } else {
+        for (int i = tid; i < D; i += 128) {
+            vc[((ulong)(head - H) * ctx + pos) * D + i] = vx[(ulong) t * HKV * D + (ulong)(head - H) * D + i];
+        }
+    }
 }
 
