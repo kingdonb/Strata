@@ -15,11 +15,14 @@ careful mirroring of proven kernels and by the Mac compile test.
 
 ## Phase A — Split-K attention, uncap the context window
 
-(pushed through 5f84e2e5; Mac round 1: `q36_compile_test` failed on two program-scope `constexpr int` — MSL
-needs `enum` there — and an unused variable; both fixed. Mac round 2: **compile gate passed** — all 30
-pipelines created on the M2 (macOS 26.6.2), every split-K and chunk kernel compiles. Next: the user's parity
-ladder — reference run, `STRATA_Q36M_ATTN_SK=1` forced-split-K, `--prefill 512` chunk run (both compared
-token-for-token against the reference), then the 32K long-context run.)
+(pushed through dd0b0b8c; Mac round 2 results: **compile gate passed** — all 30 pipelines on the M2
+(macOS 26.6.2); **split-K attention 10/10 token-identical** vs k_attn — Phase A verified; **32K ctx runs and
+generates** (READY 32768, no crash). **Chunked prefill 0/10 — every prompt differs at generated token 0**: a
+systematic bug in one of the chunk kernels. Also learned: the first request after load pays seconds of
+shader-JIT/clock warmup (p00's prompt 12.5 s vs p01's 1.9 s — the CUDA engine's warmup() exists for this;
+add one). Short parity prompts (~30 tokens) can't show the chunk speedup either way — the speed gate needs
+2K+ prompts once parity lands. Next: `metal/tests/q36_chunk_parity.cpp` (pushed) runs every chunk stage
+against its decode kernel and names the diverging stage in one Mac round.)
 
 - [x] Add `k_attn_part` + `k_attn_merge` to `metal/kernels/q36.metal`, copying the partial layout
       (256-cell chunks, acc/m/l) from `src/qwen35/q36_engine.cu` (~L298-355) — `k_attn_sk_part` /
