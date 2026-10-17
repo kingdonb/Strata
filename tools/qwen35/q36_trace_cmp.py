@@ -5,10 +5,13 @@
 # STRATA_Q36M_TRACE=1 runs of the same model/prompt set (stderr redirected to the logs):
 #
 #   STRATA_Q36M_TRACE=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
-#       --args "--native $Q36_MODEL --ctx 4096" --out /tmp/plain.json 2> /tmp/trace-plain.log
+#       --args "--native $Q36_MODEL --ctx 4096" --out /tmp/plain.json --log /tmp/trace-plain.log
 #   STRATA_Q36M_TRACE=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
-#       --args "--native $Q36_MODEL --ctx 4096 --prefill 512" --out /tmp/chunk.json 2> /tmp/trace-chunk.log
+#       --args "--native $Q36_MODEL --ctx 4096 --prefill 512" --out /tmp/chunk.json --log /tmp/trace-chunk.log
 #   python3 tools/qwen35/q36_trace_cmp.py /tmp/trace-plain.log /tmp/trace-chunk.log
+#
+# (--log is REQUIRED: the harness sends the ENGINE's stderr to /dev/null without it; the shell's 2> only
+# catches the gate's own stderr.)
 #
 # The decode side prints one line per (prompt token, layer): its row sums, accumulated in index order.
 # The chunk side prints one line per (chunk, layer): every row summed in row order.  Summing the decode
@@ -44,7 +47,8 @@ def main():
         sys.exit(__doc__)
     plain, chunk = parse(sys.argv[1]), parse(sys.argv[2])
     if not plain or not chunk:
-        sys.exit("no TRACE blocks - run both sides with STRATA_Q36M_TRACE=1 (stderr to the log files)")
+        sys.exit("no TRACE blocks - run the gate with STRATA_Q36M_TRACE=1 AND --log <file> (the engine's "
+                 "stderr goes to /dev/null without --log; check the file for 'TRACE BEGIN' lines)")
     r0 = [e for e in plain[0] if e[0] == "D"]
     c0 = [e for e in chunk[0] if e[0] == "C"]
     if not r0 or not c0:
