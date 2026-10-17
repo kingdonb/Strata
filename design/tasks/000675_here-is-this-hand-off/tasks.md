@@ -59,13 +59,14 @@ against its decode kernel and names the diverging stage in one Mac round.)
       chunk run as one partial chunk; without the flag the engine behaves exactly as before (the default
       flip lands only after the Mac parity + speed gates pass — reviewer: do what upstream did)
 - [x] Head/logits only via the last prompt token's decode window; prefix-cache state reuse untouched
-- [~] Parity + measurement (user, on the Mac): **round 3 of the ladder**: split-K 10/10 exact; chunk 0/10
-  (every prompt differs at generated token 0 — systematic). The stage parity test's first run named two
-  suspects, one of which was the TEST's own bug (the F32 gemv stage never ran its chunk dispatch — missing
-  `run_graph`; the kernel was never executed). The lpr8 ~5e-7 relative diff is real; the test now reruns the
-  kernel (race vs arithmetic) and reports mismatch counts + samples. The test never covered
-  `k_attn_prep_chunk` or the row0-blocked split-K dispatch — both now added as stages 12/13, and they are
-  the prime suspects for the engine's divergence. Awaiting the rerun of `./build-metal/q36_chunk_parity`.
+- [~] Parity + measurement (user, on the Mac): **round 3 root-caused both chunk failures.** (1) The engine's
+  first-token divergence = k_attn_prep_chunk's out-of-order [[buffer(16)]] vs mtl_rt's positional binding —
+  fixed (sequential renumber). (2) The lpr8 ~1-ulp difference = fma contraction differing inside a token
+  loop on the serial deq path — fixed by removing k_gemv_lpr8_c and dispatching the DECODE kernel itself
+  (grid[1] = nt) for the n_in=2048 products: bit-identical by construction, L2-resident re-reads. The prep
+  + row0 split-K stages passed exactly once their own bugs were out (sk rows OK). Awaiting the Mac rerun:
+  `./build-metal/q36_chunk_parity` (expect all OK), then the ladder (reference / STRATA_Q36M_ATTN_SK=1 /
+  --prefill 512 compares + a 2K-prompt timing run for the chunk speedup).
 
 ## Phase C — MTP speculative decoding
 

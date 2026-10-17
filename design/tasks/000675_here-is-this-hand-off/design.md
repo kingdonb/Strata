@@ -163,5 +163,22 @@ and its math order matches the CUDA engine (cross-backend parity).
 - **MSL gotcha from the Mac round:** program-scope `constexpr int` is rejected ("program scope variable must
   reside in constant address space") — use `enum { NAME = v };` at program scope (the `fmt` structs' style);
   function-scope `constexpr` is fine. Verified on an M2, macOS 26.6.2.
+- **mtl_rt binds dispatch args POSITIONALLY** (`[enc setBuffer:... atIndex:i]`, i = the arg's index in the
+  vector): every kernel's `[[buffer(N)]]` must equal its argument's declaration position — the house style
+  all existing kernels follow. One out-of-order `[[buffer(16)]]` (k_attn_prep_chunk's HKV) produced: D =
+  HKV's value (norm loop over 2 elements), the rope reading uninitialized threadgroup memory (NaN/huge q),
+  and KV writes at absurd offsets (kc/vc stayed zero) — i.e. the engine's whole first-token divergence,
+  from one attribute number. The positional rule is now asserted by review habit: count args = count
+  [[buffer]] indices in order.
+- **The fma-contraction trap (the second parity finding):** a serial accumulation path shared with a
+  verified decode kernel (`deq_dot`'s generic template, threadgroup x) compiles to DIFFERENT fma fusion
+  inside a token loop than in the decode kernel's straight-line shape: ~1 ulp on most outputs, fully
+  deterministic (rerun-stable), and greedy decoding turns a 1-ulp logit difference into different tokens
+  on near-ties. Rules learned: (a) the float4-dot device-x path (`k_gemv`'s K-quant specializations, an
+  explicit `dot()` intrinsic) is fusion-unambiguous and token-loop-safe — k_gemv_c passed exactly; (b) the
+  serial threadgroup-x path is not — k_gemv_lpr8_c was removed, and the n_in=2048 chunk products dispatch
+  the DECODE k_gemv_lpr8 itself with grid[1] = nt (its `y[sel*n_out + o]` indexing IS the chunk layout,
+  ids = a zeros buffer, x_stride = the chunk stride) — bit-identical by construction, and the re-read
+  weights stay L2-resident per layer (~32 MB working set), so the naive shape costs almost nothing.
 - **Deferred default flip:** `--prefill` defaults OFF until the Mac gates pass; the flip commit (default 512,
   upstream-style) is one line once tokens are confirmed identical.
