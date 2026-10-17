@@ -175,6 +175,7 @@ int main() {
         const uint64_t RB = (uint64_t) (N / 32) * 34;
         mtl::Buffer W = cx.alloc(VOC * RB);
         for (size_t i = 0; i < VOC * RB / 4; ++i) W.as<float>()[i] = r.sym();
+        sanitize(W);
         int toks[T];
         for (int& t : toks) t = (int) (r.uni() * VOC);
         mtl::Buffer toks_b = cx.alloc(sizeof(toks)), y1 = cx.alloc(4 * T * N), y2 = cx.alloc(4 * T * N);
@@ -206,6 +207,7 @@ int main() {
         const uint64_t RB = 4ull * N;
         mtl::Buffer W = cx.alloc(RB * NOUT);
         for (size_t i = 0; i < NOUT * N; ++i) W.as<float>()[i] = r.sym();
+        sanitize(W);
         mtl::Buffer y1 = cx.alloc(4 * T * NOUT), y2 = cx.alloc(4 * T * NOUT);
         for (int pass = 0; pass < 2; ++pass) {
             const int tpb = pass == 0 ? T : 2;
@@ -244,6 +246,7 @@ int main() {
         const uint64_t RB = (uint64_t) (N / 32) * 34;
         mtl::Buffer W = cx.alloc(RB * NOUT);
         for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym();
+        sanitize(W);
         mtl::Buffer y1 = cx.alloc(4 * T * NOUT), y2 = cx.alloc(4 * T * NOUT);
         std::vector<mtl::Dispatch> ds;
         for (int t = 0; t < T; ++t) {
@@ -278,6 +281,7 @@ int main() {
         for (int i = 0; i < T * NIN; ++i) hin.as<float>()[i] = r.sym();
         mtl::Buffer W = cx.alloc(RB * NOUT);
         for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym();
+        sanitize(W);
         mtl::Buffer y1 = cx.alloc(4 * T * NOUT), y2 = cx.alloc(4 * T * NOUT);
         std::vector<mtl::Dispatch> ds;
         for (int t = 0; t < T; ++t) {
@@ -838,13 +842,15 @@ int main() {
         mtl::Buffer sh1 = cx.alloc(4 * T * K * FF), sh2 = cx.alloc(4 * T * K * FF);
         mtl::Buffer ey1 = cx.alloc(4 * T * K * N), ey2 = cx.alloc(4 * T * K * N);
         mtl::Buffer pos1 = cx.alloc(4 * T * K), pos2 = cx.alloc(4 * T * K);
-        mtl::Buffer sr1 = cx.alloc(4 * T * K), sr2 = cx.alloc(4 * T * K);
+        mtl::Buffer sgu1 = cx.alloc(4 * T * K), sgu2 = cx.alloc(4 * T * K);   // srt_in_gu: entry -> token
+        mtl::Buffer sd1 = cx.alloc(4 * T * K), sd2 = cx.alloc(4 * T * K);     // srt_in_d: entry -> entry index
         mtl::Pipeline p_emb = pipe("k_emb_chunk_T_Q8_0");
         mtl::Pipeline p_gc_iq2 = pipe("k_gemv_c_T_IQ2_XS");
 
         auto chain = [&](std::vector<mtl::Dispatch>& ds, mtl::Buffer& xc, mtl::Buffer& hc, mtl::Buffer& yc,
                          mtl::Buffer& ro, mtl::Buffer& ids, mtl::Buffer& wts, mtl::Buffer& scr, mtl::Buffer& eg,
-                         mtl::Buffer& eu, mtl::Buffer& eh, mtl::Buffer& ey, mtl::Buffer& pos, mtl::Buffer& srt) {
+                         mtl::Buffer& eu, mtl::Buffer& eh, mtl::Buffer& ey, mtl::Buffer& pos, mtl::Buffer& sgu,
+                         mtl::Buffer& sdt) {
             mtl::Dispatch d0;
             d0.p = &p_emb;
             d0.args = {mtl::Arg::B(W_e), mtl::Arg::B(toks_b), mtl::Arg::B(xc), mtl::Arg::V(RBE), mtl::Arg::V(N), mtl::Arg::V(N)};
@@ -877,7 +883,7 @@ int main() {
             ds.push_back(d3);
             mtl::Dispatch dt;
             dt.p = &p_tables;
-            dt.args = {mtl::Arg::B(ids), mtl::Arg::B(scr), mtl::Arg::B(srt), mtl::Arg::B(srt), mtl::Arg::B(pos),
+            dt.args = {mtl::Arg::B(ids), mtl::Arg::B(scr), mtl::Arg::B(sgu), mtl::Arg::B(sdt), mtl::Arg::B(pos),
                        mtl::Arg::V(NEXP), mtl::Arg::V(K), mtl::Arg::V(T * K)};
             dt.grid[0] = 1;
             dt.tg[0] = 256;
@@ -886,7 +892,7 @@ int main() {
             GemvParam pe{RBO, EBO, N, FF, (unsigned long) N};
             mtl::Dispatch d4;
             d4.p = &p_expc_iq2;
-            d4.args = {mtl::Arg::B(W_g), mtl::Arg::B(hc), mtl::Arg::B(srt), mtl::Arg::B(scr, 256 * 4),
+            d4.args = {mtl::Arg::B(W_g), mtl::Arg::B(hc), mtl::Arg::B(sgu), mtl::Arg::B(scr, 256 * 4),
                        mtl::Arg::B(scr), mtl::Arg::B(eg), mtl::Arg::V(pe)};
             d4.grid[0] = (FF + 7) / 8;
             d4.grid[1] = NEXP;
@@ -895,7 +901,7 @@ int main() {
             ds.push_back(d4);
             mtl::Dispatch d5;
             d5.p = &p_expc_iq2;
-            d5.args = {mtl::Arg::B(W_u), mtl::Arg::B(hc), mtl::Arg::B(srt), mtl::Arg::B(scr, 256 * 4),
+            d5.args = {mtl::Arg::B(W_u), mtl::Arg::B(hc), mtl::Arg::B(sgu), mtl::Arg::B(scr, 256 * 4),
                        mtl::Arg::B(scr), mtl::Arg::B(eu), mtl::Arg::V(pe)};
             d5.grid[0] = (FF + 7) / 8;
             d5.grid[1] = NEXP;
@@ -911,8 +917,8 @@ int main() {
             ds.push_back(dsw);
         };
         std::vector<mtl::Dispatch> one, many;
-        chain(one, xc1, hc1, yc1, r1, id1, wt1, scr1, sg1, su1, sh1, ey1, pos1, sr1);
-        chain(many, xc2, hc2, yc2, r2, id2, wt2, scr2, sg2, su2, sh2, ey2, pos2, sr2);
+        chain(one, xc1, hc1, yc1, r1, id1, wt1, scr1, sg1, su1, sh1, ey1, pos1, sgu1, sd1);
+        chain(many, xc2, hc2, yc2, r2, id2, wt2, scr2, sg2, su2, sh2, ey2, pos2, sgu2, sd2);
         cx.run_graph(one);
         for (const auto& d : many) cx.run_graph({d});
         // the tables' rank order can differ between the two runs (threadgroup scheduling); the VALUES must
@@ -921,9 +927,9 @@ int main() {
         check("chain route ids", id1.ptr, id2.ptr, 4 * T * K);
         check("chain route wts", wt1.ptr, wt2.ptr, 4 * T * K);
         check("chain scr", scr1.ptr, scr2.ptr, 4 * 2 * 256);
-        check_placement("chain place 1", id1.as<int>(), scr1.as<int>(), sr1.as<int>(), sr1.as<int>(),
+        check_placement("chain place 1", id1.as<int>(), scr1.as<int>(), sgu1.as<int>(), sd1.as<int>(),
                         pos1.as<int>(), T * K);
-        check_placement("chain place 2", id2.as<int>(), scr2.as<int>(), sr2.as<int>(), sr2.as<int>(),
+        check_placement("chain place 2", id2.as<int>(), scr2.as<int>(), sgu2.as<int>(), sd2.as<int>(),
                         pos2.as<int>(), T * K);
         check_scattered2("chain experts", sg1.as<float>(), pos1.as<int>(), sg2.as<float>(), pos2.as<int>());
         check_scattered2("chain combine-in", sh1.as<float>(), pos1.as<int>(), sh2.as<float>(), pos2.as<int>());
