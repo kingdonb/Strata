@@ -69,8 +69,11 @@ against its decode kernel and names the diverging stage in one Mac round.)
   LOCALIZE with the new per-layer trace (f54f90ad): STRATA_Q36M_TRACE=1 runs per-layer sub-graphs in BOTH
   paths and prints row-sum checksums (TRACE D per prompt token, TRACE C per chunk, %.17g doubles summed in
   identical order — equal states ⇒ bit-equal sums). Tools: `tools/qwen35/q36_trace_cmp.py` diffs the two
-  logs and names the first diverging layer. **Mac round 8, ask user:** `git pull && cmake --build build-metal`,
-  then the two trace runs + q36_trace_cmp.py (commands in the script's header). Interpretation: a diverging
+  logs and names the first diverging layer. Round 8a: the trace never fired because the gate sends the
+  ENGINE's stderr to /dev/null without `--log` (q36_harness.py spawns the engine with stderr=DEVNULL by
+  default; the shell's 2> only catches the gate's own) — env propagates fine (c2477455 fixed the script's
+  hints). **Mac round 8b, ask user (no rebuild):** rerun the two trace gates WITH `--log /tmp/*.log`, then
+  q36_trace_cmp.py on those logs + the json cmp. Interpretation: a diverging
   LAYER = a chunk kernel/glue bug at real shapes (then dump that layer's intermediates); all-OK-but-text-
   differs = one-graph structural (then bisect the chunk graph's segment size); TRACE runs producing IDENTICAL
   text = the bug is one-graph-structural (trace runs the graph per layer). Also: gate prompts are ~24-40
