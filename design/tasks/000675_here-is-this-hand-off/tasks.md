@@ -59,14 +59,17 @@ against its decode kernel and names the diverging stage in one Mac round.)
       chunk run as one partial chunk; without the flag the engine behaves exactly as before (the default
       flip lands only after the Mac parity + speed gates pass — reviewer: do what upstream did)
 - [x] Head/logits only via the last prompt token's decode window; prefix-cache state reuse untouched
-- [~] Parity + measurement (user, on the Mac): **round 3 root-caused both chunk failures.** (1) The engine's
-  first-token divergence = k_attn_prep_chunk's out-of-order [[buffer(16)]] vs mtl_rt's positional binding —
-  fixed (sequential renumber). (2) The lpr8 ~1-ulp difference = fma contraction differing inside a token
-  loop on the serial deq path — fixed by removing k_gemv_lpr8_c and dispatching the DECODE kernel itself
-  (grid[1] = nt) for the n_in=2048 products: bit-identical by construction, L2-resident re-reads. The prep
-  + row0 split-K stages passed exactly once their own bugs were out (sk rows OK). Awaiting the Mac rerun:
-  `./build-metal/q36_chunk_parity` (expect all OK), then the ladder (reference / STRATA_Q36M_ATTN_SK=1 /
-  --prefill 512 compares + a 2K-prompt timing run for the chunk speedup).
+- [~] Parity + measurement (user, on the Mac): **round 4:** prep-binding fix landed; unit test 20/20 exact;
+  SK gate 10/10 again; chunk ladder 0/10 BUT p01 matched 4 generated tokens and prompt times dropped ~28%
+  (the chunk path works and is faster — the residue is last-bit chaos, not garbage). Refined theory: every
+  passing kernel went through float4-dot specializations or a load-only deq; the engine's serial-deq paths
+  (Q5_K/Q6_K gemv_c, IQ2_XS/IQ3_XXS experts through k_expc) were untested and are fma-ambiguous in a token
+  loop — exactly the k_gemv_lpr8_c failure class. Four new parity stages cover them (3f533377). Next Mac
+  round: the unit test (names the diverging type), then the engine bisectors `--prefill 1` (wiring: must be
+  10/10 identical — T=1 is the decode path exactly) and `--prefill 2` (the token-loop path). If the serial
+  types confirm, the fix = dispatch the decode kernels at grid[1]=nt for those products too (the lpr8
+  solution generalized; the k_gemv y[sel*n_out+o] layout is already the chunk layout, experts need a
+  tok-table variant of k_gemv).
 
 ## Phase C — MTP speculative decoding
 
