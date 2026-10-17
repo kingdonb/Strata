@@ -15,14 +15,20 @@ careful mirroring of proven kernels and by the Mac compile test.
 
 ## Phase A — Split-K attention, uncap the context window
 
-- [~] Add `k_attn_part` + `k_attn_merge` to `metal/kernels/q36.metal`, copying the partial layout
-      (256-cell chunks, acc/m/l) from `src/qwen35/q36_engine.cu` (~L298-355)
-- [ ] Wire dispatch in `metal/src/engine/q36_metal.cpp`: split-K only when `n_pos > 8192`; keep `k_attn`
-      default below; add a test-only env knob to force split-K at short ctx
-- [ ] Allocate partials/merge buffers in `State`; row-block the partials so prompt use stays bounded
-- [ ] Startup ctx validation: refuse a context that KV + S + conv state + scratch cannot hold, printing the
-      numbers; leave `READY <ctx> stop` and `--ctx` parsing unchanged
-- [ ] Extend `metal/tests/q36_compile_test.cpp` with the new pipelines
+- [x] Add `k_attn_part` + `k_attn_merge` to `metal/kernels/q36.metal`, copying the partial layout
+      (256-cell chunks, acc/m/l) from `src/qwen35/q36_engine.cu` (~L298-355) — `k_attn_sk_part` /
+      `k_attn_sk_merge` pushed in 65037a91
+- [x] Wire dispatch in `metal/src/engine/q36_metal.cpp`: split-K only when `n_pos > 8192`; keep `k_attn`
+      default below; add a test-only env knob to force split-K at short ctx — `STRATA_Q36M_ATTN_SK=1`
+- [x] Allocate partials/merge buffers in `State`; row-block the partials so prompt use stays bounded —
+      `SK_ROWS_MAX = 256` rows per dispatch, decode uses `n_head`
+- [x] Startup ctx validation: refuse a context that KV + S + conv state + scratch cannot hold, printing the
+      numbers; leave `READY <ctx> stop` and `--ctx` parsing unchanged — enforced only above 8,192;
+      `STRATA_Q36M_MEM_OK=1` overrides
+- [x] Extend `metal/tests/q36_compile_test.cpp` with the new pipelines
+- [~] Verify on the Mac (user runs): 10 parity prompts greedy 128 unchanged at ctx ≤ 8192; forced split-K
+      token-identical to `k_attn` at 4K; 2K-token prompt + 128 gen at ctx 16384 and 32768; record per-step
+      GPU ms at 4K/16K/32K
 - [ ] Verify on the Mac: 10 parity prompts greedy 128 unchanged at ctx ≤ 8192; forced split-K token-identical
       to `k_attn` at 4K; 2K-token prompt + 128 gen at ctx 16384 and 32768; record per-step GPU ms at 4K/16K/32K
 
