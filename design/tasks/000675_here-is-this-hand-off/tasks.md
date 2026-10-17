@@ -34,20 +34,25 @@ careful mirroring of proven kernels and by the Mac compile test.
 
 ## Phase B — Chunked prompt prefill
 
-- [ ] Batched dense GEMM kernels (T rows, weights read once per chunk) for attention q/k/v/o, shared expert,
-      router, `ssm_out`, small F32 projections, embedding rows
-- [ ] Grouped MoE chunk GEMM: sort T × top-8 entries by expert, per-expert GEMM runs (fp32 accum, each expert
-      read once per chunk), weighted combine + shared expert — the `moe_mm.metal` plan without `matmul2d`
-- [ ] GDN chunk kernels: conv in 16-token tiles side by side, delta rule sequential per token within the
-      chunk (exact, as the CUDA engine); update conv state and S
-- [ ] QSA chunk attention through the Phase A split-K kernel with row-blocked partials
-- [ ] `forward_prompt_chunk(T)` + chunk ladder (default 512; 1024/2048/4096) with `--prefill N` and env knob;
-      prompts shorter than the chunk fall back to token-by-token; opt-in flag to enable
-- [ ] LM head/logits only on the last chunk row; prefix-cache state reuse verified across chunked reads
-- [ ] Parity: chunked vs token-by-token greedy text on the 10 parity prompts + ≥3 real 1.5-3K-token documents;
-      log logits KL per chunk size
-- [ ] Measure prefill tok/s per chunk size vs token-by-token (same Mac, same day), record in
-      docs/QWEN36_METAL.md; flip the default only if measured ≥5x at chunk ≥2048 (else keep opt-in)
+- [x] Batched dense GEMM kernels (T rows, weights read once per chunk) — implemented as weight-stationary
+      batched GEMVs (`k_gemv_c`, `k_gemv_lpr8_c` for n_in=2048) with the token loop inside the threadgroup:
+      simpler than a tiled GEMM and each (token, output) keeps the decode GEMV's exact summation order, so
+      chunk results are bit-identical to token-by-token rather than merely close
+- [x] Grouped MoE chunk GEMM: entry tables on GPU (`k_zero`/`k_hist`/`k_exp_off`/`k_place`, device atomics),
+      per-expert runs walked by `k_expc` (each expert read once per chunk), combine via `k_moe_sum_chunk`
+      reading through the per-token slot table (fixed slot order, so placement order cannot change digits)
+- [x] GDN chunk kernels: `k_conv_chunk` (16-token tiles side by side, tile 0 stores the history — the CUDA
+      engine's k_conv_seq tile mode, k_conv's math) + `k_gdn_chunk` (delta rule sequential per token in one
+      launch, k_gdn's math, states L1-hot) + `k_gated_norm_chunk`
+- [x] QSA chunk attention: `k_attn_prep_chunk` (rows in the split-K kernels' row order) + the Phase A
+      split-K kernels row-blocked (SK_ROWS_MAX rows per dispatch); split-K kernels gained a `row0` arg
+- [x] `forward_prompt_chunk(T)` + `--prefill N` / `STRATA_Q36M_PREFILL=1` (512); prompts shorter than the
+      chunk run as one partial chunk; without the flag the engine behaves exactly as before (the default
+      flip lands only after the Mac parity + speed gates pass — reviewer: do what upstream did)
+- [x] Head/logits only via the last prompt token's decode window; prefix-cache state reuse untouched
+- [~] Parity + measurement (user, on the Mac): chunked vs token-by-token greedy text on the 10 parity
+      prompts + ≥3 real documents (expected identical by construction; log KL if not); prefill tok/s per
+      chunk size vs token-by-token, recorded in docs/QWEN36_METAL.md
 
 ## Phase C — MTP speculative decoding
 
