@@ -1115,7 +1115,7 @@ int run(int argc, char** argv) {
     {
         const uint64_t est = cx.allocated() + (256ull << 20);
         const uint64_t rec = cx.recommended_working_set();
-        if (ctx > SK_TG_CAP && est > rec && !env_flag("STRATA_Q36M_MEM_OK")) {
+        if ((ctx > SK_TG_CAP || prefill_chunk > 0) && est > rec && !env_flag("STRATA_Q36M_MEM_OK")) {
             std::fprintf(stderr,
                          "strata metal q36: ctx %d takes ~%.2f GB allocated (+0.25 reserve) past the "
                          "recommended working set %.2f GB - lower --ctx (or --prefill) or set "
