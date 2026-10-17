@@ -59,17 +59,17 @@ against its decode kernel and names the diverging stage in one Mac round.)
       chunk run as one partial chunk; without the flag the engine behaves exactly as before (the default
       flip lands only after the Mac parity + speed gates pass — reviewer: do what upstream did)
 - [x] Head/logits only via the last prompt token's decode window; prefix-cache state reuse untouched
-- [~] Parity + measurement (user, on the Mac): **round 4:** prep-binding fix landed; unit test 20/20 exact;
-  SK gate 10/10 again; chunk ladder 0/10 BUT p01 matched 4 generated tokens and prompt times dropped ~28%
-  (the chunk path works and is faster — the residue is last-bit chaos, not garbage). Refined theory: every
-  passing kernel went through float4-dot specializations or a load-only deq; the engine's serial-deq paths
-  (Q5_K/Q6_K gemv_c, IQ2_XS/IQ3_XXS experts through k_expc) were untested and are fma-ambiguous in a token
-  loop — exactly the k_gemv_lpr8_c failure class. Four new parity stages cover them (3f533377). Next Mac
-  round: the unit test (names the diverging type), then the engine bisectors `--prefill 1` (wiring: must be
-  10/10 identical — T=1 is the decode path exactly) and `--prefill 2` (the token-loop path). If the serial
-  types confirm, the fix = dispatch the decode kernels at grid[1]=nt for those products too (the lpr8
-  solution generalized; the k_gemv y[sel*n_out+o] layout is already the chunk layout, experts need a
-  tok-table variant of k_gemv).
+- [~] Parity + measurement (user, on the Mac): **round 5:** the serial-deq theory is DEAD — the new Q5_K/Q6_K
+  gemv_c and IQ2_XS/IQ3_XXS expert stages all pass (24/24 exact). But `--prefill 1` (every token through the
+  chunk graph at T=1) diverges at token 0 on every prompt — so the kernels AND the fusion are fine and the
+  bug is the ENGINE's chunk-graph structure itself. Facts: the decode graph is ~700 dispatches in one
+  barrier-ordered concurrent-encoder graph and is exact; the only element the chunk graph adds that neither
+  the decode graph nor the stage tests (separate graphs) exercise is the ATOMIC entry-table chain
+  (k_zero → k_hist → k_exp_off → k_place → k_expc) inside one graph. New stage 14 replicates the full MoE
+  chain one-graph-vs-separate (02768eb9). Also measured: --prefill 512's chunk = 38 ms/token vs --prefill 1's
+  97 (the table overhead amortizes with T) vs plain 53 — chunk perf is plausible, ALU-bound on deq; exactness
+  first. If stage 14 diverges, the fix = split the chunk graph at the table boundaries (per-layer or
+  run_graph_seg).
 
 ## Phase C — MTP speculative decoding
 
