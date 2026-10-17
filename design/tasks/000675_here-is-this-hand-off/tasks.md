@@ -59,19 +59,23 @@ against its decode kernel and names the diverging stage in one Mac round.)
       chunk run as one partial chunk; without the flag the engine behaves exactly as before (the default
       flip lands only after the Mac parity + speed gates pass — reviewer: do what upstream did)
 - [x] Head/logits only via the last prompt token's decode window; prefix-cache state reuse untouched
-- [~] Parity + measurement (user, on the Mac): **round 7 — the RACE IS FIXED (Mac-verified): `chain experts` /
-  `chain combine-in` / `tables cnt/off/place` / `chain scr` all OK — one-graph k_tables → k_expc is exact.**
-  Two test-harness slips remained (5ac3221f): stage 14 passed ONE buffer as both srt_in_gu/srt_in_d (the
-  engine uses two) so the entry-index write clobbered the token column and check_placement read the wrong
-  field — now separate buffers like the engine; and stages 1/2/3/4's float-filled W weren't sanitized, so
-  garbage half-scales minted NaNs on both sides (0 real diffs) — now EVERY W fill is sanitized and "NaN cell"
-  strictly means an out-of-bounds/garbage read. **Mac round 7, ask user:** `git pull &&
-  /opt/homebrew/bin/cmake --build build-metal && ./build-metal/q36_chunk_parity` (expect "all stages
-  bit-identical"), then the engine ladder: plain vs `--prefill 512` via q36_solo_gate + q36_cmp_gate (expect
-  10/10 identical), then the long-prompt timing (80×line-1 prompt via /tmp/long.ids) plain vs `--prefill 512`.
-  Prior context: round 5 killed the serial-deq theory (24/24 stage parity), round 6 found the graph race
-  (k_tables fix feb752c4 + MSL atomic_store nit 82dcbc4f); --prefill 512 chunk = 38 ms/tok vs plain 53,
-  ALU-bound on deq (perf plausible, exactness first).
+- [~] Parity + measurement (user, on the Mac): **round 7 verdict: the unit/chain parity is 34/34 EXACT (all
+  kernels + the full MoE chain one-graph-vs-many + k_tables-vs-old-chain) — yet the engine ladder stays 0/10
+  (--prefill 512 diverges at token 0 on ~33-token partial chunks).** Static audit of forward_prompt_chunk vs
+  forward_token found NO glue bug: state handoff correct (chunk ingests [0,last), the last token runs the
+  decode step once — no double update), every arg order matches the stage-tested shapes, conv/gdn/gated-norm
+  are T-robust, push_c_gemv/push_c_expc mirror the tested dispatch shapes, k_route_chunk ≡ k_topk_router
+  algorithmically, run_graph has no dispatch caps, no device atomics left in the chunk path. So round 8 =
+  LOCALIZE with the new per-layer trace (f54f90ad): STRATA_Q36M_TRACE=1 runs per-layer sub-graphs in BOTH
+  paths and prints row-sum checksums (TRACE D per prompt token, TRACE C per chunk, %.17g doubles summed in
+  identical order — equal states ⇒ bit-equal sums). Tools: `tools/qwen35/q36_trace_cmp.py` diffs the two
+  logs and names the first diverging layer. **Mac round 8, ask user:** `git pull && cmake --build build-metal`,
+  then the two trace runs + q36_trace_cmp.py (commands in the script's header). Interpretation: a diverging
+  LAYER = a chunk kernel/glue bug at real shapes (then dump that layer's intermediates); all-OK-but-text-
+  differs = one-graph structural (then bisect the chunk graph's segment size); TRACE runs producing IDENTICAL
+  text = the bug is one-graph-structural (trace runs the graph per layer). Also: gate prompts are ~24-40
+  tokens ⇒ --prefill 512 runs ONE PARTIAL CHUNK nt≈33 — the shapes stages never tested (tpb=33, partial
+  blocks); if the trace pins it to a GEMV layer, test k_gemv_c's tpb/nt guards first.
 
 ## Phase C — MTP speculative decoding
 
