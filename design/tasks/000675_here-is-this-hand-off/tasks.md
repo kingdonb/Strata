@@ -1,5 +1,23 @@
 # Implementation Tasks: Qwen3.6 Metal Long Context, Chunked Prefill and MTP
 
+## STATUS (round 9, where we are)
+
+Goal: build on the merged Qwen3.6 Metal port (12.5-14.5 tok/s, 8K ctx cap, token-by-token prefill) the four
+follow-ups from the hand-off: split-K attention (32K+ ctx), chunked prefill (fast TTFT), MTP speculative
+decoding, FP16 KV cache. Branch `feat/qwen36-metal`, everything verified on the user's M2 (sandbox = Linux).
+
+| Phase | Scope | State |
+|---|---|---|
+| A split-K attention | ctx past 8K, 32K runs | **DONE, Mac-verified** (10/10 token-identical, 32K OK) |
+| B chunked prefill | 512-token chunks, bit-identical, then default flip | **~90%**: all kernels + tables race fixed (34/34 stage-exact); ENGINE still diverges - root-caused to layer 0's MoE (round 9 cuts): gate/up experts use k_expc (plain-gemv arithmetic) while decode uses k_gemv_lpr8 (different fma/butterfly) at n_in=2048 (~5e-7 sum diff -> token flips); G1-G7 bit-exact; G0 emb divergence unexplained (need embtype); G9/G10 huge - likely the down expert reading eh by entry index (srt_in_d) while eh is placed-ordered (a layout mismatch the stages never covered). Fix designed: k_gather_t + per-entry decode-lpr8 for gate/up (which also makes srt_in_d correct) + down identity fallback |
+| C MTP (--mtp 2) | blk.40 draft + verify, 1.2x+ decode | not started (gated on B) |
+| D FP16 KV / sampling | opt-in kv-f16, sampling profile, docs | not started |
+| wrap-up | docs/QWEN36_METAL.md numbers, full gates, PR | not started |
+
+Mac rounds spent on B: ~9. Each eliminated a hypothesis: serial-deq kernels (dead), the 4-dispatch atomic
+table chain race (FOUND + FIXED with k_tables), all kernels proven (34/34), divergence pinned to the MoE
+experts (round 9 cuts). Next round = the MoE fix + embtype/raw-G0 printout.
+
 All work on branch `feat/qwen36-metal`, built and tested on the Mac (`/opt/homebrew/bin/cmake --build
 build-metal`). No CUDA/HIP/SYCL files are touched.
 
