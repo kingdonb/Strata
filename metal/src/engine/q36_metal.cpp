@@ -108,6 +108,13 @@ struct State {
     mtl::Buffer eg_c, eu_c, eh_c, ey_c, sg_c, su_c, sh_c, sy_c, sgate_c;
     mtl::Buffer hg_c, ident_c;   // the gathered expert input rows ((t,k)-ordered) + the identity entry map
     std::vector<mtl::Buffer> conv_state, S, kc, vc;
+    // MTP speculative decoding (--mtp N): the draft block's own KV cache (it is a full-attention
+    // layer), the verify window's scratch recurrent states (copied from the real S/conv before each
+    // window - the checkpoint - so the real states stay at the accept point whatever the window
+    // accepts), and the draft/window scratch.
+    mtl::Buffer mtp_kc, mtp_vc;
+    std::vector<mtl::Buffer> S_win, conv_win;
+    mtl::Buffer mtp_cat, hmtp, hlast, hmain_w, mtp_logits, logits_w;
 
     void reset() {
         pos = 0;
@@ -115,6 +122,11 @@ struct State {
         for (auto& b : S) if (b.ptr) std::memset(b.ptr, 0, b.bytes);
         for (auto& b : kc) if (b.ptr) std::memset(b.ptr, 0, b.bytes);
         for (auto& b : vc) if (b.ptr) std::memset(b.ptr, 0, b.bytes);
+        for (auto& b : conv_win) if (b.ptr) std::memset(b.ptr, 0, b.bytes);
+        for (auto& b : S_win) if (b.ptr) std::memset(b.ptr, 0, b.bytes);
+        if (mtp_kc.ptr) std::memset(mtp_kc.ptr, 0, mtp_kc.bytes);
+        if (mtp_vc.ptr) std::memset(mtp_vc.ptr, 0, mtp_vc.bytes);
+        if (hlast.ptr) std::memset(hlast.ptr, 0, hlast.bytes);
     }
 
     // STRATA_Q36M_ZERO_STATE / STRATA_Q36M_POISON_STATE diagnostics: fill every scratch buffer at
@@ -131,8 +143,11 @@ struct State {
                                &toks_c, &xc, &hc, &yc, &qkv_c, &z_c, &alpha_c, &beta_c, &conv_out_c,
                                &gdn_out_c, &qg_c, &k_c, &v_c, &q_c, &gate_c, &att_c, &router_c, &ids_c,
                                &wts_c, &scr, &srt_in_gu, &srt_in_d, &pos_c, &eg_c, &eu_c, &eh_c, &ey_c,
-                               &sg_c, &su_c, &sh_c, &sy_c, &sgate_c, &hg_c})
+                               &sg_c, &su_c, &sh_c, &sy_c, &sgate_c, &hg_c,
+                               &mtp_cat, &hmtp, &hlast, &hmain_w, &mtp_logits, &logits_w})
             if (b->ptr) std::memset(b->ptr, 0, b->bytes);
+        for (auto& b : S_win) if (b.ptr) std::memset(b.ptr, 0, b.bytes);
+        for (auto& b : conv_win) if (b.ptr) std::memset(b.ptr, 0, b.bytes);
     }
 };
 
@@ -835,7 +850,10 @@ void push_c_lpr8(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const T
 // LAST token is not chunked - the caller runs it as a decode window, which is also where the logits come
 // from.  Returns the GPU seconds.
 double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s,
-                            const int* toks, int nt, int64_t pos0) {
+                            const int* toks, int nt, int64_t pos0,
+                            const std::vector<mtl::Buffer>* S_use = nullptr,
+                            const std::vector<mtl::Buffer>* conv_use = nullptr,
+                            bool sk_force = false) {
     const auto& g = m.g;
     const int N = (int) g.n_embd, K = (int) m.top_k, FF = (int) g.n_ff, FS = (int) g.n_ff_shexp;
     const int C = (int) g.ssm_conv_channels, ZV = (int) g.ssm_value_dim;
@@ -904,6 +922,10 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
         }
 
         if (!strata::core::is_qsa_layer(g, l)) {
+            // the recurrent states this chunk's conv + delta rule write: the real ones, or the MTP
+            // verify window's scratch copies (the real states stay at the accept point)
+            const mtl::Buffer& Sst = S_use ? (*S_use)[(size_t) l] : s.S[(size_t) l];
+            const mtl::Buffer& Cst = conv_use ? (*conv_use)[(size_t) l] : s.conv_state[(size_t) l];
             push_c_gemv(ds, pipes, m.W(L(l, "attn_qkv.weight")), s.hc, s.qkv_c, nt, N);
             push_c_gemv(ds, pipes, m.W(L(l, "attn_gate.weight")), s.hc, s.z_c, nt, N);
             push_c_gemv(ds, pipes, m.W(L(l, "ssm_beta.weight")), s.hc, s.beta_c, nt, N);
@@ -921,7 +943,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                 const int Kd = (int) g.ssm_d_conv;
                 mtl::Dispatch d;
                 d.p = &pipes.p_conv_c;
-                d.args = {mtl::Arg::B(s.qkv_c), mtl::Arg::B(s.conv_state[l]), mtl::Arg::B(m.F(L(l, "ssm_conv1d.weight"))),
+                d.args = {mtl::Arg::B(s.qkv_c), mtl::Arg::B(Cst), mtl::Arg::B(m.F(L(l, "ssm_conv1d.weight"))),
                           mtl::Arg::B(s.conv_out_c), mtl::Arg::V(C), mtl::Arg::V(Kd), mtl::Arg::V(nt)};
                 d.grid[0] = (uint32_t)((C + 127) / 128);
                 d.grid[1] = (uint32_t)((nt + 15) / 16);
@@ -934,13 +956,13 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                 ds.clear();
                 std::fprintf(stderr, "TRACE G2 pos0=%d L=0 co=%.17g cst=%.17g\n", (int) pos0,
                              trace_rows((const float*) s.conv_out_c.ptr, (size_t) nt, (size_t) C),
-                             trace_rows((const float*) s.conv_state[l].ptr, 1, s.conv_state[l].bytes / 4));
+                             trace_rows((const float*) Cst.ptr, 1, Cst.bytes / 4));
             }
             {
                 mtl::Dispatch d;
                 d.p = &pipes.p_gdn_c;
                 d.args = {mtl::Arg::B(s.conv_out_c), mtl::Arg::B(s.alpha_c), mtl::Arg::B(m.F(L(l, "ssm_dt.bias"))),
-                          mtl::Arg::B(m.F(L(l, "ssm_a"))), mtl::Arg::B(s.beta_c), mtl::Arg::B(s.S[l]),
+                          mtl::Arg::B(m.F(L(l, "ssm_a"))), mtl::Arg::B(s.beta_c), mtl::Arg::B(Sst),
                           mtl::Arg::B(s.gdn_out_c), mtl::Arg::V(HK), mtl::Arg::V(DS), mtl::Arg::V(HV),
                           mtl::Arg::V(C), mtl::Arg::V(m.eps), mtl::Arg::V(nt)};
                 d.grid[0] = (uint32_t) HV;
@@ -953,7 +975,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                 ds.clear();
                 std::fprintf(stderr, "TRACE G3 pos0=%d L=0 go=%.17g sst=%.17g\n", (int) pos0,
                              trace_rows((const float*) s.gdn_out_c.ptr, (size_t) nt, (size_t) ZV),
-                             trace_rows((const float*) s.S[l].ptr, 1, s.S[l].bytes / 4));
+                             trace_rows((const float*) Sst.ptr, 1, Sst.bytes / 4));
             }
             {
                 mtl::Dispatch d;
@@ -995,7 +1017,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             // Attention over the chunk's rows: the decode path's own per-row dispatch sequence (the
             // row-blocked split-K computed the online-softmax order, which differs from k_attn's
             // one-pass order by ulps and diverged the ladder from the first full-attention layer)
-            push_qsa_attention(ds, pipes, s, s.q_c, s.gate_c, s.att_c, s.kc[l], s.vc[l], H, HKV, D, false, nt,
+            push_qsa_attention(ds, pipes, s, s.q_c, s.gate_c, s.att_c, s.kc[l], s.vc[l], H, HKV, D, sk_force, nt,
                                pos0);
             push_c_gemv(ds, pipes, m.W(L(l, "attn_output.weight")), s.att_c, s.yc, nt, H * D);
         }
@@ -1205,6 +1227,315 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
     return gpu_ms + cx.run_graph(ds);
 }
 
+// ------------------------------------------------------------------------------------------------- MTP
+// Speculative decoding through the GGUF's own MTP block (blk.<n_layers>), the CUDA engine's
+// spec_step (src/qwen35/q36_engine.cu: forward_mtp L2133, spec_step L2688, commit L2149) mirrored:
+// a redo-row draft call, a chained draft seeded by the block's own output, a verify window over the
+// main model, and a commit that re-runs the kept rows' conv + recurrence into the real states.
+// Greedy only: the window's picks are argmaxes, so the kept text is the plain greedy text whatever
+// the drafts proposed.
+
+// First-max argmax (sample_next's greedy rule: NaN skipped, ties keep the first).
+static int mtp_argmax(const float* lg, int n) {
+    int best = 0;
+    float bv = -1e30f;
+    for (int i = 0; i < n; ++i) {
+        if (std::isnan(lg[i])) continue;
+        if (lg[i] > bv) {
+            bv = lg[i];
+            best = i;
+        }
+    }
+    return best;
+}
+
+// One row through the draft block: the embedding normed by enorm and the seed hidden normed by
+// hnorm concatenated (s.mtp_cat), eh_proj, the block's attn_norm, then the block itself - a
+// full-attention layer, the decode path's exact QSA dispatch sequence against the block's own KV
+// cache at `pos` - and the shared_head_norm.  The block's normed output lands in s.hmtp (the
+// chained drafts' seed); nothing here touches s.pos.
+static void push_mtp_block_row(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const Model& m,
+                               State& s, const mtl::Buffer& seed, size_t seed_off, int tok, int64_t pos,
+                               bool sk_force) {
+    const auto& g = m.g;
+    const int64_t l = g.n_layers;
+    const int N = (int) g.n_embd;
+    const int H = (int) g.n_head, HKV = (int) g.n_head_kv, HD = (int) g.head_dim;
+    const int K = (int) m.top_k, FF = (int) g.n_ff, FS = (int) g.n_ff_shexp;
+
+    {   // the embedding row (the decode k_row)
+        const Tensor& e = m.W("token_embd.weight");
+        auto it = pipes.p_row.find(e.type);
+        if (it == pipes.p_row.end()) {
+            std::fprintf(stderr, "q36_metal: unhandled token_embd type %d\n", e.type);
+            std::exit(1);
+        }
+        mtl::Dispatch d;
+        d.p = &it->second;
+        d.args = {mtl::Arg::B(e.b, e.offset), mtl::Arg::B(s.x), mtl::Arg::V(e.row_bytes), mtl::Arg::V(tok),
+                  mtl::Arg::V(N)};
+        d.grid[0] = 16;
+        d.tg[0] = 128;
+        ds.push_back(d);
+    }
+    {   // s.mtp_cat = [enorm(embedding) | hnorm(seed)]
+        mtl::Dispatch d;
+        d.p = &pipes.p_rms;
+        d.args = {mtl::Arg::B(s.x), mtl::Arg::B(m.F(L(l, "nextn.enorm.weight"))), mtl::Arg::B(s.mtp_cat, 0),
+                  mtl::Arg::V(N), mtl::Arg::V(m.eps)};
+        d.grid[0] = 1;
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    {
+        mtl::Dispatch d;
+        d.p = &pipes.p_rms;
+        d.args = {mtl::Arg::B(seed, seed_off), mtl::Arg::B(m.F(L(l, "nextn.hnorm.weight"))),
+                  mtl::Arg::B(s.mtp_cat, (size_t) N * 4), mtl::Arg::V(N), mtl::Arg::V(m.eps)};
+        d.grid[0] = 1;
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    push_gemv(ds, pipes, m.W(L(l, "nextn.eh_proj.weight")), s.mtp_cat, s.x, nullptr, 1, 0, true);
+    {
+        mtl::Dispatch d;   // the block's attn_norm
+        d.p = &pipes.p_rms;
+        d.args = {mtl::Arg::B(s.x), mtl::Arg::B(m.F(L(l, "attn_norm.weight"))), mtl::Arg::B(s.h),
+                  mtl::Arg::V(N), mtl::Arg::V(m.eps)};
+        d.grid[0] = 1;
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    push_gemv(ds, pipes, m.W(L(l, "attn_q.weight")), s.h, s.qg, nullptr, 1, 0, true);
+    push_gemv(ds, pipes, m.W(L(l, "attn_k.weight")), s.h, s.k, nullptr, 1, 0, false);
+    push_gemv(ds, pipes, m.W(L(l, "attn_v.weight")), s.h, s.v, nullptr, 1, 0, false);
+    {
+        mtl::Dispatch d;
+        d.p = &pipes.p_attn_prep;
+        d.args = {mtl::Arg::B(s.qg), mtl::Arg::B(s.k), mtl::Arg::B(s.v),
+                  mtl::Arg::B(m.F(L(l, "attn_q_norm.weight"))), mtl::Arg::B(m.F(L(l, "attn_k_norm.weight"))),
+                  mtl::Arg::B(s.q), mtl::Arg::B(s.gate), mtl::Arg::B(s.mtp_kc), mtl::Arg::B(s.mtp_vc),
+                  mtl::Arg::V(H), mtl::Arg::V(HD), mtl::Arg::V(m.n_rot), mtl::Arg::V((int) pos),
+                  mtl::Arg::V(s.ctx), mtl::Arg::V(m.rope_base), mtl::Arg::V(m.eps)};
+        d.grid[0] = (uint32_t) (H + HKV);
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    push_qsa_attention(ds, pipes, s, s.q, s.gate, s.att, s.mtp_kc, s.mtp_vc, H, HKV, HD, sk_force, 1, pos);
+    push_gemv(ds, pipes, m.W(L(l, "attn_output.weight")), s.att, s.y, nullptr, 1, 0, true);
+    {   // residual add + post norm
+        mtl::Dispatch d;
+        d.p = &pipes.p_add;
+        d.args = {mtl::Arg::B(s.x), mtl::Arg::B(s.y), mtl::Arg::V(N)};
+        d.grid[0] = (uint32_t) ((N + 127) / 128);
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    {
+        mtl::Dispatch d;
+        d.p = &pipes.p_rms;
+        d.args = {mtl::Arg::B(s.x), mtl::Arg::B(m.F(L(l, "post_attention_norm.weight"))), mtl::Arg::B(s.h),
+                  mtl::Arg::V(N), mtl::Arg::V(m.eps)};
+        d.grid[0] = 1;
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    // the MoE (the block routes like any layer)
+    push_gemv(ds, pipes, m.W(L(l, "ffn_gate_inp.weight")), s.h, s.router, nullptr, 1, 0, true);
+    {
+        mtl::Dispatch d;
+        d.p = &pipes.p_topk_router;
+        d.args = {mtl::Arg::B(s.router), mtl::Arg::B(s.ids), mtl::Arg::B(s.wts), mtl::Arg::V((int) g.n_expert),
+                  mtl::Arg::V(K)};
+        d.grid[0] = 1;
+        d.tg[0] = 32;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    push_gemv(ds, pipes, m.W(L(l, "ffn_gate_exps.weight")), s.h, s.eg, &s.ids, K, 0, true);
+    push_gemv(ds, pipes, m.W(L(l, "ffn_up_exps.weight")), s.h, s.eu, &s.ids, K, 0, false);
+    push_gemv(ds, pipes, m.W(L(l, "ffn_gate_shexp.weight")), s.h, s.sg, nullptr, 1, 0, false);
+    push_gemv(ds, pipes, m.W(L(l, "ffn_up_shexp.weight")), s.h, s.su, nullptr, 1, 0, false);
+    {
+        mtl::Dispatch d;
+        d.p = &pipes.p_swiglu;
+        d.args = {mtl::Arg::B(s.eg), mtl::Arg::B(s.eu), mtl::Arg::B(s.eh), mtl::Arg::V(K * FF)};
+        d.grid[0] = (uint32_t) ((K * FF + 127) / 128);
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    {
+        mtl::Dispatch d;
+        d.p = &pipes.p_swiglu;
+        d.args = {mtl::Arg::B(s.sg), mtl::Arg::B(s.su), mtl::Arg::B(s.sh), mtl::Arg::V(FS)};
+        d.grid[0] = (uint32_t) ((FS + 127) / 128);
+        d.tg[0] = 128;
+        d.barrier = false;
+        ds.push_back(d);
+    }
+    push_gemv(ds, pipes, m.W(L(l, "ffn_down_exps.weight")), s.eh, s.ey, &s.ids, K, FF, true);
+    push_gemv(ds, pipes, m.W(L(l, "ffn_down_shexp.weight")), s.sh, s.sy, nullptr, 1, 0, false);
+    push_gemv(ds, pipes, m.W(L(l, "ffn_gate_inp_shexp.weight")), s.h, s.sgate, nullptr, 1, 0, false);
+    {
+        mtl::Dispatch d;
+        d.p = &pipes.p_moe_sum;
+        d.args = {mtl::Arg::B(s.x), mtl::Arg::B(s.ey), mtl::Arg::B(s.wts), mtl::Arg::B(s.sy), mtl::Arg::B(s.sgate),
+                  mtl::Arg::V(K), mtl::Arg::V(N)};
+        d.grid[0] = (uint32_t) ((N + 127) / 128);
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    {
+        mtl::Dispatch d;   // the block's normed output
+        d.p = &pipes.p_rms;
+        d.args = {mtl::Arg::B(s.x), mtl::Arg::B(m.F(L(l, "nextn.shared_head_norm.weight"))), mtl::Arg::B(s.hmtp),
+                  mtl::Arg::V(N), mtl::Arg::V(m.eps)};
+        d.grid[0] = 1;
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+}
+
+// The draft call: the rows the last window accepted re-run through the block at their positions
+// (seeded by that window's main-model hidden rows, s.hmain_w), then the row of the next token `nx`
+// (seeded by s.hlast) - the last row's head argmax is draft d1; the chained drafts d2.. seed from
+// the block's own output (s.hmtp).  s.pos is not touched; the block's KV cache takes the rows.
+static void mtp_draft(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s, bool sk_force,
+                      int nx, const std::vector<int32_t>& fix, int D, std::vector<int32_t>& drafts) {
+    const int64_t p = s.pos;
+    const size_t N = (size_t) m.g.n_embd;
+    const int V = (int) m.g.n_vocab;
+    drafts.assign((size_t) D, 0);
+    {
+        std::vector<mtl::Dispatch> ds;
+        for (size_t i = 0; i < fix.size(); ++i)
+            push_mtp_block_row(ds, pipes, m, s, s.hmain_w, i * N * 4, fix[i],
+                               p - (int64_t) fix.size() + (int64_t) i, sk_force);
+        push_mtp_block_row(ds, pipes, m, s, s.hlast, 0, nx, p, sk_force);
+        push_gemv(ds, pipes, m.W("output.weight"), s.hmtp, s.mtp_logits, nullptr, 1, 0, true);
+        cx.run_graph(ds);
+    }
+    drafts[0] = mtp_argmax(s.mtp_logits.as<float>(), V);
+    for (int d = 1; d < D; ++d) {   // chained: (the block's own output, the last draft) at the next position
+        std::vector<mtl::Dispatch> ds;
+        push_mtp_block_row(ds, pipes, m, s, s.hmtp, 0, drafts[(size_t) d - 1], p + d, sk_force);
+        push_gemv(ds, pipes, m.W("output.weight"), s.hmtp, s.mtp_logits, nullptr, 1, 0, true);
+        cx.run_graph(ds);
+        drafts[(size_t) d] = mtp_argmax(s.mtp_logits.as<float>(), V);
+    }
+}
+
+// The verify window: [x, d1..dD] through the main model as one T-wide chunk pass.  The GDN/conv
+// dispatches run against the window's scratch states, copied from the real ones first (the
+// checkpoint - the real states stay at the accept point whatever the window accepts); the KV
+// caches take the rows as usual (a rejected row's cells are overwritten before any later row or
+// step reads them).  Then every row's out-normed hidden (s.hmain_w: the next draft call's seeds)
+// and head logits, and the host argmax per row into picks.
+static void mtp_verify(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s, bool sk_force,
+                       int nx, const std::vector<int32_t>& drafts, int D, std::vector<int32_t>& picks) {
+    const auto& g = m.g;
+    const int N = (int) g.n_embd, V = (int) g.n_vocab;
+    const int T = D + 1;
+    const int HV = (int) g.ssm_v_heads, DS = (int) g.ssm_state_size;
+    const int C = (int) g.ssm_conv_channels;
+    {
+        std::vector<mtl::Dispatch> ds;   // the checkpoint: the real S/conv into the window's scratch
+        for (int64_t l = 0; l < g.n_layers; ++l) {
+            if (strata::core::is_qsa_layer(g, l)) continue;
+            const int s_cnt = HV * DS * DS;
+            mtl::Dispatch d;
+            d.p = &pipes.p_gather_t;
+            d.args = {mtl::Arg::B(s.S[(size_t) l]), mtl::Arg::B(s.S_win[(size_t) l]), mtl::Arg::V(s_cnt),
+                      mtl::Arg::V(1), mtl::Arg::V(s_cnt)};
+            d.grid[0] = (uint32_t) ((s_cnt + 127) / 128);
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+            const int c_cnt = (int) (g.ssm_d_conv - 1) * C;
+            mtl::Dispatch dc;
+            dc.p = &pipes.p_gather_t;
+            dc.args = {mtl::Arg::B(s.conv_state[(size_t) l]), mtl::Arg::B(s.conv_win[(size_t) l]),
+                       mtl::Arg::V(c_cnt), mtl::Arg::V(1), mtl::Arg::V(c_cnt)};
+            dc.grid[0] = (uint32_t) ((c_cnt + 127) / 128);
+            dc.tg[0] = 128;
+            dc.barrier = true;
+            ds.push_back(dc);
+        }
+        cx.run_graph(ds);
+    }
+    std::vector<int32_t> toks((size_t) T);
+    toks[0] = nx;
+    for (int d = 0; d < D; ++d) toks[(size_t) (d + 1)] = drafts[(size_t) d];
+    forward_prompt_chunk(cx, pipes, m, s, toks.data(), T, s.pos, &s.S_win, &s.conv_win, sk_force);
+    {
+        std::vector<mtl::Dispatch> ds;   // every row's out-normed hidden and head logits
+        mtl::Dispatch d;
+        d.p = &pipes.p_rms;
+        d.args = {mtl::Arg::B(s.xc), mtl::Arg::B(m.F("output_norm.weight")), mtl::Arg::B(s.hmain_w),
+                  mtl::Arg::V(N), mtl::Arg::V(m.eps)};
+        d.grid[0] = (uint32_t) T;
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+        push_c_gemv(ds, pipes, m.W("output.weight"), s.hmain_w, s.logits_w, T, N);
+        cx.run_graph(ds);
+    }
+    picks.assign((size_t) T, 0);
+    for (int r = 0; r < T; ++r)
+        picks[(size_t) r] = mtp_argmax((const float*) s.logits_w.ptr + (size_t) r * V, V);
+}
+
+// After a verify window kept its first n_keep rows (row 0 = the token the caller emitted, then the
+// accepted drafts): the GDN state takes those rows - the conv history and the recurrence run again
+// over the window's saved inputs (the chunk pass's qkv and alpha/beta rows), writing the real
+// states.  Then hlast = the last kept row's normed hidden and pos advances by n_keep.  The window's
+// scratch states are left stale; the next window's checkpoint rewrites them.
+static void mtp_commit(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s, int n_keep) {
+    const auto& g = m.g;
+    const int C = (int) g.ssm_conv_channels, HK = (int) g.ssm_k_heads, HV = (int) g.ssm_v_heads,
+              DS = (int) g.ssm_state_size, Kd = (int) g.ssm_d_conv;
+    std::vector<mtl::Dispatch> ds;
+    for (int64_t l = 0; l < g.n_layers; ++l) {
+        if (strata::core::is_qsa_layer(g, l)) continue;
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_conv_c;
+            d.args = {mtl::Arg::B(s.qkv_c), mtl::Arg::B(s.conv_state[l]), mtl::Arg::B(m.F(L(l, "ssm_conv1d.weight"))),
+                      mtl::Arg::B(s.conv_out_c), mtl::Arg::V(C), mtl::Arg::V(Kd), mtl::Arg::V(n_keep)};
+            d.grid[0] = (uint32_t) ((C + 127) / 128);
+            d.grid[1] = (uint32_t) ((n_keep + 15) / 16);
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+        {
+            mtl::Dispatch d;
+            d.p = &pipes.p_gdn_c;
+            d.args = {mtl::Arg::B(s.conv_out_c), mtl::Arg::B(s.alpha_c), mtl::Arg::B(m.F(L(l, "ssm_dt.bias"))),
+                      mtl::Arg::B(m.F(L(l, "ssm_a"))), mtl::Arg::B(s.beta_c), mtl::Arg::B(s.S[l]),
+                      mtl::Arg::B(s.gdn_out_c), mtl::Arg::V(HK), mtl::Arg::V(DS), mtl::Arg::V(HV),
+                      mtl::Arg::V(C), mtl::Arg::V(m.eps), mtl::Arg::V(n_keep)};
+            d.grid[0] = (uint32_t) HV;
+            d.tg[0] = 128;
+            d.barrier = true;
+            ds.push_back(d);
+        }
+    }
+    cx.run_graph(ds);
+    std::memcpy(s.hlast.ptr, (const float*) s.hmain_w.ptr + (size_t) (n_keep - 1) * (size_t) g.n_embd,
+                (size_t) g.n_embd * sizeof(float));
+    s.pos += n_keep;
+}
+
 std::vector<int> parse_ids(const std::string& s) {
     std::vector<int> v;
     size_t i = 0;
@@ -1227,6 +1558,7 @@ int run(int argc, char** argv) {
     int prefill_chunk = 0;   // --prefill N: the prompt-chunk size (0 = token-by-token, as before)
     bool prefill_given = false;
     bool serve_mode = false;
+    int mtp_d = 0;           // --mtp N: MTP draft tokens per speculative step (0 = off, as before)
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -1251,6 +1583,20 @@ int run(int argc, char** argv) {
                 std::fprintf(stderr, "strata metal q36: --prefill auto: chunk 512\n");
             } else {
                 prefill_chunk = std::atoi(pv.c_str());
+            }
+        } else if (a == "--mtp" && i + 1 < argc) {
+            // a number of drafts; Flash-Next's "--mtp <draft layer dir>" means nothing for this family
+            // (the CUDA engine, src/qwen35/q36_engine.cu, takes the same integer here)
+            const std::string mv = argv[++i];
+            if (!mv.empty() && mv[0] >= '0' && mv[0] <= '9') {
+                mtp_d = std::atoi(mv.c_str());
+                if (mtp_d > 16) {
+                    std::fprintf(stderr, "strata metal q36: --mtp %d is past the 16-draft cap\n", mtp_d);
+                    return 2;
+                }
+            } else {
+                std::fprintf(stderr, "strata metal q36: ignoring --mtp %s (this family's MTP is the GGUF's own "
+                                     "block: --mtp N drafts)\n", mv.c_str());
             }
         }
     }
@@ -1288,6 +1634,11 @@ int run(int argc, char** argv) {
         std::fprintf(stderr, "strata metal q36: expected qwen35moe architecture\n");
         return 1;
     }
+    if (mtp_d > 0 && m.g.n_mtp_layers <= 0) {
+        std::fprintf(stderr, "strata metal q36: --mtp %d needs the GGUF's own MTP block "
+                             "(qwen35moe.nextn_predict_layers); this file has none\n", mtp_d);
+        return 1;
+    }
 
     const std::string p = "qwen35moe.";
     if (const strata::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
@@ -1305,7 +1656,8 @@ int run(int argc, char** argv) {
         wrapped_shards.push_back(sb);
 
         for (const strata::TensorInfo& ti : f.tensors()) {
-            if (ti.name.rfind("blk." + std::to_string(m.g.n_layers) + ".", 0) == 0) continue; // skip MTP
+            if (mtp_d <= 0 && ti.name.rfind("blk." + std::to_string(m.g.n_layers) + ".", 0) == 0)
+                continue;   // the MTP block: wrapped only when drafts are on (--mtp N)
             const uint64_t nb = strata::tensor_payload_bytes(ti);
             const uint8_t* src = f.tensor_data(ti);
             const bool conv = ti.name.size() > 17 && ti.name.compare(ti.name.size() - 17, 17, "ssm_conv1d.weight") == 0;
@@ -1352,6 +1704,9 @@ int run(int argc, char** argv) {
     std::fprintf(stderr, "strata metal q36: model loaded in %.2f s (%.2f GB weights wrapped no-copy)\n",
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
                  total_weight_bytes / (1024.0 * 1024.0 * 1024.0));
+    if (mtp_d > 0)
+        std::fprintf(stderr, "strata metal q36: --mtp %d: the draft block (blk.%lld) is loaded\n",
+                     mtp_d, (long long) m.g.n_layers);
 
     // Allocate runtime state buffers
     State s;
@@ -1396,10 +1751,13 @@ int run(int argc, char** argv) {
         s.sk_pl = cx.alloc((size_t) SK_ROWS_MAX * n_chunk_max * sizeof(float));
     }
 
-    // Prompt-chunk buffers (--prefill N): sized for this run's largest chunk.  The prompt's last token is
-    // never chunked - it runs as a decode window, which is also where the logits come from.
-    if (prefill_chunk > 0) {
-        const size_t CT = (size_t) prefill_chunk;
+    // Prompt-chunk buffers (--prefill N), and the same scratch for the MTP verify window (--mtp N:
+    // the window is a chunk of mtp_d + 1 rows through the chunk kernels).  Sized for this run's
+    // largest chunk/window; the prompt's last token is never chunked - it runs as a decode window,
+    // which is also where the logits come from.
+    const int ct = (prefill_chunk > 0 || mtp_d > 0) ? std::max(prefill_chunk, mtp_d + 1) : 0;
+    if (ct > 0) {
+        const size_t CT = (size_t) ct;
         s.toks_c = cx.alloc(CT * sizeof(int));
         s.xc = cx.alloc(CT * N * sizeof(float));
         s.hc = cx.alloc(CT * N * sizeof(float));
@@ -1450,13 +1808,15 @@ int run(int argc, char** argv) {
                       && (int) g.n_ff == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_down_exps.weight")).type) > 0)
                          ? "are skipped"
                          : "are in play");
-        pipes.init_prompt(cx, prefill_chunk);
-        std::fprintf(stderr, "strata metal q36: prompt chunks of %d tokens on (chunk buffers %.2f GB)\n",
-                     prefill_chunk, (double) (CT * K * (size_t) (3 * FF + 2 * N + 5)) / (1024.0 * 1024.0 * 1024.0)
-                         + (double) (CT * (size_t) (6 * N + 2 * g.ssm_conv_channels + 2 * g.ssm_value_dim
-                                                    + 2 * g.ssm_v_heads + 2 * g.n_head * g.head_dim + 2 * g.n_head_kv * g.head_dim
-                                                    + 3 * g.n_head * g.head_dim + g.n_expert + 3 * g.n_ff_shexp + 1) * 4
-                                    + CT * K * 16 + 3 * 256 * 4) / (1024.0 * 1024.0 * 1024.0));
+        pipes.init_prompt(cx, ct);
+        if (prefill_chunk > 0)
+            std::fprintf(stderr,
+                         "strata metal q36: prompt chunks of %d tokens on (chunk buffers %.2f GB)\n",
+                         prefill_chunk, (double) (CT * K * (size_t) (3 * FF + 2 * N + 5)) / (1024.0 * 1024.0 * 1024.0)
+                             + (double) (CT * (size_t) (6 * N + 2 * g.ssm_conv_channels + 2 * g.ssm_value_dim
+                                                        + 2 * g.ssm_v_heads + 2 * g.n_head * g.head_dim + 2 * g.n_head_kv * g.head_dim
+                                                        + 3 * g.n_head * g.head_dim + g.n_expert + 3 * g.n_ff_shexp + 1) * 4
+                                        + CT * K * 16 + 3 * 256 * 4) / (1024.0 * 1024.0 * 1024.0));
     }
 
     // Working-set refusal with the numbers (the CUDA engine refuses a count that cannot fit, with the
@@ -1465,12 +1825,22 @@ int run(int argc, char** argv) {
     // threadgroup attention could reach - at or below it every setup runs exactly as before - and
     // STRATA_Q36M_MEM_OK=1 overrides it.
     {
-        const uint64_t est = cx.allocated() + (256ull << 20);
+        uint64_t mtp_bytes = 0;
+        if (mtp_d > 0) {
+            int64_t n_gdn = 0;
+            for (int64_t l = 0; l < g.n_layers; ++l) if (!strata::core::is_qsa_layer(g, l)) ++n_gdn;
+            mtp_bytes = 2 * (uint64_t) g.n_head_kv * (size_t) ctx * g.head_dim * 4   // the draft block's cache
+                        + (uint64_t) n_gdn * ((g.ssm_d_conv - 1) * g.ssm_conv_channels
+                                              + g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size) * 4
+                        + (2 * (size_t) g.n_embd + 3 * (size_t) g.n_embd + g.n_vocab
+                           + (size_t) (mtp_d + 1) * (g.n_embd + g.n_vocab)) * 4;   // the draft/window scratch
+        }
+        const uint64_t est = cx.allocated() + mtp_bytes + (256ull << 20);
         const uint64_t rec = cx.recommended_working_set();
-        if ((ctx > SK_TG_CAP || prefill_chunk > 0) && est > rec && !env_flag("STRATA_Q36M_MEM_OK")) {
+        if ((ctx > SK_TG_CAP || prefill_chunk > 0 || mtp_d > 0) && est > rec && !env_flag("STRATA_Q36M_MEM_OK")) {
             std::fprintf(stderr,
                          "strata metal q36: ctx %d takes ~%.2f GB allocated (+0.25 reserve) past the "
-                         "recommended working set %.2f GB - lower --ctx (or --prefill) or set "
+                         "recommended working set %.2f GB - lower --ctx (or --prefill, or --mtp) or set "
                          "STRATA_Q36M_MEM_OK=1\n",
                          ctx, est / 1e9, rec / 1e9);
             return 1;
@@ -1496,6 +1866,35 @@ int run(int argc, char** argv) {
             s.kc.push_back({});
             s.vc.push_back({});
         }
+    }
+
+    // MTP speculative decoding (--mtp N): the draft block's own KV cache (it is a full-attention
+    // layer), the verify window's scratch recurrent states, and the draft/window scratch.
+    if (mtp_d > 0) {
+        const size_t cache_bytes = (size_t) g.n_head_kv * s.ctx * g.head_dim * sizeof(float);
+        s.mtp_kc = cx.alloc(cache_bytes);
+        s.mtp_vc = cx.alloc(cache_bytes);
+        std::memset(s.mtp_kc.ptr, 0, cache_bytes);
+        std::memset(s.mtp_vc.ptr, 0, cache_bytes);
+        s.S_win.assign((size_t) g.n_layers, {});
+        s.conv_win.assign((size_t) g.n_layers, {});
+        for (int64_t l = 0; l < g.n_layers; ++l) {
+            if (strata::core::is_qsa_layer(g, l)) continue;
+            const size_t conv_bytes = (size_t) (g.ssm_d_conv - 1) * g.ssm_conv_channels * sizeof(float);
+            const size_t st_bytes = (size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size * sizeof(float);
+            s.conv_win[(size_t) l] = cx.alloc(conv_bytes);
+            s.S_win[(size_t) l] = cx.alloc(st_bytes);
+            std::memset(s.conv_win[(size_t) l].ptr, 0, conv_bytes);
+            std::memset(s.S_win[(size_t) l].ptr, 0, st_bytes);
+        }
+        s.mtp_cat = cx.alloc(2 * (size_t) N * sizeof(float));
+        s.hmtp = cx.alloc((size_t) N * sizeof(float));   // the block's last row's output: the chained drafts' seed
+        s.hlast = cx.alloc((size_t) N * sizeof(float));
+        s.hmain_w = cx.alloc((size_t) (mtp_d + 1) * N * sizeof(float));   // the window's per-row normed hiddens
+        s.mtp_logits = cx.alloc((size_t) g.n_vocab * sizeof(float));
+        s.logits_w = cx.alloc((size_t) (mtp_d + 1) * g.n_vocab * sizeof(float));
+        std::fprintf(stderr, "strata metal q36: mtp %d drafts: the draft block's cache and the window's "
+                             "scratch states are up\n", mtp_d);
     }
 
     auto sample_next = [&](float temp, float top_p) -> int {
@@ -1670,10 +2069,16 @@ int run(int argc, char** argv) {
             }
             live_tokens = ids;
             const double prompt_ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_prompt0).count() * 1000.0;
+            if (mtp_d > 0)   // the draft chain's seed: this request's last prompt row's normed hidden
+                std::memcpy(s.hlast.ptr, s.h.ptr, (size_t) m.g.n_embd * sizeof(float));
 
             const auto t_dec0 = std::chrono::steady_clock::now();
             long long produced = 0;
             const char* finish = "length";
+            // the MTP speculative state of this request: the redo rows the last window accepted, its
+            // drafts and the window's per-row picks (fresh per request - a new sequence drafts anew)
+            std::vector<int32_t> fix, drafts, picks;
+            long long mtp_offered = 0, mtp_accepted = 0;
 
             int cur_tok = sample_next(temperature, top_p);
             for (;;) {
@@ -1699,9 +2104,48 @@ int run(int argc, char** argv) {
                     break;
                 }
 
+                if (mtp_d > 0 && temperature <= 0.01f && s.pos + mtp_d + 1 <= s.ctx) {
+                    // the window: draft mtp_d tokens, verify them against the main model, and emit
+                    // what it confirms.  The kept rows are the ones actually shown - a window cut
+                    // short by a stop rule commits only its shown prefix, so the state ends where
+                    // the shown tokens end (the prefix cache's contract) and the DONE line stays
+                    // byte-for-byte what it was.
+                    mtp_draft(cx, pipes, m, s, sk_force, cur_tok, fix, mtp_d, drafts);
+                    mtp_offered += mtp_d;
+                    mtp_verify(cx, pipes, m, s, sk_force, cur_tok, drafts, mtp_d, picks);
+                    int a = 0;
+                    while (a < mtp_d && picks[(size_t) a] == drafts[(size_t) a]) ++a;
+                    mtp_accepted += a;
+                    int shown = 0;   // the window's draft rows whose tokens were shown
+                    bool stopped = false;
+                    for (int i = 0; i < a; ++i) {
+                        std::printf("T %d\n", drafts[(size_t) i]);
+                        std::fflush(stdout);
+                        ++produced;
+                        live_tokens.push_back(drafts[(size_t) i]);
+                        ++shown;
+                        if (drafts[(size_t) i] == 248046 || drafts[(size_t) i] == 248044 ||
+                            drafts[(size_t) i] == 151645 || drafts[(size_t) i] == 151643) {
+                            finish = "stop"; stopped = true; break;
+                        }
+                        if (produced >= max_new) { finish = "length"; stopped = true; break; }
+                        if (stop_flag.load()) { finish = "cancel"; stopped = true; break; }
+                        if (s.pos + shown + 1 >= s.ctx) { finish = "length"; stopped = true; break; }
+                    }
+                    mtp_commit(cx, pipes, m, s, 1 + shown);
+                    fix.assign(drafts.begin(), drafts.begin() + shown);
+                    cur_tok = picks[(size_t) shown];
+                    if (stopped) break;
+                    continue;
+                }
+
                 forward_token(cx, pipes, m, s, cur_tok, ids_host, sk_force);
                 cur_tok = sample_next(temperature, top_p);
             }
+            if (mtp_offered > 0)
+                std::fprintf(stderr, "strata metal q36: MTP %d drafts: %lld of %lld accepted (%.0f%%)\n",
+                             mtp_d, mtp_accepted, mtp_offered,
+                             100.0 * (double) mtp_accepted / (double) mtp_offered);
 
             const double decode_ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_dec0).count() * 1000.0;
             std::printf("DONE %lld %zu %.1f %.1f %s 0 0 %zu 0 0 0 0 0.0 %zu 0\n",
@@ -1769,12 +2213,53 @@ int run(int argc, char** argv) {
     const double prompt_time = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_prompt0).count();
     std::fprintf(stderr, "strata metal q36: prompt evaluated in %.2f s (%.1f tok/s)\n",
                  prompt_time, prompt.size() / prompt_time);
+    if (mtp_d > 0)   // the draft chain's seed: the prompt's last row's normed hidden
+        std::memcpy(s.hlast.ptr, s.h.ptr, (size_t) m.g.n_embd * sizeof(float));
 
     std::fprintf(stderr, "strata metal q36: generating %d tokens (greedy) ...\n", n_gen);
     std::printf("gen:");
     std::fflush(stdout);
 
     const auto t_gen0 = std::chrono::steady_clock::now();
+    if (mtp_d > 0) {
+        // the CUDA engine's CLI loop (q36_engine.cu L3932): emit the decided token, then the
+        // speculative step whose window re-verifies it and offers the drafts; the last commit's
+        // rows past n_gen stay unemitted (the process ends here)
+        std::vector<int> gen;
+        std::vector<int32_t> fix, drafts, picks;
+        long long offered = 0, accepted = 0;
+        int nx = sample_next(0.0f, 1.0f);
+        while ((int) gen.size() < n_gen) {
+            gen.push_back(nx);
+            std::printf(" %d", nx);
+            if ((int) gen.size() >= n_gen) break;
+            if (s.pos + mtp_d + 1 <= s.ctx) {
+                mtp_draft(cx, pipes, m, s, sk_force, nx, fix, mtp_d, drafts);
+                offered += mtp_d;
+                mtp_verify(cx, pipes, m, s, sk_force, nx, drafts, mtp_d, picks);
+                int a = 0;
+                while (a < mtp_d && picks[(size_t) a] == drafts[(size_t) a]) ++a;
+                accepted += a;
+                mtp_commit(cx, pipes, m, s, a + 1);
+                fix.assign(drafts.begin(), drafts.begin() + a);
+                for (int i = 0; i < a && (int) gen.size() < n_gen; ++i) {
+                    gen.push_back(drafts[(size_t) i]);
+                    std::printf(" %d", drafts[(size_t) i]);
+                }
+                nx = picks[(size_t) a];
+            } else {   // the window no longer fits: the plain decode step for what is left
+                forward_token(cx, pipes, m, s, nx, ids_host, sk_force);
+                nx = sample_next(0.0f, 1.0f);
+            }
+        }
+        std::fflush(stdout);
+        const double gen_time = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_gen0).count();
+        std::fprintf(stderr, "strata metal q36: generated %zu tokens in %.2f s (%.1f tok/s decode), MTP %d drafts: "
+                             "%lld of %lld accepted (%.0f%%)\n", gen.size(), gen_time,
+                     (double) gen.size() / gen_time, mtp_d, accepted, offered,
+                     offered ? 100.0 * (double) accepted / (double) offered : 0.0);
+        return 0;
+    }
     int cur_tok = sample_next(0.0f, 1.0f);
     std::printf(" %d", cur_tok);
     std::fflush(stdout);
