@@ -116,3 +116,30 @@ New subsection "Chunked-prefill speed on M2 (measured <date>)" after the §6 gat
 - Docs style: plain words, every number carries what it was measured on; results
   folders follow `bench/results/YYYY-MM-DD-<topic>/`; one change per PR, opt-in
   defaults until measured.
+
+## Implementation notes (2026-10-18, what actually happened)
+
+- **Ticket #000677's T3 data was already on main** (docs/QWEN36_METAL_ROADMAP.md):
+  chunked 512 ≈ token-by-token at depth (243 vs 245 s for a 4,098-token prompt at
+  --ctx 16384) because both paths re-read the same KV cells ~8x (GQA); short prompts
+  gain ~30% TTFT. So the expected gate outcome for this benchmark is **no flip** —
+  the tool exists to confirm it with the full 2K/4K/8K × 512/1024/2048 table, and
+  the data feeds T6 (GQA-folded attention). The reviewer confirmed this reading.
+- **Engine scaffolding** landed behavior-identical: `prefill_given` (flag-absent vs
+  `--prefill 0`) + `const int default_prefill_chunk = 0` in `run()`. The flip, if
+  the numbers ever say ≥5× everywhere, is a one-constant edit plus the
+  before-allocation memory downgrade — written then, not blind now (q36_metal.cpp
+  compiles only on macOS, so every blind edit risks breaking the maintainer's M2
+  build; the bench must run on an unmodified engine anyway).
+- **DONE-line precision**: the engine prints `prompt_ms` with %.1f, so ratios carry
+  ~1e-5 relative drift; the stub test compares with 1e-3 tolerance. Same drift will
+  appear between table rows on the M2 — harmless at a 5× gate.
+- **Stub-test gotchas found**: the stub must apply its speed multiplier only to the
+  chunked rows (the first version made the baseline fast too and the gate verdict
+  read 1.00x); the ctx-guard case needs a size that genuinely exceeds --ctx
+  (32000 + 16 still fits 32768 — use 33000).
+- The tool rewrites its JSON after every cell, so a killed run keeps its finished
+  rows; a refused start is a row note + its stderr log (engine-prefill-<chunk>.log).
+- Order of changes that worked: tool → stub test → scaffolding → doc command block,
+  one commit each; the M2 run, flip decision, parity re-run and doc table follow
+  when the maintainer pastes the bench output.
