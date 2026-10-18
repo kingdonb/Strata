@@ -65,11 +65,16 @@ commit (feature/000678) changed no token.
 
 ## T4 — MTP speculative decoding (`--mtp 2`)
 
-State: not started; the design is settled (the CUDA engine's spec_step mirrored: a redo-row draft call, a
-chained draft seeded by the block's own output, a verify window with per-row head and argmax,
-accept-prefix rewind by checkpointing S/conv and re-running the kept rows through the chunk path).
-Scope: load the `blk.40` nextn weights when `--mtp > 0`; the draft step; the verify window; greedy-only,
-opt-in, off by default.
+State: implemented on the delivery branch `feature/000679-metal-mtp-speculative` (2026-10-18):
+the `blk.40` nextn weights load when `--mtp > 0`, the draft step and the verify window run the
+CUDA engine's spec_step semantics through the T2 chunk kernels (window-scratch S/conv states
+copied from the real ones first — the checkpoint — and a commit that re-runs the kept rows into
+the real states), greedy-only, opt-in, off by default. The design doc is
+`design/tasks/000679_mtp-speculative-decoding/` on the helix-specs branch. Pending: the M2 gates
+(the 10-prompt parity twice vs `--mtp 0`, `q36_chunk_parity` still green, the measured decode
+ratio) and the measured numbers in docs/QWEN36_METAL.md §7.
+Scope: load the `blk.40` nextn weights when `--mtp > 0`; the draft step; the verify window;
+greedy-only, opt-in, off by default.
 Gates: `--mtp 2` greedy text identical to `--mtp 0` on the 10 parity prompts; the measured decode ratio
 on the same Mac and day; it stays opt-in unless ≥1.2x is measured. Depends on T2.
 
