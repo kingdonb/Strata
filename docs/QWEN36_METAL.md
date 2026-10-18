@@ -158,9 +158,13 @@ below.
 - The kernels are written for `SK_HD = 256` (the qwen35moe head_dim); the host refuses anything else.
   Program-scope constants in `q36.metal` are `enum`, not `constexpr` — MSL rejects the latter.
 
-Gates, measured on an M2 (macOS 26.6.2) with the model file from §5: the compile test creates all
-pipelines including the two split-K ones; forced split-K at 4K is 10/10 token-identical to the default
-path; `--ctx 32768` loads (READY 32768) and generates without crashes.
+Gates, measured on the M2 (macOS 26.6.2) with the model file from §5, on this exact build (2026-10-18):
+the compile test creates all pipelines including the two split-K ones; forced split-K at 4K is 10/10
+token-identical to the default `k_attn` path (128-token greedy; the prompts that hit a stop condition
+agree on every token they share); `--ctx 32768` loads (READY 32768) and the 10 parity prompts generate
+without crashes, decode 16.9–19.3 tok/s. Prompt processing at 32K stays sequential per token and costs
+~1.1–2.3 s even for the ~30-token parity prompts (10.1 s on the first request after load) — the
+chunked-prefill work targets exactly that.
 
 ```bash
 # the reference run
