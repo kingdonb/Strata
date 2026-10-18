@@ -134,3 +134,42 @@ If you have unlimited time, compute, and optimization resources, here is the pri
   ```bash
   ./run-q36.sh 8082
   ```
+
+## 6. Long context (split-K attention)
+
+`k_attn` keeps the attention scores in threadgroup memory, and Metal's threadgroup budget is 32 KB —
+8,192 score cells — so `--ctx` stopped at 8K. The split-K kernels lift that ceiling: the context is now
+limited by the KV cache and unified memory only. The default decode path is unchanged at 8,192 cells and
+below.
+
+- **Split-K attention** (`k_attn_sk_part` / `k_attn_sk_merge` in `metal/kernels/q36.metal`, ported from
+  q36_engine.cu's `k_attn_part` / `k_attn_merge`): one partial per (query row, 256-cell chunk) in device
+  scratch — the chunk's scores, running max `m`, sum `l` and `P·V` accumulator — and a merge kernel that
+  folds the chunks (the online-softmax rescale) and applies the sigmoid gate. The math and its order
+  match the CUDA engine's kernels. The decode step passes the head's query rows; scratch is bounded by
+  `SK_ROWS_MAX = 256` rows per dispatch, sized once at startup from `--ctx`.
+- **Engagement**: automatic on the decode step as soon as `n_pos` passes 8,192 cells; at or below it the
+  original `k_attn` runs unchanged. `STRATA_Q36M_ATTN_SK=1` forces split-K at any length — the parity
+  knob against `k_attn` at short context.
+- **Memory gate at startup**: the engine refuses a `--ctx` above 8,192 whose weights + KV + SSM state +
+  conv state + attention scratch + 0.25 GB reserve exceed `recommended_working_set()`, and prints every
+  component in GB (`STRATA_Q36M_MEM_OK=1` overrides; 8,192 and below is never refused, so existing setups
+  behave exactly as before).
+- The kernels are written for `SK_HD = 256` (the qwen35moe head_dim); the host refuses anything else.
+  Program-scope constants in `q36.metal` are `enum`, not `constexpr` — MSL rejects the latter.
+
+Gates, measured on an M2 (macOS 26.6.2) with the model file from §5: the compile test creates all
+pipelines including the two split-K ones; forced split-K at 4K is 10/10 token-identical to the default
+path; `--ctx 32768` loads (READY 32768) and generates without crashes.
+
+```bash
+# the reference run
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096" --out /tmp/q36-base.json
+# split-K forced at short context: tokens must equal the default path's
+STRATA_Q36M_ATTN_SK=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096" --out /tmp/q36-sk.json
+# long context: 32K boots and generates
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 32768" --out /tmp/q36-32k.json
+```
