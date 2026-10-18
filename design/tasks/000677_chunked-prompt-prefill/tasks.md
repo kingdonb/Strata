@@ -76,11 +76,19 @@
       (the partials scratch is reused across pairs); GPU-time return sums the per-layer graphs;
       trace mode unchanged (already per-cut). Every intra-layer dependency remains the barrier'd
       pattern the harness verifies; cross-command-buffer work is queue-ordered.
-- [ ] Round 15 (user): rebuild, rerun the ladder **twice** — want `identical: 10 of 10` on both
-      runs; then the two parity jsons also compared against the round-13 base json (the decode side
-      must be unchanged); if anything still differs, the TRACE battery (the round-14 list's 2/3)
-      localizes the residual
-- [ ] Apply any residual fix; one change per push, repeat until 10/10 twice
+- [~] **Round 15 (Mac, post per-layer flush): the ladder improved to 8/10 (p00@100, p01@69) but the
+      race SURVIVED** — chunk-vs-chunk2 of the same binary differs (p04 stops at 18 vs 19, p08 at
+      18). The racing unit = the dispatch TYPE: `run_graph` encoded `MTLDispatchTypeConcurrent`
+      (dispatches may overlap) while `memoryBarrierWithScope` does not order overlapping dispatches
+      on macOS — the `k_tables` race was the same class at 4 dispatches, and the harness's small
+      chains only looked stable.
+- [x] Fix (`62eba361`): `run_graph` encodes `MTLDispatchTypeSerial` — hardware in-order execution,
+      every barrier'd dependency holds by construction. The per-layer/per-pair flushes stay (small
+      graphs, less encode overhead); the bench paths keep their explicit concurrent choice.
+- [ ] Round 16 (user): rebuild, then (0) `cmp_gate /tmp/q36-base2.json /tmp/q36-base.json` (the
+      decode side's stability across the round-13b/15 builds — if it differs, forward_token gets
+      the same treatment); (1) the ladder twice + chunk-vs-chunk2 as in round 15 — want 10/10 ×3;
+      (2) rerun `q36_chunk_parity` (the 38/38 gate re-check on the new runtime)
 
 ## Step 5 — Land
 
