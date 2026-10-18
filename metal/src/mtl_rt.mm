@@ -303,7 +303,11 @@ double Context::run(const std::vector<Dispatch>& ds, int reps, bool concurrent, 
 double Context::run_graph(const std::vector<Dispatch>& ds) {
     @autoreleasepool {
         id<MTLCommandBuffer> cb = [impl_->q commandBufferWithUnretainedReferences];
-        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+        // Serial dispatches: the hardware executes them in order, so every barrier'd read-after-write
+        // dependency holds without trusting memoryBarrierWithScope (round 15: the chunk path raced
+        // nondeterministically even with per-layer graphs under the Concurrent type - the harness's
+        // small chains only looked stable; the k_tables race was the same class at 4 dispatches)
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
         for (size_t i = 0; i < ds.size(); ++i) {
             if (i > 0 && ds[i].barrier) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             encode(enc, ds[i]);
