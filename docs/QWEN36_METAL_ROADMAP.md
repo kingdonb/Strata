@@ -48,9 +48,15 @@ the flag is on) — the measured default flip is T3's.
 
 ## T3 — Chunked prefill: measured speed and the default flip
 
-State: unblocked — T2 green (M2, 2026-10-18); the early 20–40-token-prompt runs already showed TTFT
-~30% faster with `--prefill 512` (first-request JIT warmup included); this ticket owns the real 2K+
-measurement and the default decision.
+State: unblocked — T2 green (M2, 2026-10-18). First measured points (M2, UD-Q2_K_XL, 2026-10-18):
+short prompts (~20-40 tokens): TTFT ~30% faster with `--prefill 512`; a 4,098-token prompt at
+`--ctx 16384`: chunked 512 ≈ token-by-token (243 vs 245 s to the first token) — at depth the read is
+bound by the attention's KV reads (every query head of a KV group re-reads the same cells, ~8x), a term
+the parity contract keeps identical on both paths, and it grows with position (per-chunk 22 → 40 s).
+The lever this points at: a GQA-folded attention pass (one K/V read per KV-head group — same FLOPs,
+~1/8 the KV traffic at depth) would move the chunked read and the deep decode together; that is kernel
+work for its own ticket. The `--prefill` default stays token-by-token until a measurement says faster;
+`--prefill auto` resolves to 512 (never worse: ~20% better on short prompts, a wash at depth).
 Scope: TTFT and tok/s, chunked vs token-by-token, on 2K+-token prompts, same Mac, same day, same build;
 flip the `--prefill` default only with the numbers in hand (the project rule: change a default only where
 measured faster); re-run the 10-prompt parity at the new default; document the numbers in
