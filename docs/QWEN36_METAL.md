@@ -249,3 +249,8 @@ both paths pay the same ~8x GQA KV re-read, and that term grows with position; a
 chunk on Metal; 1024 and 2048 read 1.5-3% slower at every size, so there is no bigger-chunk win here like
 the CUDA engine's. What the benchmark does show in the chunk path's favor: a 2K prompt's TTFT drops from
 139 s to 92 s and an 8K one from 823 s to 647 s — real, just not a default-changing factor of five.
+
+Parity under the shipping default re-verified the same day on the same build: the no-flag run and the
+`--prefill 0` run are 10/10 token-identical (`q36_solo_gate.py` at `--ctx 32768`, 128-token greedy,
+`q36_cmp_gate.py`: `identical: 10 of 10`) — with the flip not taken, this is the check that the default
+path (and the scaffolding commit that touched its arg parsing) changed no token.
