@@ -117,13 +117,14 @@ struct State {
         for (auto& b : vc) if (b.ptr) std::memset(b.ptr, 0, b.bytes);
     }
 
-    // STRATA_Q36M_ZERO_STATE diagnostic: zero every scratch buffer at each request's start.  Under the
-    // no-stale-read invariant this is a semantic no-op; a ladder that becomes deterministic under it
-    // names the bug's class - some kernel reads scratch nothing wrote this run, and reads the previous
-    // request's leftovers (run-varying, since what ran before varies).  The 38-stage harness cannot
-    // see that class: its fresh buffers read as zeros either way.  ident_c is excluded - the host
-    // writes its identity map once at load and nothing rewrites it.
-    void zero_scratch() {
+    // STRATA_Q36M_ZERO_STATE / STRATA_Q36M_POISON_STATE diagnostics: fill every scratch buffer at
+    // each request's start with 0x00 or 0xff.  Zeros: under the no-stale-read invariant a semantic
+    // no-op; a ladder that becomes deterministic under it names the bug's class - some kernel reads
+    // scratch nothing wrote this run (the 38-stage harness cannot see that class: its fresh buffers
+    // read as zeros either way).  0xff: every float reads as a quiet NaN and every int as -1, so a
+    // stale read poisons the state visibly - the trace's first NaN layer names the kernel.  ident_c
+    // is excluded - the host writes its identity map once at load and nothing rewrites it.
+    void fill_scratch(unsigned char byte) {
         for (mtl::Buffer* b : {&x, &h, &y, &qkv, &z, &alpha, &beta, &conv_out, &gdn_out, &qg, &k, &v, &q,
                                &gate, &att, &router, &eg, &eu, &eh, &ey, &sg, &su, &sh, &sy, &sgate, &wts,
                                &ids, &logits, &sk_pacc, &sk_pm, &sk_pl,
@@ -1491,7 +1492,8 @@ int run(int argc, char** argv) {
 
     std::vector<int> ids_host(K);
 
-    const bool zero_state = env_flag("STRATA_Q36M_ZERO_STATE");   // the stale-scratch diagnostic
+    const bool zero_state = env_flag("STRATA_Q36M_ZERO_STATE");     // zero scratch at request start
+    const bool poison_state = env_flag("STRATA_Q36M_POISON_STATE"); // NaN/-1 fill wins when both set
 
     if (serve_mode) {
         std::printf("READY %d stop\n", s.ctx);
@@ -1582,7 +1584,7 @@ int run(int argc, char** argv) {
                 reuse = 0;
                 live_tokens.clear();
             }
-            if (zero_state) s.zero_scratch();
+            if (zero_state || poison_state) s.fill_scratch(poison_state ? 0xff : 0x00);
 
             const auto t_prompt0 = std::chrono::steady_clock::now();
             size_t pi = reuse;
@@ -1679,7 +1681,7 @@ int run(int argc, char** argv) {
     if (prompt.empty()) prompt = {248045, 846, 198, 9419, 248046, 198, 248045, 74455, 198}; // Default Qwen 3.6 ChatML prompt
 
     std::fprintf(stderr, "strata metal q36: evaluating prompt (%zu tokens) ...\n", prompt.size());
-    if (zero_state) s.zero_scratch();
+    if (zero_state || poison_state) s.fill_scratch(poison_state ? 0xff : 0x00);
     const auto t_prompt0 = std::chrono::steady_clock::now();
     {
         size_t pi = 0;
