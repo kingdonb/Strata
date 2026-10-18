@@ -1,6 +1,16 @@
 # Implementation Tasks: Qwen3.6 Metal Long Context, Chunked Prefill and MTP
 
-## STATUS (round 9, where we are)
+## STATUS (round 10c — re-scoped for one-change delivery)
+
+DELIVERY RE-SCOPE (user decision): the ticket was too broad to ship as one PR. The work now lands as seven
+one-change tickets per docs/QWEN36_METAL_ROADMAP.md (written into the first PR): **T0 the port** (PR
+staged: `feat/qwen36-port` = 866593f7 + e9548ba3 + f9168964 + the roadmap doc — nothing has ever shipped
+upstream; origin/main predates the port), **T1 split-K** (PR staged: `feat/qwen36-splitk` = 65037a91 + the
+MSL enum fix (cherry-picked, conflict resolved by hand: the A-era k_attn_sk_merge has no row0) + the
+split-K docs section; base = the port branch; propose after T0's approval), **T2 chunk-parity green**,
+**T3 prefill speed + default flip**, **T4 MTP**, **T5 fp16 KV + sampling profile**, **T6 wrap-up + the
+batch upstream PR + the maintenance offer**. The WIP branch feat/qwen36-metal stays as the T2-T5 working
+history.
 
 Goal: build on the merged Qwen3.6 Metal port (12.5-14.5 tok/s, 8K ctx cap, token-by-token prefill) the four
 follow-ups from the hand-off: split-K attention (32K+ ctx), chunked prefill (fast TTFT), MTP speculative
@@ -149,6 +159,16 @@ against its decode kernel and names the diverging stage in one Mac round.)
   (cpuD/cpuC, identical by the ey check) and prints them against the GPU deltas (x - x3) for t=0 and t=7.
   Whichever delta is zero (or wrong) names the dead combine; the initial line also settles which side is
   the unmoved one.  Round 10c: rerun ONLY ./build-metal/q36_chunk_parity and paste the moe2048 block.
+  **Round 10c RESULT (the combine question RESOLVED):** the decode combine is CORRECT (d_dec == the
+  host-recomputed cpuD to float noise); the chunk combine's SUM is correct too (x2 == cpuC exactly) -
+  **the GPU saw x2's memcpy-seeded bytes as ZEROS at combine time** (shared storage; x1's loop-written
+  bytes reach fine; toks_b's 32-byte memcpy reaches fine in stage 1).  Stage 11's pass is explained under
+  the same lens (both sides memcpy'd, both zero bases, equal sums).  The suite's checks are all GPU-vs-GPU;
+  the only host-vs-GPU cross-checks ever: toks_b (32B memcpy, reaches) and 10c's x1/x2 (64KB: loop
+  reaches, memcpy doesn't).  The probes are designed but NOT applied (GPU-side copies of x1/x2/x3 before
+  the chains + after the decode chain, plus an isolation combine on a fresh memcpy-seeded buffer).
+  **B IS PARKED HERE - this paragraph is T2's resume point; the delivery plan (T0/T1 PRs, T2-T6 tickets)
+  takes over.**
 
 ## Phase C — MTP speculative decoding
 
