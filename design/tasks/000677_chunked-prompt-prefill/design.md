@@ -25,6 +25,15 @@ a mechanism.
 
 **B. Decision tree for the moe2048 x fix (all inside the TEST file unless stated).**
 
+**RESOLVED (Mac round 11):** none of the rows below was the mechanism — the probes' timeline (bases
+intact at probeA/probeB, zeros at combine time, x3's HOST view zeroed too) exposed a fourth: every
+`k_gather_t` dispatch passed the ELEMENT count as the threadgroup count and the kernel had no bound
+check, so 128x the intended threads ran and the extras smashed the live buffers above the destination
+(zeros read from fresh arena pages). The fix (root cause, shipped): the kernel takes the element count
+and bounds its threads; all five dispatch sites (engine + 4 harness) pass ceil-div threadgroup grids.
+The engine's own chunk gather had the same bug — the likely ladder 0/10 root cause. The historical
+tree is kept below for the record.
+
 | Probe evidence | Mechanism | Fix |
 |---|---|---|
 | probeA: `x2g == 0` (host shows values); probeC: `x4 == x2` values | the 64 KB memcpy never reaches the GPU | Replace memcpy seeding with the proven-coherent pattern: write the row values once into a `std::vector<float>`, then loop-write `x1`, `x2`, `x3` (and `x4`) from it — identical bytes, the loop-write class proven to reach. Mirrors `x1`'s existing seeding. |
@@ -87,8 +96,15 @@ identical: 10 of 10               # exit 0
 
 ## Learnings for future agents
 
+- **The grid convention (this cost 11 rounds):** `d.grid` counts THREADGROUPS, `d.tg` threads per
+  threadgroup (`dispatchThreadgroups`). A dispatch wanting E elements at tg=128 passes
+  `grid = (E + 127) / 128`, and the kernel must bound-check its `thread_position_in_grid`. Passing
+  the raw element count as the grid runs 128x the threads — the extras silently read past the source
+  (fresh arena pages read as zeros) and write past the destination, smashing whichever live buffer
+  sits above it. Corrupts THIRD-party buffers, so stage checks that regenerate their own outputs
+  still pass — the blind spot that hid this for four rounds.
 - The harness names stages as `check("name", ...)` calls inside `// ---- N. ...` blocks; runtime
-  count = call sites × loop passes (37 at tip `9d4c0aee`).
+  count = call sites × loop passes (37 at tip `9d4c0aee`; 38 with the `moe2048 iso` guard).
 - Ladder parity always means: `q36_solo_gate.py` twice (plain / `--prefill 512`) + `q36_cmp_gate.py`
   — never eyeball engine logs.
 - Trace gates must pass `--log` to `q36_solo_gate.py` or the engine's stderr (all TRACE output)

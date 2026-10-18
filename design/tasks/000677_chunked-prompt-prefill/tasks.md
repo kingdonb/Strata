@@ -1,33 +1,39 @@
 # Implementation Tasks: Chunked Prompt Prefill — Parity Green (38/38 Stages)
 
-## Step 1 — Probe run (Mac, evidence only)
+## Step 1 — Probe run (Mac, evidence only) — DONE, root cause found
 
-- [ ] Ask the user to pull tip `9d4c0aee` on `feat/qwen36-metal`, `cmake --build build-metal`, and
-      run `./build-metal/q36_chunk_parity`; paste back the full moe2048 block (diag + probeA/B/C
-      lines) and the FAILURES line
-- [ ] Interpret the prints against the decision tree in design.md §B and name the mechanism
-- [ ] If the run leaves more than one viable hypothesis, bundle every surviving hypothesis's
-      discriminating probe into the next push (battery); expect ~one Mac round per hypothesis the
-      battery cannot separate in one run
+- [x] Mac round 11 (user, tip `9d4c0aee`): probeA/probeB saw the seeded bases intact; `moe2048 x`
+      still failed; `initial[0..2] = 0 0 0` (x3's HOST view zeroed by diag time); probeC's x4 == x2's
+      values. Full console block recorded in the ticket chat.
+- [x] Interpretation (supersedes the §B tree's "memcpy never reaches" row): both combine kernels are
+      correct (`x[...] += ...`); the bases were zeroed mid-chain by a THIRD party. Root cause: every
+      `k_gather_t` dispatch passed the ELEMENT count as the threadgroup count (grid = E, tg = 128 →
+      128x the threads), and the kernel had no bound check — the extra threads read past the source
+      (fresh arena pages read as zeros) and wrote ~64 MB (harness dga) / ~4 GB (engine, per chunk)
+      past the destination, smashing the live buffers above it: stage 16's x2/x3 (allocated after
+      hgc; x1 survived below it), and in the engine everything above `s.hg_c` on every chunk — the
+      ladder's 0/10.
 
-## Step 2 — Fix the failing stage (test file only)
+## Step 2 — Fix (pushed: `eac5e9a7` + merge `f6a7d081` + `87877024` on the task branch)
 
-- [ ] Apply the mapped fix in `metal/tests/q36_chunk_parity.cpp`: coherent seeding helper for the
-      memcpy-seeded GPU-read buffers (stage 16 `x2/x3/x4`, stage 11 `x1/x2` + `ey_ent`), or the
-      overlap fix, per the probe evidence
-- [ ] Promote the isolation combine to a checked stage `moe2048 iso` (38th stage; check it equals
-      `x1`'s combine result); keep probeA/B/C prints
-- [ ] Host pass: `g++ -fsyntax-only` where headers allow; confirm `git diff --stat` touches only
-      `metal/tests/q36_chunk_parity.cpp` (+ `q36_compile_test.cpp` only if pipelines changed)
-- [ ] Push and request Mac round: `q36_chunk_parity` must report 38/38 OK, 0 failures; verify
-      stage 11 still passes with real bases
+- [x] `metal/kernels/q36.metal`: `k_gather_t` takes the element count (`buffer(4)`) and bounds its
+      threads (`if (i >= count) return`)
+- [x] All five dispatch sites pass ceil-div threadgroup grids + the count: the engine's chunk gather
+      (`q36_metal.cpp`), the harness's dga, probeA's c1/c2/c3, probeB's cm
+- [x] The isolation combine is the suite's 38th checked stage: `moe2048 iso` = the pristine base
+      (memcpy'd from x3) through the chunk combine must equal x1's result bit for bit
+- [x] `g++ -fsyntax-only` passes for the harness and the engine; no CUDA/HIP/SYCL file touched
+- [ ] Mac round 12 (user): `git fetch && git switch feature/000677-chunked-prompt-prefill &&
+      cmake --build build-metal`, run `./build-metal/q36_chunk_parity` — expect 38/38 OK, 0 failures
+      (probeA/B prints unchanged, diag's d_dec now reads the surviving base, probeC's x4 == x1's
+      values)
 
-## Step 3 — Engine audit
+## Step 3 — Engine audit — done alongside the fix
 
-- [ ] List every host `memcpy` into a GPU-read shared buffer in the engine
-      (`metal/src/engine/q36_metal.cpp`, `window.cpp`) with sizes; confirm all are in the
-      proven-reaching small class (`toks_c` ≤ 2 KB per 512-token chunk, mrope rows) or fix GPU-side
-- [ ] Record the audit result in the ticket so T3 (default flip) inherits it
+- [x] The audit's biggest find was the engine's own gather dispatch (fixed above). Remaining
+      host→GPU memcpys on live paths: `s.toks_c` token ids (≤ 2 KB per 512-token chunk), mrope rows
+      (≤ 6 KB), image/last-norm rows (small) — all in the proven-reaching small class; the load-time
+      weight memcpys complete before any dispatch is encoded. No further engine change.
 
 ## Step 4 — Engine ladder (Mac)
 
@@ -35,10 +41,10 @@
       `/tmp/q36-chunk.json`; `q36_cmp_gate.py` must print `identical: 10 of 10`
 - [ ] If red: same round, rerun both trace gates with `--log` + `q36_trace_cmp.py`; name the first
       diverging layer/cut and apply the mapped fix (design.md §E order: G0 embtype, G8 re-check,
-      one-graph hazard); one fix per push, repeat until 10/10
+      one-graph hazard); bundled probe battery per push, ~one round per hypothesis it cannot split
 
 ## Step 5 — Land
 
 - [ ] Update `docs/QWEN36_METAL_ROADMAP.md` T2 State: green (stage count, ladder 10/10, Mac/date)
 - [ ] Confirm no CUDA/HIP/SYCL file changed; confirm `--prefill` stays opt-in (default flip is T3)
-- [ ] Request the final Mac verification of both gates and mark the ticket done
+- [ ] Propose the PR (task branch → main), then request the final Mac verification and mark done
