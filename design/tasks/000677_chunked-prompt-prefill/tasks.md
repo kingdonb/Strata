@@ -176,7 +176,13 @@
       CUDA q36 engine's exact line, so the percent, the llama.cpp-style prompt_progress and the #481
       silence allowance all work. No batch path exists in this engine, so the solo serve loop is the
       whole surface; the one-shot --tokens path is unchanged (no protocol consumer).
+- [x] The baseline (the in-flight run, old binary, token-by-token, M2, `--ctx 16384`, the 4,098-token
+      prompt): read ≈ 245 s (16.7 tok/s mean, ~60 ms/token), decode at pos ~4,100 = 8.0-8.1 tok/s (vs 17
+      at the ladder's shallow ctx-4096 positions). The depth effect: every token's attention reads the KV
+      so far, so both the read and the decode cost grows with position — not a regression, and the decode
+      term is the same math on both paths (the parity contract). This run = the A/B baseline for the
+      chunked read; the decode-at-depth cost is T4/T5 territory, not T2's.
 - [ ] The user rebuilds and re-runs the 16K test: the percent steps per chunk, and the
       "[strata] request prompt ... prefill X tok/s" line gives the chunked-vs-token-by-token numbers
-      (their in-flight run = the token-by-token baseline; the per-layer/pair commit floor ~1.2 s/chunk is
-      T3's to shave).
+      (the read should land ~3-5x under 245 s: the weights read once per chunk; the attention term stays;
+      the per-layer/pair commit floor ~1.2 s/chunk is T3's to shave).
