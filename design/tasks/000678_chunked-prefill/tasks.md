@@ -14,7 +14,7 @@
 
 ## Engine change (conditional on the gate)
 
-- [ ] In `metal/src/engine/q36_metal.cpp` `run()`: distinguish flag-absent from `--prefill 0`; on flip, default the chunk to the parity-verified winner, keep `--prefill 0` as the old token-by-token path and `STRATA_Q36M_PREFILL=1` unchanged; check a defaulted chunk against the memory estimate *before* the chunk-buffer allocation and downgrade to token-by-token with a stderr note when it would not fit (explicit `--prefill N` and `ctx > SK_TG_CAP` keep today's refuse); if the winning size differs from 512 and passed parity, re-point `--prefill auto`
+- [~] In `metal/src/engine/q36_metal.cpp` `run()`: distinguish flag-absent from `--prefill 0`; on flip, default the chunk to the parity-verified winner, keep `--prefill 0` as the old token-by-token path and `STRATA_Q36M_PREFILL=1` unchanged; check a defaulted chunk against the memory estimate *before* the chunk-buffer allocation and downgrade to token-by-token with a stderr note when it would not fit (explicit `--prefill N` and `ctx > SK_TG_CAP` keep today's refuse); if the winning size differs from 512 and passed parity, re-point `--prefill auto`
 - [ ] If the gate is not met: leave the default at 0 and record that in the doc
 
 ## Parity + docs (needs the M2 Mac — maintainer)
