@@ -1024,10 +1024,10 @@ int main() {
             mtl::Buffer x1g = cx.alloc(4 * T * N2), x2g = cx.alloc(4 * T * N2), x3g = cx.alloc(4 * T * N2);
             mtl::Dispatch c1, c2, c3;
             c1.p = c2.p = c3.p = &p_gather;
-            c1.args = {mtl::Arg::B(x1), mtl::Arg::B(x1g), mtl::Arg::V(T * N2), mtl::Arg::V(1)};
-            c2.args = {mtl::Arg::B(x2), mtl::Arg::B(x2g), mtl::Arg::V(T * N2), mtl::Arg::V(1)};
-            c3.args = {mtl::Arg::B(x3), mtl::Arg::B(x3g), mtl::Arg::V(T * N2), mtl::Arg::V(1)};
-            c1.grid[0] = c2.grid[0] = c3.grid[0] = T * N2;
+            c1.args = {mtl::Arg::B(x1), mtl::Arg::B(x1g), mtl::Arg::V(T * N2), mtl::Arg::V(1), mtl::Arg::V(T * N2)};
+            c2.args = {mtl::Arg::B(x2), mtl::Arg::B(x2g), mtl::Arg::V(T * N2), mtl::Arg::V(1), mtl::Arg::V(T * N2)};
+            c3.args = {mtl::Arg::B(x3), mtl::Arg::B(x3g), mtl::Arg::V(T * N2), mtl::Arg::V(1), mtl::Arg::V(T * N2)};
+            c1.grid[0] = c2.grid[0] = c3.grid[0] = (T * N2 + 127) / 128;
             c1.tg[0] = c2.tg[0] = c3.tg[0] = 128;
             cx.run_graph({c1, c2, c3});
             std::printf("  moe2048 probeA: gpu x1=%.9g/%.9g x2=%.9g/%.9g x3=%.9g/%.9g | host x1=%.9g x2=%.9g x3=%.9g\n",
@@ -1103,8 +1103,8 @@ int main() {
             mtl::Buffer x2m = cx.alloc(4 * T * N2);
             mtl::Dispatch cm;
             cm.p = &p_gather;
-            cm.args = {mtl::Arg::B(x2), mtl::Arg::B(x2m), mtl::Arg::V(T * N2), mtl::Arg::V(1)};
-            cm.grid[0] = T * N2;
+            cm.args = {mtl::Arg::B(x2), mtl::Arg::B(x2m), mtl::Arg::V(T * N2), mtl::Arg::V(1), mtl::Arg::V(T * N2)};
+            cm.grid[0] = (T * N2 + 127) / 128;
             cm.tg[0] = 128;
             cx.run_graph({cm});
             std::printf("  moe2048 probeB: gpu x2=%.9g/%.9g (host %.9g)\n", x2m.as<float>()[0],
@@ -1123,8 +1123,8 @@ int main() {
             dt.barrier = true;
             mtl::Dispatch dga;
             dga.p = &p_gather;
-            dga.args = {mtl::Arg::B(hg), mtl::Arg::B(hgc), mtl::Arg::V(N2), mtl::Arg::V(K)};
-            dga.grid[0] = T * K * N2;
+            dga.args = {mtl::Arg::B(hg), mtl::Arg::B(hgc), mtl::Arg::V(N2), mtl::Arg::V(K), mtl::Arg::V(T * K * N2)};
+            dga.grid[0] = (T * K * N2 + 127) / 128;
             dga.tg[0] = 128;
             dga.barrier = true;
             mtl::Dispatch dsw;
@@ -1235,6 +1235,24 @@ int main() {
                         x4.as<float>()[0], x4.as<float>()[T * N2 - 1], x1.as<float>()[0],
                         x1.as<float>()[T * N2 - 1], x2.as<float>()[0], x2.as<float>()[T * N2 - 1],
                         x3.as<float>()[0]);
+        }
+        // the isolation combine, checked (the suite's 38th stage): a fresh buffer carrying the pristine
+        // base through the chunk combine must reproduce x1's result bit for bit - same base bytes,
+        // term-identical verified inputs (ey2 through pos2 == ey1, shared wts2), same summation order.
+        // Permanent guard for the round-11 class: the gather's over-specified grid smashed the bases
+        // mid-chain (the combine then read zeros and x failed with the sum-only values).
+        {
+            mtl::Buffer x5 = cx.alloc(4 * T * N2);
+            std::memcpy(x5.ptr, x3.ptr, 4 * T * N2);
+            mtl::Dispatch dsum3;
+            dsum3.p = &p_sumc;
+            dsum3.args = {mtl::Arg::B(x5), mtl::Arg::B(ey2), mtl::Arg::B(wts2), mtl::Arg::B(sy0), mtl::Arg::B(gs0),
+                          mtl::Arg::B(pos2), mtl::Arg::V(K), mtl::Arg::V(N2), mtl::Arg::V(N2)};
+            dsum3.grid[0] = T;
+            dsum3.grid[1] = (N2 + 127) / 128;
+            dsum3.tg[0] = 128;
+            cx.run_graph({dsum3});
+            check("moe2048 iso", x5.ptr, x1.ptr, 4 * T * N2);
         }
     }
 

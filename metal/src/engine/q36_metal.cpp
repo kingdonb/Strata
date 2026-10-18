@@ -1053,8 +1053,9 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             {
                 mtl::Dispatch d;
                 d.p = &pipes.p_gather_t;
-                d.args = {mtl::Arg::B(s.hc), mtl::Arg::B(s.hg_c), mtl::Arg::V(N), mtl::Arg::V(K)};
-                d.grid[0] = (uint32_t)(n_ent * N);
+                d.args = {mtl::Arg::B(s.hc), mtl::Arg::B(s.hg_c), mtl::Arg::V(N), mtl::Arg::V(K),
+                          mtl::Arg::V(n_ent * N)};
+                d.grid[0] = (uint32_t) ((n_ent * N + 127) / 128);
                 d.tg[0] = 128;
                 d.barrier = true;
                 ds.push_back(d);

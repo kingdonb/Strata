@@ -988,7 +988,14 @@ kernel void k_gather_t(device const float* x [[buffer(0)]],
                        device float* y [[buffer(1)]],
                        constant int& width [[buffer(2)]],
                        constant int& K [[buffer(3)]],
+                       constant int& count [[buffer(4)]],   // elements = n_ent * width; bounds the grid's tail
                        uint i [[thread_position_in_grid]]) {
+    // Round 11 (M2): the dispatches passed the ELEMENT count as the threadgroup count, so 128x too many
+    // threads ran; with no bound here the extra ones read past x (fresh arena pages read as zeros) and
+    // wrote 128x past y, smashing live buffers above it (stage 16's x2/x3; the engine's state above
+    // hg_c on every chunk - the ladder's 0/10).  Grids now count threadgroups and this bound guards
+    // the tail threadgroup.
+    if (i >= (uint) count) return;
     const uint row = i / (uint) width;   // the entry index (t*K + k); its token is row / K
     y[i] = x[(ulong) (row / (uint) K) * width + i % (uint) width];
 }
