@@ -83,3 +83,29 @@ math and the same order, so long-context attention agrees with the CUDA path:
   applied in the same PR, otherwise gate 1 fails on M2.
 - Keep the docs' style: plain words, measured numbers with what they were measured on, no claims
   without a measurement (per `Strata/AGENTS.md`).
+
+## Implementation Notes (2026-10-18)
+
+- Branch executed as: `feature/000676-split-k-attention-uncap` = `main` (`e4fe2def`) + cherry-pick
+  `65037a91` (`e7a2de1d`, clean, hook kept the original message) + MSL enum fix (`9fbd3769`) + docs
+  (`d496736e`). The reviewer's branch name `feat/qwen36-splitk` was already claimed by another task in
+  this project (the proposal tool refused it), so the identical commits ride the task branch instead.
+- The MSL fix from `5f84e2e5` has TWO hunks, both needed: (1) `constexpr int SK_HD/SK_CELLS` →
+  `enum { ... }`; (2) drop the unused `h` in `k_attn_sk_merge` (`const int t = (int) row / H, h = ...` →
+  `const int t = (int) row / H;`). The part kernel's `t, h, kvh` line (L562) is NOT touched — `h` and
+  `kvh` are used there.
+- `5f84e2e5`'s version of the kernels is the chunk-era one (`row0` buffer arg, row-block merge). When
+  diffing our decode-only branch against that commit you WILL see those chunk differences — they are
+  expected and belong to the chunked-prefill task. The correct scope check is `git diff main HEAD`:
+  exactly 5 files (+39 docs §6, +1 test-request row, +124 kernels, +113/-16 engine, +4 compile test).
+- Host-side check that works on the Linux sandbox: `g++ -fsyntax-only -std=c++17 -Iinclude -Imetal/include
+  -Imetal/src metal/src/engine/q36_metal.cpp` passes clean with `-Iinclude` (the engine includes
+  `strata/qwen35/engine.hpp` from the main include dir). Metal kernels cannot be compiled here — gate 1
+  on the Mac covers them.
+- Gate citations: the M2 runs are recorded in the (abandoned) branch's spec commits — compile gate at
+  `44b4f8e0` ("all 30 pipelines, macOS 26.6.2"), parity 10/10 + READY 32768 at `c7a66ff3`. The recorded
+  detail lives in `git show c7a66ff3:design/tasks/000675_here-is-this-hand-off/tasks.md`.
+- `docs/TEST_REQUESTS.md` is a 3-column table (| Wanted | Why | Example of an earlier answer |); add a
+  row, not a section. `docs/QWEN36_METAL.md` had sections 1-5 on `main`; §6 is appended after §5's last
+  bullet (`./run-q36.sh 8082`).
+- Commit hook: conventional-commit format enforced in both repos; subjects over 72 chars only warn.
