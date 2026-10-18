@@ -1393,6 +1393,15 @@ int run(int argc, char** argv) {
                                  "mix (n_ff 2048, lpr8-typed down, non-lpr8 gate/up)\n");
             std::exit(1);
         }
+        std::fprintf(stderr,
+                     "strata metal q36: chunk expert kernels: gate/up lpr8=%d down lpr8=%d (the entry tables and "
+                     "their placement atomics %s)\n",
+                     (int) ((int) g.n_embd == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_gate_exps.weight")).type) > 0),
+                     (int) ((int) g.n_ff == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_down_exps.weight")).type) > 0),
+                     ((int) g.n_embd == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_gate_exps.weight")).type) > 0
+                      && (int) g.n_ff == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_down_exps.weight")).type) > 0)
+                         ? "are skipped"
+                         : "are in play");
         pipes.init_prompt(cx, prefill_chunk);
         std::fprintf(stderr, "strata metal q36: prompt chunks of %d tokens on (chunk buffers %.2f GB)\n",
                      prefill_chunk, (double) (CT * K * (size_t) (3 * FF + 2 * N + 5)) / (1024.0 * 1024.0 * 1024.0)
