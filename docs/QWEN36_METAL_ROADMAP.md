@@ -48,19 +48,20 @@ the flag is on) — the measured default flip is T3's.
 
 ## T3 — Chunked prefill: measured speed and the default flip
 
-State: unblocked — T2 green (M2, 2026-10-18). First measured points (M2, UD-Q2_K_XL, 2026-10-18):
-short prompts (~20-40 tokens): TTFT ~30% faster with `--prefill 512`; a 4,098-token prompt at
-`--ctx 16384`: chunked 512 ≈ token-by-token (243 vs 245 s to the first token) — at depth the read is
-bound by the attention's KV reads (every query head of a KV group re-reads the same cells, ~8x), a term
-the parity contract keeps identical on both paths, and it grows with position (per-chunk 22 → 40 s).
-The lever this points at: a GQA-folded attention pass (one K/V read per KV-head group — same FLOPs,
-~1/8 the KV traffic at depth) would move the chunked read and the deep decode together; that is T6's
-kernel work. The `--prefill` default stays token-by-token until a measurement says faster;
-`--prefill auto` resolves to 512 (never worse: ~20% better on short prompts, a wash at depth).
-Scope: TTFT and tok/s, chunked vs token-by-token, on 2K+-token prompts, same Mac, same day, same build;
-flip the `--prefill` default only with the numbers in hand (the project rule: change a default only where
-measured faster); re-run the 10-prompt parity at the new default; document the numbers in
-docs/QWEN36_METAL.md.
+State: measured and decided (M2, UD-Q2_K_XL, 2026-10-18) — the default flip is **not taken**: the full
+matrix (`tools/qwen35/q36_prefill_bench.py`; the table and the decision in docs/QWEN36_METAL.md §6) reads
+the chunk path at 1.24-1.51x the token-by-token rate (2K 14.7 → 22.3 tok/s at chunk 512, 8K 10.0 → 12.7),
+nowhere near the 5x the flip needs, so the no-flag default stays token-by-token and `--prefill auto` stays
+512 (the best measured chunk; 1024 and 2048 read 1.5-3% slower at every size — no bigger-chunk win here
+like the CUDA engine's). The earlier first points still explain the shape: short prompts (~20-40 tokens):
+TTFT ~30% faster with `--prefill 512`; a 4,098-token prompt at `--ctx 16384`: chunked 512 ≈ token-by-token
+(243 vs 245 s to the first token) — at depth the read is bound by the attention's KV reads (every query
+head of a KV group re-reads the same cells, ~8x), a term the parity contract keeps identical on both
+paths, and it grows with position (per-chunk 22 → 40 s). The lever this points at: a GQA-folded attention
+pass (one K/V read per KV-head group — same FLOPs, ~1/8 the KV traffic at depth) would move the chunked
+read and the deep decode together; that is T6's kernel work. Remaining from T3's scope: the 10-prompt
+parity at the shipping default (no-flag vs `--prefill 0`), which doubles as the check that the scaffolding
+commit (feature/000678) changed no token.
 
 ## T4 — MTP speculative decoding (`--mtp 2`)
 
