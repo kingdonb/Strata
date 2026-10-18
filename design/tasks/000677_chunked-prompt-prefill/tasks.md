@@ -23,7 +23,7 @@
 - [x] The isolation combine is the suite's 38th checked stage: `moe2048 iso` = the pristine base
       (memcpy'd from x3) through the chunk combine must equal x1's result bit for bit
 - [x] `g++ -fsyntax-only` passes for the harness and the engine; no CUDA/HIP/SYCL file touched
-- [~] Mac round 12 (user, 2026-10-18): the build FAILED on my merge's duplicate `p_attn_sk_part/merge`
+- [x] Mac round 12 (user, 2026-10-18): the build FAILED on my merge's duplicate `p_attn_sk_part/merge`
       declarations in `q36_compile_test.cpp`; ninja stopped and the parity ran the **stale `9d4c0aee`
       binary**: its 4-arg gather dispatches met the new 5-arg MSL (compiled at run time from the source
       tree), the unbound `count` slot read 0, and every gather returned on its first check — nothing
@@ -37,9 +37,14 @@
       the list comes from `MTLComputePipelineReflection.arguments` via the pipeline-creation call's
       out-param (`76ba259d`); site sweep (engine q36 + q35 + harness): zero under-bound dispatches,
       the guard cannot false-fire
-- [ ] Mac round 13 (user): rebuild (`cmake --build build-metal`), `./build-metal/q36_chunk_parity` —
-      expect 38/38 OK, 0 failures (probeA/B print the seeded values again, `dga` populates `hgc`,
-      `moe2048 iso` present); then the ladder (Step 4)
+- [x] **Mac round 13 (user, 2026-10-18): GATE 1 PASSED — `./build-metal/q36_chunk_parity` reports
+      all 38/38 stages bit-identical, 0 failures.** Tells all textbook: probeA/B see the seeded
+      values (the gathers work); the diag's `d_dec == d_chk` to the last digit; x3 survives (the
+      smash is gone); probeC's `x4 == x1` (the round-10c "GPU saw the base as zeros" question
+      resolved at the root); `moe2048 iso` (the 38th stage) OK. The arg-count guard is live:
+      `refl.arguments` populated `arg_min` (deprecation warnings only — `MTLArgument`/`.arguments`/
+      `.type` are macOS-13-deprecated with `MTLBinding`/`bindings`/`MTLBindingType` as the
+      replacements; the house tolerates warnings).
 
 ## Step 3 — Engine audit — done alongside the fix
 
