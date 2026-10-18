@@ -156,6 +156,21 @@ static double trace_rows(const float* p, size_t rows, size_t width) {
     }
     return s;
 }
+
+// FNV-1a over the region's raw bytes: float SUMS absorb a 1-ulp change of one element below the
+// sum's own ulp, so the TRACE D/C layer checksums are blind to exactly the ulp-scale perturbation
+// the chunk path hunts (round 20's lesson: "LAYERS: all bit-identical" held while the tokens
+// flipped).  The hash makes ulp-scale divergence visible, and per-token hashes localize it to
+// (layer, token).  fnv_offset_basis = 0xcbf29ce484222325, prime = 0x100000001b3.
+static unsigned long long trace_fnv(const float* p, size_t n) {
+    unsigned long long h = 0xcbf29ce484222325ull;
+    const unsigned char* b = (const unsigned char*) p;
+    for (size_t i = 0; i < n * 4; ++i) {
+        h ^= (unsigned long long) b[i];
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
 // an entry-major buffer's rows in (token, slot) order through the placement table
 static double trace_rows_pos(const float* p, const int* pos, int n_ent, size_t width) {
     double s = 0.0;
@@ -666,7 +681,8 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
                          trace_rows((const float*) s.x.ptr, 1, (size_t) N));
         }
 
-        if (tr) {   // debug: run this layer alone and checksum the token's rows (row sums in index order)
+        if (tr) {   // debug: run this layer alone and checksum the token's rows (row sums in index order;
+                    // fx/fh = the bit hashes - the sums are blind to ulp-scale state differences)
             cx.run_graph(ds);
             ds.clear();
             double xs = 0.0, hs = 0.0;
@@ -674,7 +690,8 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
             for (int i = 0; i < N; ++i) xs += xp[i];
             const float* hp = (const float*) s.h.ptr;
             for (int i = 0; i < N; ++i) hs += hp[i];
-            std::fprintf(stderr, "TRACE D pos=%d L=%d x=%.17g h=%.17g\n", (int) s.pos, (int) l, xs, hs);
+            std::fprintf(stderr, "TRACE D pos=%d L=%d x=%.17g h=%.17g fx=%016llx fh=%016llx\n", (int) s.pos, (int) l,
+                         xs, hs, trace_fnv(xp, (size_t) N), trace_fnv(hp, (size_t) N));
         }
     }
 
@@ -1146,10 +1163,14 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                          trace_rows((const float*) s.xc.ptr, (size_t) nt, (size_t) N));
         }
 
-        if (trc) {   // debug: run this layer alone and checksum every row
+        if (trc) {   // debug: run this layer alone and checksum every row (fx/fh = whole-layer bit
+                    // hashes, fx0/fh0 = per-token lists - the float sums are blind to ulp-scale
+                    // state differences, round 20's lesson)
             cx.run_graph(ds);
             ds.clear();
             double xs = 0.0, hs = 0.0;
+            std::string tx, th;
+            char buf[32];
             const float* xp = (const float*) s.xc.ptr;
             const float* hp = (const float*) s.hc.ptr;
             for (int t = 0; t < nt; ++t) {
@@ -1158,9 +1179,18 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                 for (int i = 0; i < N; ++i) rh += hp[(size_t) t * N + i];
                 xs += rx;
                 hs += rh;
+                std::snprintf(buf, sizeof buf, ",%016llx", trace_fnv(xp + (size_t) t * N, (size_t) N));
+                tx += buf;
+                std::snprintf(buf, sizeof buf, ",%016llx", trace_fnv(hp + (size_t) t * N, (size_t) N));
+                th += buf;
             }
-            std::fprintf(stderr, "TRACE C nt=%d pos0=%lld L=%lld x=%.17g h=%.17g\n", nt, (long long) pos0,
-                         (long long) l, xs, hs);
+            std::fprintf(stderr, "TRACE C nt=%d pos0=%lld L=%lld x=%.17g h=%.17g fx=%016llx fh=%016llx\n",
+                         nt, (long long) pos0, (long long) l, xs, hs, trace_fnv(xp, (size_t) nt * N),
+                         trace_fnv(hp, (size_t) nt * N));
+            std::fprintf(stderr, "TRACE CT pos0=%lld L=%lld fx=%s\n", (long long) pos0, (long long) l,
+                         tx.c_str() + 1);
+            std::fprintf(stderr, "TRACE CT pos0=%lld L=%lld fh=%s\n", (long long) pos0, (long long) l,
+                         th.c_str() + 1);
         } else {   // one command buffer per layer: the accumulated whole-chunk graph (~600 barrier'd
                    // dispatches) raced nondeterministically on the M2 (rounds 8b/14 - the ladder's
                    // failing set and depths changed between runs); every intra-layer dependency is

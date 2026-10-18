@@ -11,17 +11,19 @@
 #       --args "--native $Q36_MODEL --ctx 4096 --prefill 512" --out /tmp/chunk.json --log /tmp/trace-chunk.log
 #   python3 tools/qwen35/q36_trace_cmp.py /tmp/trace-plain.log /tmp/trace-chunk.log
 #
-# Two comparisons, both bit-exact when the states match (rows summed in index order; the decode side
-# prints per (token, cut), the script sums those over the chunk's token range in token order - the same
-# accumulation the chunk side does):
-#   * per LAYER (TRACE D / TRACE C lines): the first layer whose whole-layer state differs;
+# Two comparisons, both exact when the states match:
+#   * per LAYER (TRACE D / TRACE C lines): the first layer whose whole-layer state differs.  When both
+#     logs carry bit hashes (fx=/fh=, added after round 20 - the float sums absorb a 1-ulp change of
+#     one element below the sum's own ulp, which hid exactly the perturbation this hunt is after), the
+#     hashes decide; the per-token lists (TRACE CT lines) then name the first diverging (layer, token).
 #   * per CUT inside layer 0 (TRACE G lines): emb -> projections -> conv -> delta rule -> norm/out ->
 #     add -> post-norm -> router/route -> experts -> down/combine -> moe - the dispatch that diverges.
 import re
 import sys
 
-D_RE = re.compile(r"TRACE D pos=(-?\d+) L=(-?\d+) x=(-?[\d.eE+-]+) h=(-?[\d.eE+-]+)")
-C_RE = re.compile(r"TRACE C nt=(\d+) pos0=(-?\d+) L=(-?\d+) x=(-?[\d.eE+-]+) h=(-?[\d.eE+-]+)")
+D_RE = re.compile(r"TRACE D pos=(-?\d+) L=(-?\d+) x=(-?[\d.eE+-]+) h=(-?[\d.eE+-]+)(?: fx=(\w+) fh=(\w+))?")
+C_RE = re.compile(r"TRACE C nt=(\d+) pos0=(-?\d+) L=(-?\d+) x=(-?[\d.eE+-]+) h=(-?[\d.eE+-]+)(?: fx=(\w+) fh=(\w+))?")
+CT_RE = re.compile(r"TRACE CT pos0=(-?\d+) L=(-?\d+) f(x|h)=([0-9a-f]+(?:,[0-9a-f]+)*)")
 G_RE = re.compile(r"TRACE G(\d+) pos0?=(-?\d+) L=(-?\d+)(.*)")
 SNAP_FIELDS = {"cst", "sst"}     # state snapshots: compared at the chunk's LAST token, not summed
 SKIP_FIELDS = {"embtype", "r0", "rl"}   # printed for information on both sides, not a sum
@@ -36,12 +38,17 @@ def parse(path):
             continue
         m = D_RE.match(line)
         if m and cur is not None:
-            cur.append(("D", int(m.group(1)), int(m.group(2)), float(m.group(3)), float(m.group(4))))
+            cur.append(("D", int(m.group(1)), int(m.group(2)), float(m.group(3)), float(m.group(4)),
+                        m.group(5), m.group(6)))
             continue
         m = C_RE.match(line)
         if m and cur is not None:
             cur.append(("C", int(m.group(1)), int(m.group(2)), int(m.group(3)), float(m.group(4)),
-                        float(m.group(5))))
+                        float(m.group(5)), m.group(6), m.group(7)))
+            continue
+        m = CT_RE.match(line)
+        if m and cur is not None:
+            cur.append(("CT", int(m.group(1)), int(m.group(2)), m.group(3), m.group(4).split(",")))
             continue
         m = G_RE.match(line)
         if m and cur is not None:
@@ -63,21 +70,70 @@ def layer_compare(r0, c0):
         print("layer compare: missing TRACE D/C lines (skipped)")
         return
     nt, pos0 = c0c[0][1], c0c[0][2]
+    hashed = r0d[0][5] is not None and c0c[0][6] is not None
+    if hashed:
+        print("layer compare mode: BIT HASHES (exact; the float sums are ulp-blind)")
     ref = {}
-    for _, pos, l, x, h in r0d:
+    for e in r0d:
+        pos, l = e[1], e[2]
         if pos0 <= pos < pos0 + nt:
-            a = ref.setdefault(l, [0.0, 0.0])
-            a[0] += x
-            a[1] += h
+            a = ref.setdefault(l, [None, None])
+            if hashed:
+                a[0], a[1] = e[5], e[6]
+            else:
+                a[0] = (a[0] or 0.0) + e[3]
+                a[1] = (a[1] or 0.0) + e[4]
     bad = []
-    for _, cnt, p0, l, x, h in c0c:
-        a = ref.get(l)
-        if a is None or x != a[0] or h != a[1]:
-            bad.append(l)
+    for e in c0c:
+        l, x, h, fx, fh = e[3], e[6], e[7], e[6], e[7]
+        a = ref.get(e[3])
+        if a is None:
+            bad.append(e[3])
+            continue
+        if hashed:
+            if fx != a[0] or fh != a[1]:
+                bad.append(e[3])
+        elif x != a[0] or h != a[1]:
+            bad.append(e[3])
     if bad:
         print(f"LAYERS: first diverging layer {bad[0]} ({len(bad)} of {len(c0c)} differ)")
-    else:
-        print("LAYERS: all bit-identical")
+        if hashed:
+            token_verdict(c0, r0d, bad[0], pos0, nt)
+        return
+    print("LAYERS: all bit-identical" + ("" if hashed else " (sums only - ulp-scale state differences "
+                                        "are invisible; the fx=/fh= hashes need the new engine build)"))
+
+
+def token_verdict(c0, r0d, layer, pos0, nt):
+    """With hashes, name the first diverging token of the first diverging layer."""
+    ct = {}
+    for e in c0:
+        if e[0] == "CT" and e[2] == layer:
+            ct[e[3]] = e[4]      # 'x' or 'h' -> the per-token hash list
+    if not ct:
+        print("  per-token lists: none for this layer (skipped)")
+        return
+    # the decode side's per-token hashes for the same positions
+    rd = {}
+    for e in r0d:
+        pos, l, fx, fh = e[1], e[2], e[5], e[6]
+        if l == layer and pos0 <= pos < pos0 + nt:
+            rd[pos - pos0] = (fx, fh)
+    for field in ("x", "h"):
+        cl = ct.get(field)
+        if not cl:
+            continue
+        for t, hv in enumerate(cl):
+            r = rd.get(t)
+            if r is None:
+                continue
+            rh = r[0] if field == "x" else r[1]
+            if rh is not None and rh != hv:
+                print(f"  first diverging (layer, token): L={layer} t={t} (pos={pos0 + t}) field={field} "
+                      f"chunk_fnv={hv} decode_fnv={rh}")
+                return
+    print(f"  per-token hashes match at L={layer} - the whole-layer hash differs only via row padding "
+          "or the sums mode is stale")
 
 
 def cut_compare(r0, c0):
