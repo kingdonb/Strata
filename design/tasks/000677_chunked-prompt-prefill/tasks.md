@@ -34,10 +34,15 @@
       host→GPU memcpys on live paths: `s.toks_c` token ids (≤ 2 KB per 512-token chunk), mrope rows
       (≤ 6 KB), image/last-norm rows (small) — all in the proven-reaching small class; the load-time
       weight memcpys complete before any dispatch is encoded. No further engine change.
+- [x] Kernel-bound sweep (round-11 lesson, done 2026-10-18): every grid-indexed kernel in
+      `metal/kernels/*.metal` bounds its threads (`if (i < n)` / `>=` return) or runs an exact-fit
+      grid — `k_gather_t` was the only unbounded one. No other smasher; the remaining dispatch sites
+      are safe (bounded kernels make grid overshoot harmless, and undershoots would fail the
+      value checks).
 
 ## Step 4 — Engine ladder (Mac)
 
-- [ ] Mac round: `q36_solo_gate.py` plain → `/tmp/q36-base.json`; `--prefill 512` →
+- [~] Mac round: `q36_solo_gate.py` plain → `/tmp/q36-base.json`; `--prefill 512` →
       `/tmp/q36-chunk.json`; `q36_cmp_gate.py` must print `identical: 10 of 10`
 - [ ] If red: same round, rerun both trace gates with `--log` + `q36_trace_cmp.py`; name the first
       diverging layer/cut and apply the mapped fix (design.md §E order: G0 embtype, G8 re-check,
