@@ -194,4 +194,4 @@
       the KV traffic at depth) is the lever that would move the chunked read AND the deep decode (8
       tok/s at pos ~4,100 is mostly the same term). T3's default decision on this evidence: the no-flag
       default stays token-by-token; `auto`→512 stays (never worse: ~20% better on short prompts, a wash
-      at depth). The fold = a follow-up kernel task, not this PR.
+      at depth). The fold = the roadmap's T6 (proposed 2026-10-18), not this PR.
