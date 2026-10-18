@@ -200,4 +200,21 @@ python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-base.json /tmp/q36-chunk.json
 # long context with chunked prefill: a 2K-token prompt read, 128 generated, at 32K
 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
   --args "--native $Q36_MODEL --ctx 32768 --prefill 512" --out /tmp/q36-32k.json
+# the chunk-size benchmark (TTFT + prompt tok/s, sizes 2K/4K/8K x chunks 512/1024/2048 against the
+# token-by-token baseline, medians of 3, warm-up discarded, seeds per cell so the prefix matcher
+# never hides a read; prints the table and the >=5x gate verdict, writes every raw run to the JSON).
+# The no-flag default flips only if every measured size clears 5x AND that chunk passed the 10-prompt
+# parity gate above - until then prompts stay token-by-token without --prefill.  Full matrix is a
+# couple of hours on the M2 (the token-by-token 8K rows alone run ~8 min each): cut --rounds or the
+# size list for a first look.
+python3 tools/qwen35/q36_prefill_bench.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 32768" --sizes 2048,4096,8192 --chunks 0,512,1024,2048 \
+  --rounds 3 --gen 16 --out bench/results/2026-XX-XX-m2-q36-prefill/bench.json
+# parity under the shipping default vs the token-by-token path (rerun after any default change:
+# the no-flag run must give the --prefill 0 run's tokens, 10/10)
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 32768" --out /tmp/q36-default.json
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 32768 --prefill 0" --out /tmp/q36-tbt.json
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-tbt.json /tmp/q36-default.json
 ```
