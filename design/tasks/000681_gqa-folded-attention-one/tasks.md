@@ -1,0 +1,10 @@
+# Implementation Tasks: GQA-Folded Attention — One K/V Read per KV-Head Group
+
+- [ ] Add the folded kernels to `metal/kernels/q36.metal`: `k_attn_gqa_part` + `k_attn_gqa_merge` (path A, the k_attn range) and `k_attn_sk_part_gqa` (path B; `k_attn_sk_merge` reused unchanged), following design.md's bit-parity contract, with a header comment stating the contract and the per-head reduction slots (the `sk_max`/`sk_sum` sh-reuse race)
+- [ ] Wire the engine in `metal/src/engine/q36_metal.cpp`: pipeline creation (unconditional, the SK pattern), the `STRATA_Q36M_ATTN_GQA` knob beside the SK knob, threading into `forward_token` (the `sk_force` pattern) and `forward_prompt_chunk`, fold selection inside `push_qsa_attention`, the HG x ctx score scratch beside the split-K scratch, and the startup guards (HG < 2 no-op, 32 KB threadgroup staging budget) printing the numbers
+- [ ] Extend `metal/tests/q36_compile_test.cpp` with the three new pipelines; build and run it on the M2 (gate 1)
+- [ ] Gate 2 on the M2: `--ctx 4096` base json vs `STRATA_Q36M_ATTN_GQA=1` json -> 10/10 with `q36_cmp_gate.py`; fold-off base json vs the pre-change build's base json -> 10/10 (default path byte-identical); extra: `STRATA_Q36M_ATTN_SK=1` with and without the fold -> 10/10
+- [ ] Gate 3 on the M2: the chunk ladder with the fold on (plain vs `--prefill 512`) -> 10/10, twice; `q36_chunk_parity` all-OK with the fold on (and unchanged with it off)
+- [ ] Gate 4 on the M2, same build, same day: a ~4,098-token prompt at `--ctx 16384 --prefill 512`, fold off vs on — TTFT (the read, ~243 s baseline) and decode tok/s at pos ~4,100 (8 tok/s baseline); record the geometry used (H, HKV, HG)
+- [ ] Document in `docs/QWEN36_METAL.md`: a GQA-fold section (what it is, the knob, the guards, the gates, the measured numbers with hardware + date, the reference commands), and update the T6 State line in `docs/QWEN36_METAL_ROADMAP.md`
+- [ ] Before review: confirm only Metal-side files changed (no shared headers — the CUDA/HIP/SYCL builds untouched) and say so in the PR description
