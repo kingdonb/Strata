@@ -135,9 +135,10 @@ Pipeline Context::pipeline(int lib, const std::string& fn, const Constants& c) {
     MTLComputePipelineDescriptor* d = [MTLComputePipelineDescriptor new];
     d.computeFunction = f;
     d.supportIndirectCommandBuffers = YES;
+    MTLComputePipelineReflection* refl = nil;
     id<MTLComputePipelineState> ps = [impl_->dev newComputePipelineStateWithDescriptor:d
                                                                                options:MTLPipelineOptionNone
-                                                                            reflection:nil
+                                                                            reflection:&refl
                                                                                  error:&err];
     if (!ps) {
         std::fprintf(stderr, "mtl: pipeline %s: %s\n", fn.c_str(), [[err localizedDescription] UTF8String]);
@@ -146,12 +147,12 @@ Pipeline Context::pipeline(int lib, const std::string& fn, const Constants& c) {
     Pipeline p;
     p.handle = (__bridge_retained void*)ps;
     p.max_threads = (int)ps.maxTotalThreadsPerThreadgroup;
-    // minimum bound arguments: the highest [[buffer(N)]] index + 1 (the guard against a stale binary
-    // binding fewer args than the kernel reads - see require_fit's Dispatch overload)
+    // minimum bound arguments: the highest [[buffer(N)]] index + 1, from the pipeline reflection (the
+    // stale-binary guard: a dispatch binding fewer args reads unbound slots as zeros - require_fit).
+    // MTLArgument.type is deprecated in favor of bindingType since macOS 13 but still present.
     p.arg_min = 0;
-    if (NSArray<id<MTLFunctionArgument>>* fa = f.functionArguments)
-        for (id<MTLFunctionArgument> a in fa)
-            if (a.type == MTLArgumentTypeBuffer && (int) a.index + 1 > p.arg_min) p.arg_min = (int) a.index + 1;
+    for (MTLArgument* a in refl.arguments)
+        if (a.type == MTLArgumentTypeBuffer && (int) a.index + 1 > p.arg_min) p.arg_min = (int) a.index + 1;
     if (const char* cap = std::getenv("STRATA_METAL_MAX_THREADS_CAP")) {   // test hook, see require_fit
         const int lim = std::atoi(cap);
         if (lim > 0 && lim < p.max_threads) p.max_threads = lim;
