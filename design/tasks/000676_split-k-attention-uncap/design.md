@@ -125,3 +125,8 @@ All three Metal gates passed on the user's M2 (macOS 26.6.2), recorded in docs/Q
   L886), and solo_gate's tok/s = produced / decode_ms — decode these fields before quoting any timing.
 - Reviewer confirmed the task-branch name is fine despite the directive's `feat/qwen36-splitk` (which
   was already claimed by another task in this project).
+- GOTCHA (cost us a follow-up PR): a commit pushed to the PR branch around merge time can miss the
+  merge snapshot — PR #3 merged at tip `d496736e` while `043e1d8d` (docs measurements) landed moments
+  later, so the measurement commit needed its own tiny PR (`feature/000676-splitk-gate-results`,
+  cherry-pick `5711bf3a`). When a reviewer says "merge it", confirm the pushed tip is the tip you want
+  merged, and push ALL commits before asking for the merge.
