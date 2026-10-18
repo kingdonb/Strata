@@ -26,21 +26,31 @@ and generates; the default path unchanged at 8,192 and below.
 
 ## T2 — Chunked prompt prefill: parity green
 
-State: all chunk kernels plus `forward_prompt_chunk` and the `--prefill` knob are built on the delivery
-branch (commit `d93247da` onward); the parity harness (`metal/tests/q36_chunk_parity.cpp`) stands at
-36/37 stages bit-exact on the M2; the routed-expert root cause is fixed and verified (the gather plus
-per-entry decode-lpr8 gate/up: the eh and ey stages green). The one failing stage (`moe2048 x`) is pinned
-to a GPU-visibility anomaly on a memcpy-seeded TEST buffer — the decode side is proven correct (the
-host-recomputed sum equals the GPU delta) — and the engine's chunk ladder is still 0/10.
-Scope: close the combine question (the probes are designed: GPU-side copies of the host-written buffers
-before and after the decode chain, plus an isolation re-run of the combine on a freshly seeded buffer),
-bring the parity harness to all-OK, then make the engine ladder (the 10 parity prompts, plain vs
-`--prefill 512`) token-identical.
-Gates: `q36_chunk_parity` all-OK on the M2; the ladder 10/10 with the json compare.
+State: green on the delivery branch (through `36b394c8`, Apple M2, 2026-10-18). `q36_chunk_parity` stands
+at all 38 stages bit-identical (the 38th = the MoE isolation combine). The engine ladder (the 10 parity
+prompts, token-by-token vs `--prefill 512`, greedy) is 10/10 twice — the chunk path self-consistent across
+runs and token-identical to the reference json — and the default path stayed byte-identical across the
+whole chunk effort (the base gate on the fixed build vs the pre-chunk build's base json, 10/10). Getting
+there surfaced and fixed four real defects, each localized with the stage harness and the per-layer
+FNV-hash trace (`f54f90ad`): the chunk gather over-dispatched 128x and wrote past its buffers
+(`eac5e9a7`); the whole-chunk single ~600-dispatch graph and `MTLDispatchTypeConcurrent` encoding raced on
+the M2 (`f6f57bd7`, `62eba361`); the chunk's attention ran the split-K arithmetic where the decode runs
+per-row `k_attn` — both paths now run the identical per-row dispatch sequence (`02d7aeec`); and
+`block_sum`'s broadcast read raced the next call's slot reuse — an intra-dispatch race invisible to every
+commit structure, the harness's small grids and every float-sum check until the bit hashes pointed at
+(layer 0, token 19) (`36b394c8`).
+Scope: close the combine question, bring the parity harness to all-OK, then make the engine ladder (the
+10 parity prompts, plain vs `--prefill 512`) token-identical — closed.
+Gates: `q36_chunk_parity` all-OK on the M2 (38/38, 2026-10-18); the ladder 10/10 with the json compare
+(twice, 2026-10-18, build `36b394c8`); the default path byte-identical (base vs base, 10/10). The chunked
+prefill stays opt-in (`--prefill N`, default 0 = token-by-token; the chunk pipelines compile only when
+the flag is on) — the measured default flip is T3's.
 
 ## T3 — Chunked prefill: measured speed and the default flip
 
-State: blocked on T2.
+State: unblocked — T2 green (M2, 2026-10-18); the early 20–40-token-prompt runs already showed TTFT
+~30% faster with `--prefill 512` (first-request JIT warmup included); this ticket owns the real 2K+
+measurement and the default decision.
 Scope: TTFT and tok/s, chunked vs token-by-token, on 2K+-token prompts, same Mac, same day, same build;
 flip the `--prefill` default only with the numbers in hand (the project rule: change a default only where
 measured faster); re-run the 10-prompt parity at the new default; document the numbers in
