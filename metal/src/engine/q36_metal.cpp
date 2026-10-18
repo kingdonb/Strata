@@ -806,6 +806,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
     }
 
     std::vector<mtl::Dispatch> ds;
+    double gpu_ms = 0.0;   // the per-layer/per-pair graphs' GPU time (the function's return value)
     std::memcpy(s.toks_c.as<int>(), toks, (size_t) nt * sizeof(int));
 
     // Embedding rows
@@ -966,6 +967,10 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                     dm.tg[0] = SK_CELLS;
                     dm.barrier = true;
                     ds.push_back(dm);
+                    // one command buffer per pair: the partials scratch is reused by the next pair, and
+                    // cross-command-buffer work is queue-ordered (the whole-chunk graph raced on the M2)
+                    gpu_ms += cx.run_graph(ds);
+                    ds.clear();
                 }
             }
             push_c_gemv(ds, pipes, m.W(L(l, "attn_output.weight")), s.att_c, s.yc, nt, H * D);
@@ -1149,11 +1154,18 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             }
             std::fprintf(stderr, "TRACE C nt=%d pos0=%lld L=%lld x=%.17g h=%.17g\n", nt, (long long) pos0,
                          (long long) l, xs, hs);
+        } else {   // one command buffer per layer: the accumulated whole-chunk graph (~600 barrier'd
+                   // dispatches) raced nondeterministically on the M2 (rounds 8b/14 - the ladder's
+                   // failing set and depths changed between runs); every intra-layer dependency is
+                   // the barrier'd pattern the parity harness verifies stage by stage, and
+                   // cross-command-buffer work is queue-ordered
+            gpu_ms += cx.run_graph(ds);
+            ds.clear();
         }
     }
 
     if (trc) return 0.0;   // the per-layer sub-graphs already ran
-    return cx.run_graph(ds);
+    return gpu_ms + cx.run_graph(ds);
 }
 
 std::vector<int> parse_ids(const std::string& s) {
