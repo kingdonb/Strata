@@ -311,8 +311,11 @@ double Context::run_graph(const std::vector<Dispatch>& ds) {
             return e && std::atoi(e) > 0 ? std::atoi(e) : 0;
         }();
         double gpu = 0;
-        const size_t step = sync_every > 0 ? (size_t) sync_every : ds.size();
-        for (size_t s0 = 0; s0 < ds.size() || (ds.empty() && s0 == 0); s0 += step) {
+        // step 1 for an empty list: the loop body never runs, so an empty run_graph stays the
+        // harmless sync it was before the knob (the trace's cut flow calls it with nothing pending;
+        // the previous flush's waitUntilCompleted already ordered that work)
+        const size_t step = sync_every > 0 ? (size_t) sync_every : (ds.empty() ? 1 : ds.size());
+        for (size_t s0 = 0; s0 < ds.size(); s0 += step) {
             const size_t end = std::min(s0 + step, ds.size());
             id<MTLCommandBuffer> cb = [impl_->q commandBufferWithUnretainedReferences];
             // Serial dispatches: the hardware executes them in order, so every barrier'd read-after-write
