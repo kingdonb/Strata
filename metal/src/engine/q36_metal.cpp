@@ -116,6 +116,23 @@ struct State {
         for (auto& b : kc) if (b.ptr) std::memset(b.ptr, 0, b.bytes);
         for (auto& b : vc) if (b.ptr) std::memset(b.ptr, 0, b.bytes);
     }
+
+    // STRATA_Q36M_ZERO_STATE diagnostic: zero every scratch buffer at each request's start.  Under the
+    // no-stale-read invariant this is a semantic no-op; a ladder that becomes deterministic under it
+    // names the bug's class - some kernel reads scratch nothing wrote this run, and reads the previous
+    // request's leftovers (run-varying, since what ran before varies).  The 38-stage harness cannot
+    // see that class: its fresh buffers read as zeros either way.  ident_c is excluded - the host
+    // writes its identity map once at load and nothing rewrites it.
+    void zero_scratch() {
+        for (mtl::Buffer* b : {&x, &h, &y, &qkv, &z, &alpha, &beta, &conv_out, &gdn_out, &qg, &k, &v, &q,
+                               &gate, &att, &router, &eg, &eu, &eh, &ey, &sg, &su, &sh, &sy, &sgate, &wts,
+                               &ids, &logits, &sk_pacc, &sk_pm, &sk_pl,
+                               &toks_c, &xc, &hc, &yc, &qkv_c, &z_c, &alpha_c, &beta_c, &conv_out_c,
+                               &gdn_out_c, &qg_c, &k_c, &v_c, &q_c, &gate_c, &att_c, &router_c, &ids_c,
+                               &wts_c, &scr, &srt_in_gu, &srt_in_d, &pos_c, &eg_c, &eu_c, &eh_c, &ey_c,
+                               &sg_c, &su_c, &sh_c, &sy_c, &sgate_c, &hg_c})
+            if (b->ptr) std::memset(b->ptr, 0, b->bytes);
+    }
 };
 
 std::string L(int64_t l, const char* s) { return "blk." + std::to_string(l) + "." + s; }
@@ -1474,6 +1491,8 @@ int run(int argc, char** argv) {
 
     std::vector<int> ids_host(K);
 
+    const bool zero_state = env_flag("STRATA_Q36M_ZERO_STATE");   // the stale-scratch diagnostic
+
     if (serve_mode) {
         std::printf("READY %d stop\n", s.ctx);
         std::fflush(stdout);
@@ -1563,6 +1582,7 @@ int run(int argc, char** argv) {
                 reuse = 0;
                 live_tokens.clear();
             }
+            if (zero_state) s.zero_scratch();
 
             const auto t_prompt0 = std::chrono::steady_clock::now();
             size_t pi = reuse;
@@ -1659,6 +1679,7 @@ int run(int argc, char** argv) {
     if (prompt.empty()) prompt = {248045, 846, 198, 9419, 248046, 198, 248045, 74455, 198}; // Default Qwen 3.6 ChatML prompt
 
     std::fprintf(stderr, "strata metal q36: evaluating prompt (%zu tokens) ...\n", prompt.size());
+    if (zero_state) s.zero_scratch();
     const auto t_prompt0 = std::chrono::steady_clock::now();
     {
         size_t pi = 0;
