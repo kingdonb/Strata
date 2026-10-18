@@ -158,8 +158,9 @@ below.
   behave exactly as before).
 - The kernels are written for `SK_HD = 256` (the qwen35moe head_dim); the host refuses anything else.
   Program-scope constants in `q36.metal` are `enum`, not `constexpr` — MSL rejects the latter.
-- **Chunked prompt prefill** (`--prefill N`, or `STRATA_Q36M_PREFILL=1` for 512; in progress on the
-  feat/qwen36-metal line): the chunk of T tokens runs as T-wide dispatches — embedding rows in one
+- **Chunked prompt prefill** (`--prefill N`; `--prefill auto` = 512, the parity-verified chunk — what setup
+  writes for this family and what the CUDA engine's flag means by pick-for-me; `STRATA_Q36M_PREFILL=1` for
+  512 without the flag): the chunk of T tokens runs as T-wide dispatches — embedding rows in one
   dispatch, dense projections with the tokens walked inside the threadgroup (`k_gemv_c` /
   `k_gemv_lpr8_c`: every weight row read once per chunk, each (token, output) summed in the decode
   kernels' exact order), routed experts grouped per expert (`k_tables` builds the entry tables in one
@@ -169,7 +170,10 @@ below.
   attention through the split-K kernels row by row-block. Every state the decode path keeps (recurrent
   S, conv history, KV cache) is updated by the same arithmetic in the same order, and the prompt's last
   token still runs as a decode window, which is where the logits come from. Prompts run token-by-token
-  unless `--prefill` is set.
+  unless `--prefill` is set.  The serve loop reports `PP <read> <total> <ms> <tok/s>` once per chunk
+  (every 512 tokens on the token-by-token path) — the server's prompt percent and its read watchdog run
+  off those lines; this engine never sent them before, so the percent stayed hidden and a read longer
+  than engine_silence_s (300 s default) could be killed as engine-silent.
 
 Gates, measured on the M2 (macOS 26.6.2) with the model file from §5, on this exact build (2026-10-18):
 the compile test creates all pipelines including the two split-K ones; forced split-K at 4K is 10/10

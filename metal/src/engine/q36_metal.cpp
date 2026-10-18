@@ -1240,7 +1240,16 @@ int run(int argc, char** argv) {
         } else if ((a == "--ctx" || a == "--max-context") && i + 1 < argc) {
             ctx = std::atoi(argv[++i]);
         } else if (a == "--prefill" && i + 1 < argc) {
-            prefill_chunk = std::atoi(argv[++i]);
+            const std::string pv = argv[++i];
+            // "auto" is what setup writes for this family and what the CUDA engine takes as pick-for-me; here it
+            // used to fall into atoi (0) and silently disable the chunk path - a 4K prompt then read token-by-token
+            // with no PP progress lines (round 23).  auto = the parity-verified chunk.
+            if (pv.rfind("auto", 0) == 0) {
+                prefill_chunk = 512;
+                std::fprintf(stderr, "strata metal q36: --prefill auto: chunk 512\n");
+            } else {
+                prefill_chunk = std::atoi(pv.c_str());
+            }
         }
     }
     if (prefill_chunk < 0) prefill_chunk = 0;
@@ -1626,6 +1635,15 @@ int run(int argc, char** argv) {
             if (zero_state || poison_state) s.fill_scratch(poison_state ? 0xff : 0x00);
 
             const auto t_prompt0 = std::chrono::steady_clock::now();
+            // The serve protocol's prompt progress (the same four fields the CUDA q36 engine sends: <read> <total>
+            // <ms> <fresh tok/s>, both counting the request's fresh tokens; the server drops a line within 64 of the
+            // end).  Without these the server's prompt percent never moves and a long read has no watchdog beat.
+            auto pp_line = [&](size_t done_fresh) {
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_prompt0).count();
+                std::printf("PP %lld %lld %.0f %.1f\n", (long long) done_fresh, (long long) (ids.size() - reuse), ms,
+                            ms > 0.0 ? 1000.0 * (double) done_fresh / ms : 0.0);
+                std::fflush(stdout);
+            };
             size_t pi = reuse;
             if (prefill_chunk > 0 && ids.size() >= 2) {
                 const size_t last = ids.size() - 1;   // the last prompt token runs as a decode window
@@ -1634,10 +1652,12 @@ int run(int argc, char** argv) {
                     forward_prompt_chunk(cx, pipes, m, s, ids.data() + pi, nt, s.pos);
                     s.pos += nt;
                     pi += nt;
+                    pp_line(pi - reuse);   // one line per chunk: the percent steps, the read beats the watchdog
                 }
             }
             for (; pi < ids.size(); ++pi) {
                 forward_token(cx, pipes, m, s, ids[pi], ids_host, sk_force, true);
+                if ((pi + 1 - reuse) % 512 == 0) pp_line(pi + 1 - reuse);   // the token-by-token path beats too
             }
             live_tokens = ids;
             const double prompt_ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_prompt0).count() * 1000.0;
