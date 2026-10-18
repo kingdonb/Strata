@@ -314,6 +314,61 @@ void push_gemv(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const Ten
     ds.push_back(d);
 }
 
+// The QSA attention rows, one dispatch sequence per query row - exactly what the token-by-token path
+// runs at that position: k_attn (the one-pass threadgroup softmax) while the row's n_pos fits the
+// 8,192-cell threadgroup score cap, the split-K pair above it (the round-2-verified decode form).
+// The chunk's earlier row-blocked split-K computed the online-softmax order, which differs from
+// k_attn's by ulps and diverged the ladder from layer 3 (the first full-attention layer) with
+// reproducible greedy flips.  Shared by both paths so the parity is structural, not mirrored.
+static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const State& s,
+                               const mtl::Buffer& q, const mtl::Buffer& gate, const mtl::Buffer& att,
+                               const mtl::Buffer& kc, const mtl::Buffer& vc,
+                               int H, int HKV, int D, bool sk_force, int rows, int64_t pos0) {
+    const float scale = 1.0f / std::sqrt((float) D);
+    for (int i = 0; i < rows; ++i) {
+        const int n_pos = (int) pos0 + i + 1;
+        if (sk_force || n_pos > SK_TG_CAP) {
+            if (D != 256) {
+                std::fprintf(stderr, "q36_metal: split-K attention needs head_dim 256, model has %d\n", D);
+                std::exit(1);
+            }
+            const int n_chunk = (n_pos + SK_CELLS - 1) / SK_CELLS;
+            mtl::Dispatch d;
+            d.p = &pipes.p_attn_sk_part;
+            d.args = {mtl::Arg::B(q), mtl::Arg::B(kc), mtl::Arg::B(vc),
+                      mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(s.ctx), mtl::Arg::V(scale),
+                      mtl::Arg::V(n_chunk), mtl::Arg::V((int) pos0), mtl::Arg::V(i * H),
+                      mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl)};
+            d.grid[0] = (uint32_t) n_chunk;
+            d.grid[1] = (uint32_t) H;
+            d.tg[0] = SK_CELLS;
+            d.barrier = true;
+            ds.push_back(d);
+            mtl::Dispatch dm;
+            dm.p = &pipes.p_attn_sk_merge;
+            dm.args = {mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl), mtl::Arg::B(gate),
+                       mtl::Arg::B(att), mtl::Arg::V(H), mtl::Arg::V(n_chunk), mtl::Arg::V((int) pos0),
+                       mtl::Arg::V(i * H)};
+            dm.grid[0] = (uint32_t) H;
+            dm.tg[0] = SK_CELLS;
+            dm.barrier = true;
+            ds.push_back(dm);
+        } else {
+            mtl::Dispatch d;
+            d.p = &pipes.p_attn;
+            d.args = {mtl::Arg::B(q, 4 * (size_t) i * H * D), mtl::Arg::B(kc), mtl::Arg::B(vc),
+                      mtl::Arg::B(gate, 4 * (size_t) i * H * D), mtl::Arg::B(att, 4 * (size_t) i * H * D),
+                      mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(D), mtl::Arg::V(n_pos), mtl::Arg::V(s.ctx),
+                      mtl::Arg::V(scale)};
+            d.grid[0] = (uint32_t) H;
+            d.tg[0] = 128;
+            d.tg_mem = (uint32_t)(n_pos * sizeof(float));
+            d.barrier = true;
+            ds.push_back(d);
+        }
+    }
+}
+
 void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s, int tok, std::vector<int>& ids_host, bool sk_force = false, bool prompt_step = false) {
     const auto& g = m.g;
     const int N = (int) g.n_embd, K = (int) m.top_k, FF = (int) g.n_ff, FS = (int) g.n_ff_shexp;
@@ -460,49 +515,11 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
                 d.barrier = true;
                 ds.push_back(d);
             }
-            // Attn.  Above the 8,192-cell threadgroup ceiling (or with STRATA_Q36M_ATTN_SK=1, the parity
-            // knob) the split-K kernels run instead: 256-cell partials + merge, q36_engine.cu's math.
-            {
-                const int H_val = H, HKV_val = HKV, D_val = D, n_pos_val = s.pos + 1, ctx_val = s.ctx;
-                const float scale_val = 1.0f / std::sqrt((float) D);
-                if (sk_force || n_pos_val > SK_TG_CAP) {
-                    if (D_val != 256) {
-                        std::fprintf(stderr, "q36_metal: split-K attention needs head_dim 256, model has %d\n", D_val);
-                        std::exit(1);
-                    }
-                    const int n_chunk = (n_pos_val + SK_CELLS - 1) / SK_CELLS;
-                    mtl::Dispatch d;
-                    d.p = &pipes.p_attn_sk_part;
-                    d.args = {mtl::Arg::B(s.q), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]),
-                              mtl::Arg::V(H_val), mtl::Arg::V(HKV_val), mtl::Arg::V(ctx_val), mtl::Arg::V(scale_val),
-                              mtl::Arg::V(n_chunk), mtl::Arg::V(s.pos), mtl::Arg::V(0),
-                              mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl)};
-                    d.grid[0] = (uint32_t) n_chunk;
-                    d.grid[1] = (uint32_t) H_val;
-                    d.tg[0] = SK_CELLS;
-                    d.barrier = true;
-                    ds.push_back(d);
-                    mtl::Dispatch dm;
-                    dm.p = &pipes.p_attn_sk_merge;
-                    dm.args = {mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl), mtl::Arg::B(s.gate), mtl::Arg::B(s.att),
-                               mtl::Arg::V(H_val), mtl::Arg::V(n_chunk), mtl::Arg::V(s.pos), mtl::Arg::V(0)};
-                    dm.grid[0] = (uint32_t) H_val;
-                    dm.tg[0] = SK_CELLS;
-                    dm.barrier = true;
-                    ds.push_back(dm);
-                } else {
-                    mtl::Dispatch d;
-                    d.p = &pipes.p_attn;
-                    d.args = {mtl::Arg::B(s.q), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]), mtl::Arg::B(s.gate),
-                              mtl::Arg::B(s.att), mtl::Arg::V(H_val), mtl::Arg::V(HKV_val), mtl::Arg::V(D_val),
-                              mtl::Arg::V(n_pos_val), mtl::Arg::V(ctx_val), mtl::Arg::V(scale_val)};
-                    d.grid[0] = H;
-                    d.tg[0] = 128;
-                    d.tg_mem = (s.pos + 1) * sizeof(float);
-                    d.barrier = true;
-                    ds.push_back(d);
-                }
-            }
+            // Attn: the decode's per-row dispatch sequence, shared with the chunk path via
+            // push_qsa_attention (k_attn under the 8,192-cell ceiling, the split-K pair above it, or
+            // forced by STRATA_Q36M_ATTN_SK=1, the parity knob)
+            push_qsa_attention(ds, pipes, s, s.q, s.gate, s.att, s.kc[l], s.vc[l], H, HKV, D, sk_force, 1,
+                               s.pos);
             push_gemv(ds, pipes, m.W(L(l, "attn_output.weight")), s.att, s.y, nullptr, 1, 0, true);
         }
 
@@ -940,39 +957,11 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                 d.barrier = true;
                 ds.push_back(d);
             }
-            // Attention over the chunk's rows, SK_ROWS_MAX rows at a time (scratch is bounded by that)
-            {
-                const float scale_val = 1.0f / std::sqrt((float) D);
-                const int rows = nt * H;
-                for (int rb = 0; rb < rows; rb += SK_ROWS_MAX) {
-                    const int rb_rows = std::min(SK_ROWS_MAX, rows - rb);
-                    const int t_last = (rb + rb_rows - 1) / H;
-                    const int n_chunk = (int)((pos0 + t_last + 1 + SK_CELLS - 1) / SK_CELLS);
-                    mtl::Dispatch d;
-                    d.p = &pipes.p_attn_sk_part;
-                    d.args = {mtl::Arg::B(s.q_c), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]),
-                              mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(s.ctx), mtl::Arg::V(scale_val),
-                              mtl::Arg::V(n_chunk), mtl::Arg::V((int) pos0), mtl::Arg::V(rb),
-                              mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl)};
-                    d.grid[0] = (uint32_t) n_chunk;
-                    d.grid[1] = (uint32_t) rb_rows;
-                    d.tg[0] = SK_CELLS;
-                    d.barrier = true;
-                    ds.push_back(d);
-                    mtl::Dispatch dm;
-                    dm.p = &pipes.p_attn_sk_merge;
-                    dm.args = {mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl), mtl::Arg::B(s.gate_c),
-                               mtl::Arg::B(s.att_c), mtl::Arg::V(H), mtl::Arg::V(n_chunk), mtl::Arg::V((int) pos0), mtl::Arg::V(rb)};
-                    dm.grid[0] = (uint32_t) rb_rows;
-                    dm.tg[0] = SK_CELLS;
-                    dm.barrier = true;
-                    ds.push_back(dm);
-                    // one command buffer per pair: the partials scratch is reused by the next pair, and
-                    // cross-command-buffer work is queue-ordered (the whole-chunk graph raced on the M2)
-                    gpu_ms += cx.run_graph(ds);
-                    ds.clear();
-                }
-            }
+            // Attention over the chunk's rows: the decode path's own per-row dispatch sequence (the
+            // row-blocked split-K computed the online-softmax order, which differs from k_attn's
+            // one-pass order by ulps and diverged the ladder from the first full-attention layer)
+            push_qsa_attention(ds, pipes, s, s.q_c, s.gate_c, s.att_c, s.kc[l], s.vc[l], H, HKV, D, false, nt,
+                               pos0);
             push_c_gemv(ds, pipes, m.W(L(l, "attn_output.weight")), s.att_c, s.yc, nt, H * D);
         }
 
