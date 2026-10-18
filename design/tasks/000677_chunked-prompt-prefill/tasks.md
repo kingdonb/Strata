@@ -111,14 +111,21 @@
       runs; p06's stop lengths 81/104/91).** The chunk is STILL run-varying with serial dispatches
       and the decode's own attention sequence — so the nondeterminism has a source that is neither
       dispatch ordering nor the attention arithmetic. The reproducible p03@6 flip = nameable.
-- [ ] Round 19 (user):
-      1. the post-helper TRACE pair + `q36_trace_cmp.py` — the LAYERS verdict now (all 40 identical,
-         or which layer diverges with the attention shared?);
-      2. the decode side's own determinism: the plain gate twice (`/tmp/q36-baseA.json`,
-         `/tmp/q36-baseB.json`) + `cmp_gate` — serial dispatches should make it stable; if NOT,
-         the nondeterminism is engine-wide (serve loop/sampling/state reuse), not chunk-specific;
-      3. the token dump at p03's flip (`[1:12]` from base/chunk1/chunk2) — is the flipped value
-         stable per chunk run.
+- [ ] Round 19 (user; the knob commit is Strata `b30049db` — pull + rebuild `strata`, the default
+      path is untouched): four independent discriminators, one session —
+      1. the decode's own determinism (the pivotal readout): the plain gate twice
+         (`/tmp/q36-baseA.json`, `/tmp/q36-baseB.json`) + `cmp_gate` — base-vs-base has never been
+         measured on one build; if it differs, the nondeterminism is engine-wide and pre-existing;
+      2. the post-helper TRACE pair + `q36_trace_cmp.py` — the LAYERS verdict (all 40 identical, or
+         which layer diverges with the attention shared?);
+      3. the stale-scratch test: `STRATA_Q36M_ZERO_STATE=1` on the chunked ladder twice
+         (`/tmp/q36-chunkZ1.json`, `/tmp/q36-chunkZ2.json`) + `cmp_gate` (timings inflate: the flag
+         memsets every scratch buffer per request) — self-consistent ⇒ the no-stale-read invariant
+         is broken somewhere; still varying ⇒ the leftover theory is dead;
+      4. the token dump at p03's flip (`[1:12]` from base/chunk1/chunk2).
+      Decision tree: baseA≠baseB → the engine wobbles everywhere (fix that first, the ladder
+      methodology is invalid meanwhile); Z1==Z2 → bisect the zero loop by buffer family next;
+      Z1≠Z2 → the trace's layer verdict + an empirical Metal probe round.
 - [ ] Apply the mapped fix; one change per push, repeat until 10/10 twice
 
 ## Step 5 — Land
