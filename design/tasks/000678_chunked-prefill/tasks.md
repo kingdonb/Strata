@@ -10,7 +10,7 @@
 
 - [x] Build on the M2 (docs/QWEN36_METAL.md §5 commands), then run:
       `python3 tools/qwen35/q36_prefill_bench.py --exe ./build-metal/strata --args "--native $Q36_MODEL --ctx 32768" --sizes 2048,4096,8192 --chunks 0,512,1024,2048 --rounds 3 --gen 16 --out bench/results/2026-10-18-m2-q36-prefill/bench.json`
-      (run completed 2026-10-18 on the M2 — all 12 cells × 3 rounds; first row: baseline 2K = TTFT 139.8 s, prompt 14.6 tok/s, decode 13.3 tok/s, TTFT ≈ 2048 ÷ 14.6 so the tool's numbers are self-consistent on real hardware; the JSON still needs committing to `bench/results/2026-10-18-m2-q36-prefill/` — maintainer pushes it from the M2 or pastes it)
+      (run completed 2026-10-18 on the M2 — all 12 cells × 3 rounds; first row: baseline 2K = TTFT 139.8 s, prompt 14.6 tok/s, decode 13.3 tok/s, TTFT ≈ 2048 ÷ 14.6 so the tool's numbers are self-consistent on real hardware; raw JSON committed by the maintainer as 91efae1a and verified against the published table — 36 rows, ratios match)
 - [x] Compute per-size chunked/baseline prompt-tok/s ratios; apply the ≥ 5× rule (every measured size must clear)
       (verdict: **not met** — best 1.51x at 2K / 512, 1.27x at 8K; the tool's per-chunk verdicts: 512 = 1.51/1.43/1.27, 1024 = 1.48/1.38/1.25, 2048 = 1.48/1.39/1.24 — T3's prediction confirmed with the full matrix)
 
