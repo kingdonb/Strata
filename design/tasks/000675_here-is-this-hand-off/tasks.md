@@ -137,8 +137,18 @@ against its decode kernel and names the diverging stage in one Mac round.)
   discarded the whole combine dispatch's writes, x2 kept its initial values.  Fixed (868a3ca4) + an ey
   check added (decode (t,k) rows vs the chunk's placed rows through pos) to name down-vs-combine.  Also
   fixed: the compile test still listed the round-5-deleted k_gemv_lpr8_c_* (it died before its verdict).
-  The ENGINE path is unaffected by that bug (its sgate_c/sy_c are CT-sized).  Round 10b: rerun the
-  compile test + the parity test (expect 3 moe2048 OKs) + the 10-prompt ladder plain vs --prefill 512.
+  The ENGINE path is unaffected by that bug (its sgate_c/sy_c are CT-sized).  **Round 10b:** compile gate
+  green (all 55 pipelines, incl. the four k_gemv_lpr8_*); parity 36/37 OK incl. **moe2048 eh + ey** (the ey
+  check exonerates the down expc: all 65536 values match through pos2) - but moe2048 x STILL fails with
+  byte-identical values to round 10a (first at 0: -0.13756679 vs -0.000248415978).  That identity means the
+  old OOB reads were returning zeros (benign) and the real bug is elsewhere; and with the ey check forcing
+  both combines' inputs term-identical (verified buffers, shared wts2, same slot order, kernel bodies read
+  and confirmed), the two sums mathematically cannot differ - so one combine's writes never land and the
+  mechanism is not visible statically.  Diagnostic added (1ec7a8e4): x3 = the pristine initial (neither
+  combine touches it) + the host recomputes both sides' MoE sums in double from the verified buffers
+  (cpuD/cpuC, identical by the ey check) and prints them against the GPU deltas (x - x3) for t=0 and t=7.
+  Whichever delta is zero (or wrong) names the dead combine; the initial line also settles which side is
+  the unmoved one.  Round 10c: rerun ONLY ./build-metal/q36_chunk_parity and paste the moe2048 block.
 
 ## Phase C — MTP speculative decoding
 
