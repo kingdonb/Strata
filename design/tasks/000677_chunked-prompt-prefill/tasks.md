@@ -85,10 +85,20 @@
 - [x] Fix (`62eba361`): `run_graph` encodes `MTLDispatchTypeSerial` — hardware in-order execution,
       every barrier'd dependency holds by construction. The per-layer/per-pair flushes stay (small
       graphs, less encode overhead); the bench paths keep their explicit concurrent choice.
-- [ ] Round 16 (user): rebuild, then (0) `cmp_gate /tmp/q36-base2.json /tmp/q36-base.json` (the
-      decode side's stability across the round-13b/15 builds — if it differs, forward_token gets
-      the same treatment); (1) the ladder twice + chunk-vs-chunk2 as in round 15 — want 10/10 ×3;
-      (2) rerun `q36_chunk_parity` (the 38/38 gate re-check on the new runtime)
+- [~] **Round 16 (Mac, serial build): the ladder is 5/10 but the character changed** — the
+      stop-lengths stabilized (p04 = 19/19, p06 = 81/81; round 15 had 19-vs-18, round 13 had
+      81-vs-86) and the flips became reproducible: p00 flips at exactly 100 (third run in a row),
+      p06@22 and p08@14 in BOTH round-16 comparisons. A deterministic flip component + a residual
+      run-varying one (p01@127-vs-69, p03@61-vs-46 between the comparisons; chunk1 ≠ chunk2).
+      With serial dispatches the run-variance cannot be dispatch ordering — something inside a
+      dispatch or the host glue. The parity gate re-passed 38/38 on the serial build.
+- [ ] Round 17 (user) — the trace battery, the instrument that sees inside a dispatch chain:
+      1. `STRATA_Q36M_TRACE=1` both gates (WITH `--log`) + `q36_trace_cmp.py /tmp/trace-plain.log
+         /tmp/trace-chunk.log` — the first diverging LAYER and the layer-0 CUT;
+      2. the token dump around the reproducible flips (p00[95:106], p06[17:28], p08[9:20] from
+         base/chunk/chunk2) — are the flipped values stable per run or shared across runs;
+      3. the trace-mode chunk ×2 + `cmp_gate` (self-consistency at the finest graph structure).
+- [ ] Apply the mapped fix; one change per push, repeat until 10/10 twice
 
 ## Step 5 — Land
 

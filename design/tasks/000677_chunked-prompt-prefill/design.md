@@ -105,14 +105,12 @@ identical: 10 of 10               # exit 0
   Cross-command-buffer work on one queue is hardware-ordered and needs no trust in the barrier
   mechanism. Note `run_graph` is synchronous (commit + waitUntilCompleted), so per-layer graphs cost
   only a CPU-GPU round trip each.
-- **The dispatch-type hazard (found round 15, the ladder's last root cause):** `run_graph` encoded
+- **The dispatch-type hazard (found round 15, tamed round 16):** `run_graph` encoded
   `MTLDispatchTypeConcurrent` — dispatches may overlap — while `memoryBarrierWithScope` does not
-  order overlapping dispatches on macOS. Any read-after-write across dispatches is then a race,
-  nondeterministic per run (the ladder's failing set changed between runs of the same binary).
-  Fix: `MTLDispatchTypeSerial` — hardware in-order execution makes every barrier'd dependency hold
-  by construction. Rule for this codebase: correctness graphs are serial; only benches choose
-  concurrent explicitly. Also: flushing graphs per layer/per scratch-reuse point (round 14) is
-  good hygiene but was NOT the root cause.
+  order overlapping dispatches on macOS. Fix: `MTLDispatchTypeSerial` (hardware in-order). The
+  serial fix stabilized the stop-lengths and made the flip indices reproducible, but a residual
+  run-variance survived (round 16) — so dispatch ordering was one of TWO nondeterminism sources,
+  not the only one. Rule: correctness graphs are serial; only benches choose concurrent.
 - **The grid convention (this cost 11 rounds):** `d.grid` counts THREADGROUPS, `d.tg` threads per
   threadgroup (`dispatchThreadgroups`). A dispatch wanting E elements at tg=128 passes
   `grid = (E + 127) / 128`, and the kernel must bound-check its `thread_position_in_grid`. Passing
