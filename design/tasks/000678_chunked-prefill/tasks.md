@@ -8,20 +8,22 @@
 
 ## Benchmark + decision (needs the M2 Mac — maintainer)
 
-- [~] Build on the M2 (docs/QWEN36_METAL.md §5 commands), then run:
+- [x] Build on the M2 (docs/QWEN36_METAL.md §5 commands), then run:
       `python3 tools/qwen35/q36_prefill_bench.py --exe ./build-metal/strata --args "--native $Q36_MODEL --ctx 32768" --sizes 2048,4096,8192 --chunks 0,512,1024,2048 --rounds 3 --gen 16 --out bench/results/2026-10-18-m2-q36-prefill/bench.json`
-      (run started 2026-10-18 on the M2; first row: baseline 2K = TTFT 139.8 s, prompt 14.6 tok/s, decode 13.3 tok/s — TTFT ≈ 2048 ÷ 14.6, so the tool's numbers are self-consistent on real hardware, and the decode sits on T3's depth curve; at 14.6 tok/s the full matrix is ~3.5-4.5 h, not the 2 h first estimated — the JSON is rewritten after every cell, so an interruption keeps the finished rows)
-- [ ] Compute per-size chunked/baseline prompt-tok/s ratios; apply the ≥ 5× rule (every measured size must clear)
+      (run completed 2026-10-18 on the M2 — all 12 cells × 3 rounds; first row: baseline 2K = TTFT 139.8 s, prompt 14.6 tok/s, decode 13.3 tok/s, TTFT ≈ 2048 ÷ 14.6 so the tool's numbers are self-consistent on real hardware; the JSON still needs committing to `bench/results/2026-10-18-m2-q36-prefill/` — maintainer pushes it from the M2 or pastes it)
+- [x] Compute per-size chunked/baseline prompt-tok/s ratios; apply the ≥ 5× rule (every measured size must clear)
+      (verdict: **not met** — best 1.51x at 2K / 512, 1.27x at 8K; the tool's per-chunk verdicts: 512 = 1.51/1.43/1.27, 1024 = 1.48/1.38/1.25, 2048 = 1.48/1.39/1.24 — T3's prediction confirmed with the full matrix)
 
 ## Engine change (conditional on the gate)
 
 - [x] Engine scaffolding in `metal/src/engine/q36_metal.cpp` `run()`: `prefill_given` distinguishes flag-absent from `--prefill 0`; a named `default_prefill_chunk` constant (currently 0, behavior-identical) holds the future flip value; `--prefill 0` and `STRATA_Q36M_PREFILL=1` keep today's behavior
-- [ ] After the M2 numbers arrive: the actual flip in `run()` — set `default_prefill_chunk` to the parity-verified winner only if every measured size cleared ≥ 5×, add the before-allocation memory downgrade for a defaulted chunk (explicit `--prefill N` and `ctx > SK_TG_CAP` keep today's refuse), and re-point `--prefill auto` only if the winning size differs from 512 and passed parity (expected outcome from the T3 data: no flip, the default stays 0)
+- [x] After the M2 numbers arrive: the actual flip in `run()` — **decided: no flip**. The gate failed on every size (1.24-1.51x vs the 5x needed), so `default_prefill_chunk` stays 0, the engine needs no further change, and `--prefill auto` stays 512 (the best measured chunk; 1024/2048 read 1.5-3% slower)
 - [ ] If the gate is not met: leave the default at 0 and record that in the doc
 
 ## Parity + docs (needs the M2 Mac — maintainer)
 
-- [ ] Re-verify parity under the shipping default: `q36_solo_gate.py` with no `--prefill` flag vs `--prefill 0`, then `q36_cmp_gate.py` → 10/10 identical
-- [ ] Update docs/QWEN36_METAL.md §6: benchmark table (prompt size, chunk, TTFT ms, prompt tok/s, ratio; date, M2/macOS, model file, ctx, build), the decision paragraph with the numbers and the escape hatch, the parity line, the reproduction command block; update the "Prompts run token-by-token unless --prefill is set" sentence if flipped
+- [~] Re-verify parity under the shipping default: rebuild (the scaffold commit touched `run()`), then `q36_solo_gate.py` with no `--prefill` flag vs `--prefill 0`, then `q36_cmp_gate.py` → 10/10 identical (commands handed to the maintainer; with no flip this doubles as the proof the scaffolding changed no token)
+- [x] Update docs/QWEN36_METAL.md §6: benchmark table (prompt size, chunk, TTFT ms, prompt tok/s, ratio; date, M2/macOS, model file, ctx, build), the decision paragraph with the numbers and the escape hatch, the parity line, the reproduction command block; update the "Prompts run token-by-token unless --prefill is set" sentence if flipped
   - [x] The reproduction command block (bench + default-vs-token-by-token parity commands) is in §6's reference block — added before the M2 run so the maintainer can copy-paste it
+  - [x] The table + decision paragraph are in (commit 0826981d); the parity line lands after the maintainer's parity run
 - [ ] Doc style pass: plain words, every number carries what it was measured on, state what was not tested (e.g. other Apple Silicon)
