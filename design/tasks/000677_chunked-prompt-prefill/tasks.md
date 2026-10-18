@@ -150,13 +150,17 @@
       per-dispatch syncs could not touch an intra-dispatch race.** Parity-pending: the default
       path's byte-identity on the fixed build (the base pair vs baseA) and the 38-stage harness
       rerun (block_sum is shared by the stage kernels).
-- [ ] Round 22 (the closing checks, one session): the base pair on the fixed build ×2 + cmp vs
-      baseA (the default path byte-identical to the last release — the house rule), and
-      `./build-metal/q36_chunk_parity` (expect 38/38 — the barrier cannot change correct-execution
-      values, only remove the torn read). Then the roadmap T2 green + the PR.
+- [x] **Round 22 (Mac, the closing checks, 2026-10-18): the default path on the fixed build is
+      byte-identical to the last release — the base gate (no `--prefill`) vs baseA = 10/10
+      (cmp_gate) — and `q36_chunk_parity` reports all 38 stages bit-identical with the barrier in.
+      Done-bar met.**
 
 ## Step 5 — Land
 
-- [ ] Update `docs/QWEN36_METAL_ROADMAP.md` T2 State: green (stage count, ladder 10/10, Mac/date)
-- [ ] Confirm no CUDA/HIP/SYCL file changed; confirm `--prefill` stays opt-in (default flip is T3)
-- [ ] Propose the PR (task branch → main), then request the final Mac verification and mark done
+- [x] `docs/QWEN36_METAL_ROADMAP.md` T2 State: green (38/38 stages, the ladder 10/10 twice, the M2,
+      2026-10-18, commit `8847b387`); T3 marked unblocked.
+- [x] The branch diff vs origin/main = 8 files, all Metal/tests/tools/docs (no CUDA/HIP/SYCL file
+      changed); `--prefill` stays opt-in (default 0 = token-by-token; the chunk pipelines compile
+      only when the flag is on; baseC vs baseA 10/10 is the measured byte-identity).
+- [x] PR proposed (feature/000677-chunked-prompt-prefill → main); the user merges, then the task
+      marks done.
