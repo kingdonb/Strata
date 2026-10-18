@@ -65,20 +65,22 @@
       from 0/10 — the gather-smash fix moved it — and the residual pattern is ULP-class drift
       snowballing, not garbage. Incidental: the chunk path's TTFT is ~30% faster on every prompt
       (p00 19.6 s → 8.9 s incl. the first-request JIT warmup) — T3's speed story, noted.
-- [ ] **Round 14 battery (no new code — existing instruments, bundled):**
-      1. rerun the ladder as-is — the determinism check: the same 5 prompts at the same depths ⇒ a
-         deterministic arithmetic/wiring divergence (the trace names the cut); different ⇒ a race ⇒
-         the fix is the chunk graph's structure;
-      2. both TRACE gates (WITH `--log`) + `q36_trace_cmp.py` (plain-log, chunk-log) — names the
-         first diverging layer and the layer-0 cut;
-      3. `cmp_gate` on the two TRACE-run jsons — if the trace-mode chunk text is 10/10, the
-         one-graph structure is the culprit (the fix: run the chunk path per-layer like the trace
-         does) — if still 5/10, the cut from (2) names the kernel.
-      Candidate notes: the conv is T-robust by read (tile t>0 re-reads qkv directly; tile 0's state
-      write handles short chunks), so the multi-tile theory is parked; the harness's chains (stage
-      14/16) order correctly within one graph on the M2, so plain-store/load dependencies are not
-      the old atomic-chain race class.
-- [ ] Apply the mapped fix; one change per push, repeat until 10/10
+- [x] **Round 14 (Mac, same build, ladder rerun): the divergence is a RACE** — the failing set and
+      depths changed between runs (p00 at 100 then 26; p01/p05 passed then; p02/p04 fail now;
+      p03 at 21 then 46; p06 at 1 then 8). Static read found the mechanism: outside trace mode
+      `forward_prompt_chunk` accumulated ALL layers' dispatches (~600, barrier'd) into ONE command
+      buffer committed at return — the whole-chunk one-graph (round 8b's structural hazard). The
+      harness's small chains (≤ 12 dispatches) are the stable class; ~600 barriers on one concurrent
+      encoder race on the M2.
+- [x] Fix (`f6f57bd7`): commit the chunk graph **per layer** and **per split-K part/merge pair**
+      (the partials scratch is reused across pairs); GPU-time return sums the per-layer graphs;
+      trace mode unchanged (already per-cut). Every intra-layer dependency remains the barrier'd
+      pattern the harness verifies; cross-command-buffer work is queue-ordered.
+- [ ] Round 15 (user): rebuild, rerun the ladder **twice** — want `identical: 10 of 10` on both
+      runs; then the two parity jsons also compared against the round-13 base json (the decode side
+      must be unchanged); if anything still differs, the TRACE battery (the round-14 list's 2/3)
+      localizes the residual
+- [ ] Apply any residual fix; one change per push, repeat until 10/10 twice
 
 ## Step 5 — Land
 

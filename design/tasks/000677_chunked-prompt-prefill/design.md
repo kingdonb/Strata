@@ -96,6 +96,15 @@ identical: 10 of 10               # exit 0
 
 ## Learnings for future agents
 
+- **The graph-size hazard (found round 14):** `run_graph` encodes a CONCURRENT-type command buffer
+  with `memoryBarrierWithScope` between barrier-flagged dispatches. Small chains (≤ 12 dispatches —
+  everything the parity harness tests) are stable on the M2; a graph of ~600 barrier'd dispatches
+  (the whole chunk accumulated across all 40 layers) races NONDETERMINISTICALLY — same binary, same
+  prompts, different failing prompts and depths per run. Rule: flush the dispatch list per layer
+  (and wherever scratch is reused across dependent dispatches, e.g. the split-K partials per pair).
+  Cross-command-buffer work on one queue is hardware-ordered and needs no trust in the barrier
+  mechanism. Note `run_graph` is synchronous (commit + waitUntilCompleted), so per-layer graphs cost
+  only a CPU-GPU round trip each.
 - **The grid convention (this cost 11 rounds):** `d.grid` counts THREADGROUPS, `d.tg` threads per
   threadgroup (`dispatchThreadgroups`). A dispatch wanting E elements at tg=128 passes
   `grid = (E + 127) / 128`, and the kernel must bound-check its `thread_position_in_grid`. Passing
