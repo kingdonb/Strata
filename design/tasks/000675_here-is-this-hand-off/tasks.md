@@ -130,6 +130,15 @@ against its decode kernel and names the diverging stage in one Mac round.)
   the down expc keeps its once-per-chunk read; if the long-chunk numbers demand it, an exact grouped
   k_expc_lpr8 is the measured follow-up.  **Stage 16 added** (the full MoE at n_in=2048 with the real
   expert formats: the chunk chain vs the decode chain per token) - would have caught this 9 rounds ago.
+  **Mac round 10a:** compile gate green (k_gather_t in), stages 1-15 + **moe2048 eh OK** - the gather +
+  per-entry decode-lpr8 gate/up are bit-exact (the G8 root cause fix works).  moe2048 x FAILED (16384
+  diffs, first at 0): the stage's OWN sy0/gs0 buffers were one row/one float while the chunk combine
+  indexes ys[t*n+i]/gs[t] for all T tokens - threads t>=1 read ~57KB past the allocation, the GPU fault
+  discarded the whole combine dispatch's writes, x2 kept its initial values.  Fixed (868a3ca4) + an ey
+  check added (decode (t,k) rows vs the chunk's placed rows through pos) to name down-vs-combine.  Also
+  fixed: the compile test still listed the round-5-deleted k_gemv_lpr8_c_* (it died before its verdict).
+  The ENGINE path is unaffected by that bug (its sgate_c/sy_c are CT-sized).  Round 10b: rerun the
+  compile test + the parity test (expect 3 moe2048 OKs) + the 10-prompt ladder plain vs --prefill 512.
 
 ## Phase C — MTP speculative decoding
 
