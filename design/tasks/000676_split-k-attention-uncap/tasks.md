@@ -1,6 +1,6 @@
 # Implementation Tasks: Split-K Attention Uncap Context Past 8K (32K-64K)
 
-- [ ] Create task branch off `main` in Strata; cherry-pick `65037a91` (split-K kernels `k_attn_sk_part` / `k_attn_sk_merge` in `metal/kernels/q36.metal`, engine dispatch + memory gate + scratch buffers in `metal/src/engine/q36_metal.cpp`, split-K pipeline checks in `metal/tests/q36_compile_test.cpp`)
+- [~] Create task branch off `main` in Strata; cherry-pick `65037a91` (split-K kernels `k_attn_sk_part` / `k_attn_sk_merge` in `metal/kernels/q36.metal`, engine dispatch + memory gate + scratch buffers in `metal/src/engine/q36_metal.cpp`, split-K pipeline checks in `metal/tests/q36_compile_test.cpp`)
 - [ ] Apply the MSL fix from `5f84e2e5`: `constexpr int SK_HD/SK_CELLS` → `enum { ... }` in `q36.metal` (required for gate 1 on M2)
 - [ ] Confirm the cherry-picked `q36_compile_test.cpp` keeps the two split-K pipeline checks and does NOT pull in `5c367647`'s chunk-pipeline additions
 - [ ] Add the split-K bullet of docs §6 (knobs `STRATA_Q36M_ATTN_SK`, `STRATA_Q36M_MEM_OK`, engagement rule, gate commands) to `docs/QWEN36_METAL.md`, in the repo's plain-words/measured-numbers style, including the M2 gate numbers with hardware attribution ("measured on M2")
