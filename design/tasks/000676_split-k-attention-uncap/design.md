@@ -109,3 +109,19 @@ math and the same order, so long-context attention agrees with the CUDA path:
   row, not a section. `docs/QWEN36_METAL.md` had sections 1-5 on `main`; §6 is appended after §5's last
   bullet (`./run-q36.sh 8082`).
 - Commit hook: conventional-commit format enforced in both repos; subjects over 72 chars only warn.
+
+## M2 round 2 results (2026-10-18, this exact build — user-run)
+
+All three Metal gates passed on the user's M2 (macOS 26.6.2), recorded in docs/QWEN36_METAL.md §6 at
+`043e1d8d`:
+
+- Gate 1: compile test creates every pipeline incl. `k_attn_sk_part` / `k_attn_sk_merge` (lib index 0).
+- Gate 2: forced split-K at 4K is 10/10 token-identical vs the default path (128-token greedy;
+  stop-condition prompts p04/p06/p07/p09 agree on every shared token).
+- Gate 3: `--ctx 32768` → READY 32768, 10/10 prompts generated, **decode 16.9–19.3 tok/s**.
+- Measured motivation for the chunked-prefill task: at 32K the sequential per-token prompt path costs
+  ~1.1–2.3 s even for the ~30-token parity prompts (10.1 s on the first request after load). The DONE
+  line format is `DONE <produced> <prompt_ids> <prompt_ms> <decode_ms> <finish> ...` (q36_metal.cpp
+  L886), and solo_gate's tok/s = produced / decode_ms — decode these fields before quoting any timing.
+- Reviewer confirmed the task-branch name is fine despite the directive's `feat/qwen36-splitk` (which
+  was already claimed by another task in this project).
