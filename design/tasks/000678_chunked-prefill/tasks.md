@@ -8,8 +8,9 @@
 
 ## Benchmark + decision (needs the M2 Mac — maintainer)
 
-- [ ] Build on the M2 (docs/QWEN36_METAL.md §5 commands), then run:
-      `python3 tools/qwen35/q36_prefill_bench.py --exe ./build-metal/strata --args "--native $Q36_MODEL --ctx 32768" --sizes 2048,4096,8192 --chunks 0,512,1024,2048 --rounds 3 --gen 16 --out bench/results/<date>-m2-q36-prefill/bench.json`
+- [~] Build on the M2 (docs/QWEN36_METAL.md §5 commands), then run:
+      `python3 tools/qwen35/q36_prefill_bench.py --exe ./build-metal/strata --args "--native $Q36_MODEL --ctx 32768" --sizes 2048,4096,8192 --chunks 0,512,1024,2048 --rounds 3 --gen 16 --out bench/results/2026-10-18-m2-q36-prefill/bench.json`
+      (run started 2026-10-18 on the M2; first row: baseline 2K = TTFT 139.8 s, prompt 14.6 tok/s, decode 13.3 tok/s — TTFT ≈ 2048 ÷ 14.6, so the tool's numbers are self-consistent on real hardware, and the decode sits on T3's depth curve; at 14.6 tok/s the full matrix is ~3.5-4.5 h, not the 2 h first estimated — the JSON is rewritten after every cell, so an interruption keeps the finished rows)
 - [ ] Compute per-size chunked/baseline prompt-tok/s ratios; apply the ≥ 5× rule (every measured size must clear)
 
 ## Engine change (conditional on the gate)
