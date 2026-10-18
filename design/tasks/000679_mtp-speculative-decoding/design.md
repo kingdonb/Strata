@@ -45,13 +45,18 @@ tweak proves unavoidable — none expected), `docs/QWEN36_METAL.md` (numbers).
 - **State** (allocated when `mtp_d > 0`):
   - `mtp_kc` / `mtp_vc`: the draft block's KV cache (like a QSA layer's, `n_head_kv × ctx ×
     head_dim` F32, zeroed at alloc and by `reset()`).
-  - Window scratch recurrent states `S_win[l]` / `conv_win[l]` for every GDN layer — the verify
-    window's GDN/conv dispatches run against these, so the **real S/conv are never written by
-    the window**: they stay at the accept point (this is the "checkpoint"), and a partial accept
-    needs no restore copy.
-  - Scratch: `mtp_cat` (2N concat), `hmtp` ((D+1)×N block outputs), `hlast` (N; initialized from
-    the prompt's final normed hidden `s.h`), `hmain_w` ((D+1)×N window rows' out-normed hiddens —
-    the next step's redo seeds), `mtp_logits` (V), `logits_w` ((D+1)×V).
+  - Window scratch recurrent states `S_win[l]` / `conv_win[l]` for every GDN layer. Before each
+    window they are **copied from the real S/conv** (the checkpoint — flat `k_gather_t` copies with
+    K=1), and the window's GDN/conv dispatches run against them: the window's row outputs need the
+    pre-window state (the delta rule reads S), so the scratch must START as the real state, while
+    the real states themselves are never written by the window — they stay at the accept point
+    whatever the window accepts, and a partial accept needs no restore.
+  - Scratch: `mtp_cat` (2N concat), `hmtp` (N — the block's last row's output, the chained seed),
+    `hlast` (N; copied from the prompt's final normed hidden `s.h` at each request's start, then
+    re-set by every commit), `hmain_w` ((D+1)×N window rows' out-normed hiddens — the next step's
+    redo seeds), `mtp_logits` (V, the draft head), `logits_w` ((D+1)×V, the window's per-row
+    logits). The block's per-row forward reuses the decode path's own single-row buffers
+    (`s.x`, `s.h`, `s.qkv`, …) — it runs between decode steps, where they are dead.
   - The chunk scratch (`init_prompt`, L265, buffers L1424–1428) is created when `mtp_d > 0` too
     (CT = max(prefill_chunk, D+1)) — the verify window reuses the chunk kernels; `reset()` and
     `fill_scratch()` cover the new buffers.
@@ -63,13 +68,18 @@ tweak proves unavoidable — none expected), `docs/QWEN36_METAL.md` (numbers).
 - **Draft** (`mtp_draft(nx, fix, D)`): the redo-row call (rows seeded from `hmain_w` rows
   0..|fix|-1 and `hlast`), then the chained single-row calls seeded from `hmtp`. Head GEMV on the
   last row only, host argmax (same tie rule as `sample_next`: first max wins) → `drafts`.
-- **Verify** (`mtp_verify(drafts)`): run `forward_prompt_chunk([x, d1..dD], D+1, pos)` with the
-  GDN/conv dispatches pointed at the window scratch states; then one `p_rms` pass (grid = D+1)
-  into `hmain_w` and a (D+1)-row head GEMV (`push_c_gemv` with `output.weight`) into `logits_w`;
-  host argmax per row → `picks`, and `a` = the matching draft prefix. Reusing the chunk path is
-  the load-bearing decision: its kernels are bitwise stage-identical to the decode path (T2's
-  38-stage FNV parity), so a 3-row window costs ≈ one decode step and its picks equal the decode
-  picks — that is what makes gate 1 hold.
+- **Verify** (`mtp_verify(drafts)`): first the checkpoint — for every GDN layer, a flat
+  `k_gather_t` copy (K=1: `y[i] = x[i]`) of the real S and conv history into `S_win`/`conv_win`;
+  then `forward_prompt_chunk([x, d1..dD], D+1, pos, &S_win, &conv_win, sk_force)` (the chunk path
+  gained optional state-override + sk_force parameters; the prompt calls keep the defaults, so
+  its behavior is unchanged); then one `p_rms` pass (grid = D+1) into `hmain_w` and a (D+1)-row
+  head GEMV (`push_c_gemv` with `output.weight`) into `logits_w`; host argmax per row → `picks`,
+  and `a` = the matching draft prefix. Reusing the chunk path is the load-bearing decision: its
+  kernels are bitwise stage-identical to the decode path (T2's 38-stage FNV parity), so a 3-row
+  window costs ≈ one decode step and its picks equal the decode picks — that is what makes gate 1
+  hold. The checkpoint copy costs one S+conv pass (~65–100 MB for this family's geometry, to be
+  measured on the M2) per window; it is what the task's "checkpointing recurrent state S and
+  Conv1D state" names.
 - **Commit** (`mtp_commit(n_keep)`), mirroring CUDA `commit()`: for every GDN layer, re-run the
   kept rows (0..n_keep-1) of the window's saved inputs — `p_conv_c` over the saved `qkv_c` rows
   writing the real conv history, then `p_gdn_c` over the fresh conv outputs + saved
@@ -92,11 +102,14 @@ tweak proves unavoidable — none expected), `docs/QWEN36_METAL.md` (numbers).
    not just their shape.
 2. **Window via the chunk kernels** — the only T-wide path; bitwise decode-exact per the T2
    parity harness; running 3 per-token steps instead would make MTP ~3× slower, not faster.
-3. **Scratch-state checkpoint instead of memcpy** — the window writes `S_win`/`conv_win`, leaving
-   the real S/conv at the accept point; no ~65–100 MB state copy per step (an M2-step-scale cost)
-   and no kernel no-write flag needed. The commit re-run rebuilds the kept state from the
-   pre-window states + the window's saved per-row inputs, so it is decode-exact even if the
-   window's own state writes were not.
+3. **Scratch-state checkpoint (a copy, not a flag)** — the window's GDN must produce the same row
+   outputs a decode would, and those read the pre-window state — so the window runs on scratch
+   states **copied from the real S/conv first** (`k_gather_t` flat copies, no new kernel), leaving
+   the real states at the accept point; the commit re-runs the kept rows into them from the
+   window's saved per-row inputs, so the kept state is by construction exactly what a sequential
+   decode would hold even if the window's own state writes were not. (The first cut of this
+   design skipped the copy — wrong: the window's outputs would have read stale scratch. The copy
+   is the task text's "checkpointing".)
 4. **Weights load only when `--mtp > 0`** — unlike CUDA's always-load (whose reason, the hybrid
    slot tables, does not exist on Metal); keeps the default path byte-identical.
 5. **Host-side argmax for picks** — matches `sample_next`'s tie behavior; avoids a new kernel.
@@ -123,6 +136,28 @@ tweak proves unavoidable — none expected), `docs/QWEN36_METAL.md` (numbers).
   the gate stays honest.
 - Old `metal/src/engine/window.cpp` MTP code (`mtp_draft`) is the **other** engine's (Flash-Next,
   directory-based `--mtp <dir>`); unrelated to this task — do not touch it.
+
+## Implementation notes (from the implementation itself)
+
+- The window's GDN outputs read the pre-window state — the scratch states must be **copied** from
+  the real S/conv before every window (the checkpoint). First design cut skipped the copy; caught
+  in review before it shipped. The copy rides the existing `k_gather_t` pipeline with K=1
+  (`y[i] = x[i]`, the bounds guard included) — no new MSL kernel anywhere in T4.
+- `mtl::Arg::B(buf, off)` binds at a byte offset (verified in `mtl_rt.mm`'s `BO`), which is what
+  makes the 2N concat and the per-row seed reads work without new buffers or kernels.
+- Barrier-flag discipline: every dispatch site was copied verbatim from `forward_token` / the
+  chunk path (their `barrier` values encode the dependency groups the T2 parity was verified
+  with) — e.g. attn_k/v and the shexp gate/up run un-barrier'd, the routed-expert swiglu and the
+  down projections are the barrier points.
+- Serve-loop conventions: the MTP branch keeps the base loop's shape (the just-emitted `cur_tok`
+  is unprocessed at the top-of-loop exits exactly as before); a mid-draft stop commits the full
+  shown prefix (CUDA's "state at the tokens it has shown"). Observation for a follow-up ticket,
+  not touched here: the base loop's top-exits leave the last shown token unprocessed while the
+  state's `s.pos` already names its cell, so an exact-prefix continuation request skips it —
+  pre-existing, not exercised by the gates (each solo request resets), and unchanged by T4.
+- Local validation on the Linux sandbox: `g++ -fsyntax-only -std=c++20 -I metal/src -I include
+  -I third_party/ggml metal/src/engine/q36_metal.cpp` (the engine TU is Metal-free at the header
+  level). The Metal gates themselves need the M2.
 
 ## Gate commands
 
