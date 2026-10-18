@@ -103,6 +103,12 @@ identical: 10 of 10               # exit 0
   (fresh arena pages read as zeros) and write past the destination, smashing whichever live buffer
   sits above it. Corrupts THIRD-party buffers, so stage checks that regenerate their own outputs
   still pass — the blind spot that hid this for four rounds.
+- **MSL is compiled at run time from the source tree** (`STRATA_METAL_KERNELS_DEFAULT` = the source
+  `kernels/` dir), while the dispatch code lives in the binaries: a stale binary + edited MSL
+  under-binds and reads unbound slots as ZEROS, silently (round 12). The pipeline-arg-count guard
+  (`Pipeline::arg_min`, reflected at creation; checked in `require_fit`'s Dispatch overload) now
+  exits loudly on any arity mismatch — a failed build that leaves stale binaries is itself a hazard:
+  fix build errors BEFORE interpreting any run's results.
 - The harness names stages as `check("name", ...)` calls inside `// ---- N. ...` blocks; runtime
   count = call sites × loop passes (37 at tip `9d4c0aee`; 38 with the `moe2048 iso` guard).
 - Ladder parity always means: `q36_solo_gate.py` twice (plain / `--prefill 512`) + `q36_cmp_gate.py`

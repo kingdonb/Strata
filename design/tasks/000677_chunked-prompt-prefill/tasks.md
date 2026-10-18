@@ -23,10 +23,19 @@
 - [x] The isolation combine is the suite's 38th checked stage: `moe2048 iso` = the pristine base
       (memcpy'd from x3) through the chunk combine must equal x1's result bit for bit
 - [x] `g++ -fsyntax-only` passes for the harness and the engine; no CUDA/HIP/SYCL file touched
-- [ ] Mac round 12 (user): `git fetch && git switch feature/000677-chunked-prompt-prefill &&
-      cmake --build build-metal`, run `./build-metal/q36_chunk_parity` — expect 38/38 OK, 0 failures
-      (probeA/B prints unchanged, diag's d_dec now reads the surviving base, probeC's x4 == x1's
-      values)
+- [~] Mac round 12 (user, 2026-10-18): the build FAILED on my merge's duplicate `p_attn_sk_part/merge`
+      declarations in `q36_compile_test.cpp`; ninja stopped and the parity ran the **stale `9d4c0aee`
+      binary**: its 4-arg gather dispatches met the new 5-arg MSL (compiled at run time from the source
+      tree), the unbound `count` slot read 0, and every gather returned on its first check — nothing
+      written (probeA/B zeros, `hgc` → `eh2`/`ey2` zeros, `cpuC = 0`, `x2 = base + 0`, x3 survived,
+      `moe2048 iso` absent). NOT a fix failure — the round-11 smash's footprint is gone because
+      nothing was written at all; the decode side stayed correct.
+- [x] Dedupe the compile test's sk declarations + add the under-binding guard: every pipeline
+      reflects its max `[[buffer(N)]]` index + 1 at creation; a dispatch binding fewer args exits
+      loudly with a rebuild hint instead of silently reading unbound slots (`0c0608da`)
+- [ ] Mac round 13 (user): rebuild (`cmake --build build-metal`), `./build-metal/q36_chunk_parity` —
+      expect 38/38 OK, 0 failures (probeA/B print the seeded values again, `dga` populates `hgc`,
+      `moe2048 iso` present); then the ladder (Step 4)
 
 ## Step 3 — Engine audit — done alongside the fix
 
