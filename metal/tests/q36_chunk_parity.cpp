@@ -1011,7 +1011,7 @@ int main() {
                     eh2 = cx.alloc(4 * T * K * FF), ey2 = cx.alloc(4 * T * K * N2), x2 = cx.alloc(4 * T * N2);
         mtl::Buffer scr2 = cx.alloc(4 * 2 * 256), sgu = cx.alloc(4 * T * K), sd = cx.alloc(4 * T * K),
                     pos2 = cx.alloc(4 * T * K);
-        mtl::Buffer sy0 = cx.alloc(4 * N2), gs0 = cx.alloc(4);   // cx.alloc zeroes: the shared expert off
+        mtl::Buffer sy0 = cx.alloc(4 * T * N2), gs0 = cx.alloc(4 * T);   // cx.alloc zeroes: the shared expert off
         for (int i = 0; i < T * N2; ++i) x1.as<float>()[i] = r.sym();
         std::memcpy(x2.ptr, x1.ptr, 4 * T * N2);
 
@@ -1134,6 +1134,29 @@ int main() {
             cx.run_graph(ds);
         }
         check("moe2048 eh", eh1.ptr, eh2.ptr, 4 * T * K * FF);
+        // the down products: the decode's (t,k) rows vs the chunk's placed rows through the placement -
+        // a failure here names the down expc, a pass with a failed x names the combine
+        {
+            const float* a = ey1.as<float>();
+            const float* b = ey2.as<float>();
+            const int* pp = pos2.as<int>();
+            const char* st = "moe2048 ey";
+            bool ok = true;
+            for (int t = 0; t < T && ok; ++t)
+                for (int k = 0; k < K && ok; ++k) {
+                    const float* ar = a + (size_t)(t * K + k) * N2;
+                    const float* br = b + (size_t) pp[t * K + k] * N2;
+                    for (int o = 0; o < N2; ++o)
+                        if (!feq(ar[o], br[o])) {
+                            std::printf("  %-14s FAIL at token %d slot %d dim %d (%.9g vs %.9g)\n", st, t, k, o,
+                                        ar[o], br[o]);
+                            ++g_fails;
+                            ok = false;
+                            break;
+                        }
+                }
+            if (ok) std::printf("  %-14s OK\n", st);
+        }
         check("moe2048 x", x1.ptr, x2.ptr, 4 * T * N2);
     }
 

@@ -38,8 +38,8 @@ int main() {
     }
     const char* lpr8_types[] = {"T_Q4_K", "T_Q5_K", "T_Q6_K", "T_IQ2_XS"};
     for (const char* t : lpr8_types) {
-        auto p = cx.pipeline(lib, (std::string("k_gemv_lpr8_c_") + t).c_str());
-        std::printf("pipeline k_gemv_lpr8_c_%s created: (max threads: %d)\n", t, p.max_threads);
+        auto p = cx.pipeline(lib, (std::string("k_gemv_lpr8_") + t).c_str());
+        std::printf("pipeline k_gemv_lpr8_%s created: (max threads: %d)\n", t, p.max_threads);
     }
     for (const char* t : emb_types) {
         auto p = cx.pipeline(lib, (std::string("k_expc_") + t).c_str());
