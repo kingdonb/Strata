@@ -11,7 +11,15 @@ static inline float block_sum(float v, threadgroup float* sh, ushort tid, ushort
         if (lane == 0) sh[0] = tot;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    return sh[0];
+    v = sh[0];
+    // The next block_sum overwrites sh[0..3] with no ordering against THIS call's sh[0] reads -
+    // back-to-back calls (the GDN's qn then kn, every RMS norm) raced the read against the reuse:
+    // the GDN's qn readers could see kn's broadcast torn in (round 20: the chunk's GDN outputs
+    // differed at 1e-4 while the final state matched - sh_q feeds the outputs, sh_k the state).
+    // This barrier makes every read complete before the slots can be reused; intra-dispatch, so no
+    // commit structure can mask it.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return v;
 }
 
 static inline float silu(float v) { return v / (1.0f + exp(-v)); }
