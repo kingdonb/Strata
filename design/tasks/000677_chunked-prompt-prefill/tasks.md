@@ -92,13 +92,23 @@
       run-varying one (p01@127-vs-69, p03@61-vs-46 between the comparisons; chunk1 ≠ chunk2).
       With serial dispatches the run-variance cannot be dispatch ordering — something inside a
       dispatch or the host glue. The parity gate re-passed 38/38 on the serial build.
-- [ ] Round 17 (user) — the trace battery, the instrument that sees inside a dispatch chain:
-      1. `STRATA_Q36M_TRACE=1` both gates (WITH `--log`) + `q36_trace_cmp.py /tmp/trace-plain.log
-         /tmp/trace-chunk.log` — the first diverging LAYER and the layer-0 CUT;
-      2. the token dump around the reproducible flips (p00[95:106], p06[17:28], p08[9:20] from
-         base/chunk/chunk2) — are the flipped values stable per run or shared across runs;
-      3. the trace-mode chunk ×2 + `cmp_gate` (self-consistency at the finest graph structure).
-- [ ] Apply the mapped fix; one change per push, repeat until 10/10 twice
+- [x] **Round 17 (Mac, the trace battery): the deterministic divergence LOCALIZED.** The trace's
+      LAYERS verdict: layers 0–2 (GDN) bit-identical between the paths; the first diverging layer =
+      **3 = the first full-attention (QSA) layer**; 37 of 40 differ. The G-cut lines = the known
+      range-misalignment artifact (the G0 note: the chunk's r0 == the decode's token-0 value
+      bit-exactly — the embeddings were never wrong). Cause: the chunk path ran its attention
+      through the row-blocked split-K kernels (online-softmax order) while the decode runs `k_attn`
+      (one-pass threadgroup softmax) at n_pos ≤ 8192 — ulp-different by construction, and the drift
+      snowballed into the reproducible flips (p00@100 ×3). The trace-mode rerun (4/10) also showed
+      the run-variance is not a graph-size effect.
+- [x] Fix (`02d7aeec`): `push_qsa_attention`, **shared by both paths** — per query row, exactly the
+      dispatch the token-by-token path runs at that position (`k_attn` while n_pos fits the
+      8,192-cell threadgroup score cap; the split-K pair — the round-2 decode form, stage-13-verified
+      — above it). The decode's inline copy is replaced by the same call: the parity is structural.
+      The MSL is untouched; net −11 lines.
+- [ ] Round 18 (user): rebuild, the ladder twice + chunk-vs-chunk2 (want 10/10 ×2), and
+      `q36_chunk_parity` (want 38/38 on the shared-helper build); if green, the trace pair once more
+      for the record (want LAYERS: all 40 identical)
 
 ## Step 5 — Land
 

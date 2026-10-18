@@ -105,6 +105,16 @@ identical: 10 of 10               # exit 0
   Cross-command-buffer work on one queue is hardware-ordered and needs no trust in the barrier
   mechanism. Note `run_graph` is synchronous (commit + waitUntilCompleted), so per-layer graphs cost
   only a CPU-GPU round trip each.
+- **Same kernel or no parity (found round 17, the ladder's true last root cause):** the chunk path's
+  attention ran the row-blocked split-K kernels while the decode path runs `k_attn` at n_pos ≤ 8192.
+  The two are ulp-different by construction (online-softmax vs one-pass threadgroup softmax) —
+  "token-identical" gates on greedy text do NOT mean the states match; the drift snowballs into
+  reproducible argmax flips (p00 at 100 in three consecutive runs). The trace's LAYERS verdict named
+  it in one round: layers 0–2 (GDN) exact, layer 3 = the first full-attention layer diverges. Fix:
+  one shared helper (`push_qsa_attention`) both paths call — per row, the decode's own dispatch
+  (k_attn ≤ 8192 cells, the split-K pair above). Structural parity beats mirrored code. Also: the
+  trace's cut (G-line) comparisons misalign ranges and read as divergences (the round-9 G0 paradox)
+  — the LAYERS verdict is the authoritative one; check the r0/rl note before believing a G-cut.
 - **The dispatch-type hazard (found round 15, tamed round 16):** `run_graph` encoded
   `MTLDispatchTypeConcurrent` — dispatches may overlap — while `memoryBarrierWithScope` does not
   order overlapping dispatches on macOS. Fix: `MTLDispatchTypeSerial` (hardware in-order). The
