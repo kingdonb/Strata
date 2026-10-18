@@ -164,3 +164,19 @@
       only when the flag is on; baseC vs baseA 10/10 is the measured byte-identity).
 - [x] PR proposed (feature/000677-chunked-prompt-prefill → main); the user merges, then the task
       marks done.
+
+## Round 23 — the serve protocol on the 16K test (rides PR #5)
+
+- [x] The user's 16K serve test exposed two gaps: setup writes `--prefill auto` for this family, but the
+      Metal engine parsed it with atoi (0 = the chunk path silently OFF — the 4,098-token prompt read
+      token-by-token), and the engine never sent PP lines, so the server's prompt percent never moved and
+      a long read gave the watchdog no beat.
+- [x] Fix (rides PR #5): `--prefill auto` = 512 (a stderr note names it), and the serve loop sends
+      `PP <read> <total> <ms> <tok/s>` once per chunk (every 512 tokens on the token-by-token path) — the
+      CUDA q36 engine's exact line, so the percent, the llama.cpp-style prompt_progress and the #481
+      silence allowance all work. No batch path exists in this engine, so the solo serve loop is the
+      whole surface; the one-shot --tokens path is unchanged (no protocol consumer).
+- [ ] The user rebuilds and re-runs the 16K test: the percent steps per chunk, and the
+      "[strata] request prompt ... prefill X tok/s" line gives the chunked-vs-token-by-token numbers
+      (their in-flight run = the token-by-token baseline; the per-layer/pair commit floor ~1.2 s/chunk is
+      T3's to shave).
