@@ -13,8 +13,9 @@ commits sit on `origin/feat/qwen36-metal`; `65037a91`'s parent is on `main`, so 
 cleanly. The M2 gates were recorded as passed (branch commits `44b4f8e0`: compile gate; `c7a66ff3`:
 split-K 10/10 exact, 32K runs).
 
-This task lands the split-K scope on `main`. The chunked-prefill work that shares the branch
-(`d4ee3dbe` and later) is explicitly OUT of scope.
+This task lands the split-K scope on `main` by cherry-picking onto a fresh branch — `feat/qwen36-metal`
+is abandoned (rebasing it later is a separate follow-up). The chunked-prefill work that shares the
+branch (`d4ee3dbe` and later) is explicitly OUT of scope.
 
 ## User Stories
 
@@ -53,14 +54,17 @@ This task lands the split-K scope on `main`. The chunked-prefill work that share
 - 64K context is a stretch goal of the title, not a gate: only 32K is gated. KV at 64K is limited by
   unified memory and must pass gate 5's arithmetic on the target machine.
 
+## Reviewer Decisions (2026-10-18)
+
+1. Delivery: cherry-pick `65037a91` + the MSL fix onto a fresh branch off `main` and open a PR.
+   `feat/qwen36-metal` is abandoned (may be rebased later as its own follow-up); no victory is
+   declared until the PR merges to `main`.
+2. Compile test: keep the 4-line version inside `65037a91`; `5c367647`'s reorganization rides with
+   the chunked-prefill task.
+3. Gate results: record the M2 numbers in `docs/QWEN36_METAL.md` §6 AND add a `docs/TEST_REQUESTS.md`
+   entry requesting same-build comparisons on other Apple Silicon (M1/M3), per
+   `docs/COMMUNITY_BENCHMARKS.md`.
+
 ## Open Questions
 
-1. Delivery shape: is landing via cherry-pick onto a branch + PR to `main` the intended flow, or
-   should this task only re-verify the existing `feat/qwen36-metal` state? (Spec assumes cherry-pick
-   + PR, per the fork's one-change-per-PR convention.)
-2. Compile-test change: `65037a91` already adds the two split-K pipeline checks (4 lines). The later
-   `5c367647` reorganizes the test and also adds chunk-prefill pipeline checks. Spec assumes we keep
-   only the 4-line version and leave `5c367647` to the chunked-prefill task. Correct?
-3. Where should the recorded M2 gate results live — a short "measured on" note in
-   `docs/QWEN36_METAL.md` §6 (per the docs' style of numbers with what they were measured on), or
-   `docs/TEST_REQUESTS.md`?
+None.

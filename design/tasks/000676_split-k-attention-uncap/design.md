@@ -42,7 +42,7 @@ math and the same order, so long-context attention agrees with the CUDA path:
   override name (`STRATA_Q36M_MEM_OK=1`). Same shape as the CUDA engine's refusal.
 - **Compile test**: `metal/tests/q36_compile_test.cpp` creates both new pipelines from the library.
   Keep the minimal 4-line version from `65037a91` (the chunk-pipeline coverage in `5c367647` belongs
-  to the chunked-prefill task).
+  to the chunked-prefill task). Confirmed by reviewer 2026-10-18.
 
 ## Landing plan
 
@@ -51,9 +51,14 @@ math and the same order, so long-context attention agrees with the CUDA path:
   kernel hunk depends on chunk-era code and is N/A here — only the unused-var removal matters if the
   context differs).
 - Docs: add the split-K bullet of §6 (knobs `STRATA_Q36M_ATTN_SK`, `STRATA_Q36M_MEM_OK`, gate
-  commands) to `docs/QWEN36_METAL.md`, keeping the docs' plain-words, measured-numbers style.
+  commands) to `docs/QWEN36_METAL.md`, keeping the docs' plain-words, measured-numbers style, and
+  include the M2 gate numbers with hardware attribution ("measured on M2"). Also add a
+  `docs/TEST_REQUESTS.md` entry requesting same-build comparisons on other Apple Silicon (M1/M3),
+  following `docs/COMMUNITY_BENCHMARKS.md` (compare against a same-day run of the build under test).
 - Do NOT cherry-pick `d4ee3dbe` / `5c367647` / later chunk and MTP commits.
-- Push branch, open PR to `main` (one change per PR).
+- Push branch, open PR to `main` (one change per PR). The task is complete only when the PR merges;
+  `feat/qwen36-metal` is abandoned per reviewer decision — rebasing it later is a separate follow-up
+  task, not part of this one.
 
 ## Verification notes / gotchas
 
