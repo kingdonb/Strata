@@ -1225,6 +1225,7 @@ int run(int argc, char** argv) {
     int n_gen = 64;
     int ctx = 4096;
     int prefill_chunk = 0;   // --prefill N: the prompt-chunk size (0 = token-by-token, as before)
+    bool prefill_given = false;
     bool serve_mode = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -1240,6 +1241,7 @@ int run(int argc, char** argv) {
         } else if ((a == "--ctx" || a == "--max-context") && i + 1 < argc) {
             ctx = std::atoi(argv[++i]);
         } else if (a == "--prefill" && i + 1 < argc) {
+            prefill_given = true;
             const std::string pv = argv[++i];
             // "auto" is what setup writes for this family and what the CUDA engine takes as pick-for-me; here it
             // used to fall into atoi (0) and silently disable the chunk path - a 4K prompt then read token-by-token
@@ -1254,6 +1256,13 @@ int run(int argc, char** argv) {
     }
     if (prefill_chunk < 0) prefill_chunk = 0;
     if (prefill_chunk == 0 && env_flag("STRATA_Q36M_PREFILL")) prefill_chunk = 512;
+    // The no-flag default.  0 = token-by-token, the released behavior, until the M2 chunk-size benchmark
+    // (docs/QWEN36_METAL.md) measures the chunk path >= 5x faster on every size; then this becomes the
+    // parity-verified winner (512 unless a larger chunk passes the 10-prompt gate).  An explicit
+    // `--prefill 0` always gives the old token-by-token path; the defaulted chunk must also pass the
+    // startup memory gate (a chunk the working set cannot fit downgrades instead of refusing).
+    const int default_prefill_chunk = 0;
+    if (prefill_chunk == 0 && !prefill_given) prefill_chunk = default_prefill_chunk;
 
     if (model_path.empty()) {
         std::fprintf(stderr, "strata metal q36: specify --model <path.gguf>\n");
