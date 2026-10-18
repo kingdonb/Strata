@@ -22,8 +22,10 @@
 
 ## Parity + docs (needs the M2 Mac — maintainer)
 
-- [~] Re-verify parity under the shipping default: rebuild (the scaffold commit touched `run()`), then `q36_solo_gate.py` with no `--prefill` flag vs `--prefill 0`, then `q36_cmp_gate.py` → 10/10 identical (commands handed to the maintainer; with no flip this doubles as the proof the scaffolding changed no token)
+- [x] Re-verify parity under the shipping default: rebuild (the scaffold commit touched `run()`), then `q36_solo_gate.py` with no `--prefill` flag vs `--prefill 0`, then `q36_cmp_gate.py` → **10/10 identical** (maintainer run, 2026-10-18: `identical: 10 of 10` — the shipping default path is intact and the scaffolding changed no token)
 - [x] Update docs/QWEN36_METAL.md §6: benchmark table (prompt size, chunk, TTFT ms, prompt tok/s, ratio; date, M2/macOS, model file, ctx, build), the decision paragraph with the numbers and the escape hatch, the parity line, the reproduction command block; update the "Prompts run token-by-token unless --prefill is set" sentence if flipped
   - [x] The reproduction command block (bench + default-vs-token-by-token parity commands) is in §6's reference block — added before the M2 run so the maintainer can copy-paste it
   - [x] The table + decision paragraph are in (commit 0826981d); the parity line lands after the maintainer's parity run
-- [ ] Doc style pass: plain words, every number carries what it was measured on, state what was not tested (e.g. other Apple Silicon)
+- [x] Doc style pass: plain words, every number carries what it was measured on, state what was not tested (e.g. other Apple Silicon — the benchmark and parity are M2-only so far, per docs/TEST_REQUESTS.md)
+
+All acceptance gates met: (1) the benchmark table is published in docs/QWEN36_METAL.md §6 with the date, hardware, model, ctx and the raw results in `bench/results/2026-10-18-m2-q36-prefill/`; (2) the 10-prompt parity is re-verified (10/10) under the shipping default. The flip gate failed (1.24-1.51x vs the 5x needed), so the default stays opt-in by the reviewer-confirmed rule. Remaining delivery step: the maintainer retries opening the approved PR (prp_01m5874xp5mhqeyxfz2b6br08c) from Helix — the branch is reconciled and pushed.
