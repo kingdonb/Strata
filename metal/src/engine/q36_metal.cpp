@@ -30,6 +30,7 @@ enum : int {
     T_F32 = 0,
     T_F16 = 1,
     T_Q8_0 = 8,
+    T_Q2_K = 10,
     T_Q3_K = 11,
     T_Q4_K = 12,
     T_Q5_K = 13,
@@ -250,6 +251,7 @@ struct Pipelines {
         get_gemv(T_F32, "k_gemv_T_F32");
         get_gemv(T_BF16, "k_gemv_T_BF16");
         get_gemv(T_Q8_0, "k_gemv_T_Q8_0");
+        get_gemv(T_Q2_K, "k_gemv_T_Q2_K");
         get_gemv(T_Q3_K, "k_gemv_T_Q3_K");
         get_gemv(T_Q4_K, "k_gemv_T_Q4_K");
         get_gemv(T_Q5_K, "k_gemv_T_Q5_K");
@@ -297,6 +299,7 @@ struct Pipelines {
         get_gemv_c(T_F32, "k_gemv_c_T_F32");
         get_gemv_c(T_BF16, "k_gemv_c_T_BF16");
         get_gemv_c(T_Q8_0, "k_gemv_c_T_Q8_0");
+        get_gemv_c(T_Q2_K, "k_gemv_c_T_Q2_K");
         get_gemv_c(T_Q3_K, "k_gemv_c_T_Q3_K");
         get_gemv_c(T_Q4_K, "k_gemv_c_T_Q4_K");
         get_gemv_c(T_Q5_K, "k_gemv_c_T_Q5_K");
@@ -1495,44 +1498,23 @@ static void mtp_verify(mtl::Context& cx, const Pipelines& pipes, const Model& m,
 }
 
 // After a verify window kept its first n_keep rows (row 0 = the token the caller emitted, then the
-// accepted drafts): the GDN state takes those rows - the conv history and the recurrence run again
-// over the window's saved inputs (the chunk pass's qkv and alpha/beta rows), writing the real
-// states.  Then hlast = the last kept row's normed hidden and pos advances by n_keep.  The window's
-// scratch states are left stale; the next window's checkpoint rewrites them.
-static void mtp_commit(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s, int n_keep) {
+// accepted drafts): the GDN state takes those rows.  If all T rows were accepted, the window scratch
+// states already hold the result - copy them to real states.  If partially accepted (n_keep < T),
+// the real states (which stayed untouched at accept point) take the kept rows through the chunk path.
+static void mtp_commit(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s,
+                       const int32_t* toks, int n_keep, int T, bool sk_force) {
     const auto& g = m.g;
-    const int C = (int) g.ssm_conv_channels, HK = (int) g.ssm_k_heads, HV = (int) g.ssm_v_heads,
-              DS = (int) g.ssm_state_size, Kd = (int) g.ssm_d_conv;
-    std::vector<mtl::Dispatch> ds;
-    for (int64_t l = 0; l < g.n_layers; ++l) {
-        if (strata::core::is_qsa_layer(g, l)) continue;
-        {
-            mtl::Dispatch d;
-            d.p = &pipes.p_conv_c;
-            d.args = {mtl::Arg::B(s.qkv_c), mtl::Arg::B(s.conv_state[l]), mtl::Arg::B(m.F(L(l, "ssm_conv1d.weight"))),
-                      mtl::Arg::B(s.conv_out_c), mtl::Arg::V(C), mtl::Arg::V(Kd), mtl::Arg::V(n_keep)};
-            d.grid[0] = (uint32_t) ((C + 127) / 128);
-            d.grid[1] = (uint32_t) ((n_keep + 15) / 16);
-            d.tg[0] = 128;
-            d.barrier = true;
-            ds.push_back(d);
-        }
-        {
-            mtl::Dispatch d;
-            d.p = &pipes.p_gdn_c;
-            d.args = {mtl::Arg::B(s.conv_out_c), mtl::Arg::B(s.alpha_c), mtl::Arg::B(m.F(L(l, "ssm_dt.bias"))),
-                      mtl::Arg::B(m.F(L(l, "ssm_a"))), mtl::Arg::B(s.beta_c), mtl::Arg::B(s.S[l]),
-                      mtl::Arg::B(s.gdn_out_c), mtl::Arg::V(HK), mtl::Arg::V(DS), mtl::Arg::V(HV),
-                      mtl::Arg::V(C), mtl::Arg::V(m.eps), mtl::Arg::V(n_keep)};
-            d.grid[0] = (uint32_t) HV;
-            d.tg[0] = 128;
-            d.barrier = true;
-            ds.push_back(d);
-        }
-    }
-    cx.run_graph(ds);
     std::memcpy(s.hlast.ptr, (const float*) s.hmain_w.ptr + (size_t) (n_keep - 1) * (size_t) g.n_embd,
                 (size_t) g.n_embd * sizeof(float));
+    if (n_keep == T) {
+        for (int64_t l = 0; l < g.n_layers; ++l) {
+            if (strata::core::is_qsa_layer(g, l)) continue;
+            std::memcpy(s.S[(size_t) l].ptr, s.S_win[(size_t) l].ptr, s.S[(size_t) l].bytes);
+            std::memcpy(s.conv_state[(size_t) l].ptr, s.conv_win[(size_t) l].ptr, s.conv_state[(size_t) l].bytes);
+        }
+    } else {
+        forward_prompt_chunk(cx, pipes, m, s, toks, n_keep, s.pos, nullptr, nullptr, sk_force);
+    }
     s.pos += n_keep;
 }
 
@@ -2132,7 +2114,10 @@ int run(int argc, char** argv) {
                         if (stop_flag.load()) { finish = "cancel"; stopped = true; break; }
                         if (s.pos + shown + 1 >= s.ctx) { finish = "length"; stopped = true; break; }
                     }
-                    mtp_commit(cx, pipes, m, s, 1 + shown);
+                    std::vector<int32_t> win_toks((size_t) (mtp_d + 1));
+                    win_toks[0] = cur_tok;
+                    for (int d = 0; d < mtp_d; ++d) win_toks[(size_t) (d + 1)] = drafts[(size_t) d];
+                    mtp_commit(cx, pipes, m, s, win_toks.data(), 1 + shown, mtp_d + 1, sk_force);
                     fix.assign(drafts.begin(), drafts.begin() + shown);
                     cur_tok = picks[(size_t) shown];
                     if (stopped) break;
@@ -2240,7 +2225,10 @@ int run(int argc, char** argv) {
                 int a = 0;
                 while (a < mtp_d && picks[(size_t) a] == drafts[(size_t) a]) ++a;
                 accepted += a;
-                mtp_commit(cx, pipes, m, s, a + 1);
+                std::vector<int32_t> win_toks((size_t) (mtp_d + 1));
+                win_toks[0] = nx;
+                for (int d = 0; d < mtp_d; ++d) win_toks[(size_t) (d + 1)] = drafts[(size_t) d];
+                mtp_commit(cx, pipes, m, s, win_toks.data(), a + 1, mtp_d + 1, sk_force);
                 fix.assign(drafts.begin(), drafts.begin() + a);
                 for (int i = 0; i < a && (int) gen.size() < n_gen; ++i) {
                     gen.push_back(drafts[(size_t) i]);

@@ -11,6 +11,7 @@
 // ushorts.
 
 #define T_Q4_0 2
+#define T_Q2_K 10
 #define T_Q3_K 11
 #define T_BF16 30
 #define T_F32 0
@@ -41,6 +42,7 @@ template <> struct fmt<T_IQ2_S>   { enum { QK = 256, BB = 82,  UNIT = 16, TAB = 
 template <> struct fmt<T_IQ3_S>   { enum { QK = 256, BB = 110, UNIT = 16, TAB = 512 + 32 }; };
 template <> struct fmt<T_IQ4_NL>  { enum { QK = 32,  BB = 18,  UNIT = 32, TAB = 256 }; };
 template <> struct fmt<T_IQ4_XS>  { enum { QK = 256, BB = 136, UNIT = 32, TAB = 256 }; };
+template <> struct fmt<T_Q2_K>    { enum { QK = 256, BB = 84,  UNIT = 32, TAB = 1 }; };
 template <> struct fmt<T_Q3_K>    { enum { QK = 256, BB = 110, UNIT = 32, TAB = 1 }; };
 template <> struct fmt<T_Q4_K>    { enum { QK = 256, BB = 144, UNIT = 32, TAB = 1 }; };
 template <> struct fmt<T_Q5_K>    { enum { QK = 256, BB = 176, UNIT = 32, TAB = 1 }; };
@@ -81,6 +83,7 @@ template <> inline void load_tab<T_Q8_0>(threadgroup uint*, ushort, ushort) {}
 template <> inline void load_tab<T_Q4_0>(threadgroup uint*, ushort, ushort) {}
 template <> inline void load_tab<T_Q5_0>(threadgroup uint*, ushort, ushort) {}
 template <> inline void load_tab<T_Q5_1>(threadgroup uint*, ushort, ushort) {}
+template <> inline void load_tab<T_Q2_K>(threadgroup uint*, ushort, ushort) {}
 template <> inline void load_tab<T_Q3_K>(threadgroup uint*, ushort, ushort) {}
 template <> inline void load_tab<T_Q4_K>(threadgroup uint*, ushort, ushort) {}
 template <> inline void load_tab<T_Q5_K>(threadgroup uint*, ushort, ushort) {}
@@ -396,6 +399,36 @@ template <> inline float deq<T_Q6_K>(device const uchar* b, int ui, thread float
         const int high = ((qh_base[l] >> qh_shift) & 3) << 4;
         const int q_val = (low | high) - 32;
         q[l] = d * float(sc_base[is + sc_offset]) * float(q_val);
+    }
+    return 1.0f;
+}
+
+template <> inline float deq<T_Q2_K>(device const uchar* b, int ui, thread float* q, threadgroup const uint*) {
+    device const block_q2_K* blk = (device const block_q2_K*)b;
+    const float d = float(blk->d);
+    const float min = float(blk->dmin);
+
+    const int h_part = ui / 4;
+    const int j = ui % 4;
+    const int shift = 2 * j;
+    device const uchar* q_base = blk->qs + h_part * 32;
+
+    const int is0 = 2 * ui;
+    const int is1 = is0 + 1;
+    const uchar sc0 = blk->scales[is0];
+    const uchar sc1 = blk->scales[is1];
+
+    const float dl0 = d * float(sc0 & 0x0F);
+    const float ml0 = min * float(sc0 >> 4);
+    const float dl1 = d * float(sc1 & 0x0F);
+    const float ml1 = min * float(sc1 >> 4);
+
+    for (int l = 0; l < 16; ++l) {
+        const int q0 = (q_base[l] >> shift) & 3;
+        q[l] = dl0 * float(q0) - ml0;
+
+        const int q1 = (q_base[l + 16] >> shift) & 3;
+        q[l + 16] = dl1 * float(q1) - ml1;
     }
     return 1.0f;
 }
