@@ -1017,6 +1017,25 @@ int main() {
         mtl::Buffer x3 = cx.alloc(4 * T * N2);
         std::memcpy(x3.ptr, x1.ptr, 4 * T * N2);   // the pristine initial: neither combine touches it
 
+        // probe A: what does the GPU see of the host-written x1/x2/x3?  pure copies (k_gather_t with k=1),
+        // host-read before any chain runs - decides "the memcpy never reaches the GPU" vs "something later
+        // zeroes x2's GPU view".
+        {
+            mtl::Buffer x1g = cx.alloc(4 * T * N2), x2g = cx.alloc(4 * T * N2), x3g = cx.alloc(4 * T * N2);
+            mtl::Dispatch c1, c2, c3;
+            c1.p = c2.p = c3.p = &p_gather;
+            c1.args = {mtl::Arg::B(x1), mtl::Arg::B(x1g), mtl::Arg::V(T * N2), mtl::Arg::V(1)};
+            c2.args = {mtl::Arg::B(x2), mtl::Arg::B(x2g), mtl::Arg::V(T * N2), mtl::Arg::V(1)};
+            c3.args = {mtl::Arg::B(x3), mtl::Arg::B(x3g), mtl::Arg::V(T * N2), mtl::Arg::V(1)};
+            c1.grid[0] = c2.grid[0] = c3.grid[0] = T * N2;
+            c1.tg[0] = c2.tg[0] = c3.tg[0] = 128;
+            cx.run_graph({c1, c2, c3});
+            std::printf("  moe2048 probeA: gpu x1=%.9g/%.9g x2=%.9g/%.9g x3=%.9g/%.9g | host x1=%.9g x2=%.9g x3=%.9g\n",
+                        x1g.as<float>()[0], x1g.as<float>()[T * N2 - 1], x2g.as<float>()[0],
+                        x2g.as<float>()[T * N2 - 1], x3g.as<float>()[0], x3g.as<float>()[T * N2 - 1],
+                        x1.as<float>()[0], x2.as<float>()[0], x3.as<float>()[0]);
+        }
+
         // the decode chain, per token (the engine's own shapes: gate/up lpr8 with x_stride 0, the down
         // plain gemv at x_stride FF, k_moe_sum on the token's K rows)
         {
@@ -1076,6 +1095,20 @@ int main() {
                 ds2.push_back(dm);
             }
             cx.run_graph(ds2);
+        }
+
+        // probe B: x2's GPU view again, after the decode chain ran (three command buffers committed since
+        // the memcpy) - catches a corruption that happens DURING the decode chain's dispatches.
+        {
+            mtl::Buffer x2m = cx.alloc(4 * T * N2);
+            mtl::Dispatch cm;
+            cm.p = &p_gather;
+            cm.args = {mtl::Arg::B(x2), mtl::Arg::B(x2m), mtl::Arg::V(T * N2), mtl::Arg::V(1)};
+            cm.grid[0] = T * N2;
+            cm.tg[0] = 128;
+            cx.run_graph({cm});
+            std::printf("  moe2048 probeB: gpu x2=%.9g/%.9g (host %.9g)\n", x2m.as<float>()[0],
+                        x2m.as<float>()[T * N2 - 1], x2.as<float>()[0]);
         }
 
         // the chunk chain, one graph (k_tables -> gather -> per-entry lpr8 gate/up -> swiglu -> down expc
@@ -1182,6 +1215,26 @@ int main() {
                                 x2.as<float>()[t * N2 + i] - xi[t * N2 + i], sd, sc,
                                 x1.as<float>()[t * N2 + i], x2.as<float>()[t * N2 + i]);
                 }
+        }
+        // probe C: the same combine on a fresh memcpy-seeded buffer, as its own command buffer, after the
+        // main graphs - separates "the combine + its bindings" from "x2's state at combine time".  x4 ==
+        // x1's values means the memcpy-seeded base reached this combine (so the original x2 was zeroed in
+        // between); x4 == x2's values means the memcpy base never reaches the GPU.
+        {
+            mtl::Buffer x4 = cx.alloc(4 * T * N2);
+            std::memcpy(x4.ptr, x3.ptr, 4 * T * N2);
+            mtl::Dispatch dsum2;
+            dsum2.p = &p_sumc;
+            dsum2.args = {mtl::Arg::B(x4), mtl::Arg::B(ey2), mtl::Arg::B(wts2), mtl::Arg::B(sy0), mtl::Arg::B(gs0),
+                          mtl::Arg::B(pos2), mtl::Arg::V(K), mtl::Arg::V(N2), mtl::Arg::V(N2)};
+            dsum2.grid[0] = T;
+            dsum2.grid[1] = (N2 + 127) / 128;
+            dsum2.tg[0] = 128;
+            cx.run_graph({dsum2});
+            std::printf("  moe2048 probeC: x4=%.9g/%.9g | x1=%.9g/%.9g | x2=%.9g/%.9g (initial %.9g)\n",
+                        x4.as<float>()[0], x4.as<float>()[T * N2 - 1], x1.as<float>()[0],
+                        x1.as<float>()[T * N2 - 1], x2.as<float>()[0], x2.as<float>()[T * N2 - 1],
+                        x3.as<float>()[0]);
         }
     }
 
