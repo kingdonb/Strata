@@ -1286,34 +1286,6 @@ int run(int argc, char** argv) {
                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
                  total_weight_bytes / (1024.0 * 1024.0 * 1024.0));
 
-    // Working-set refusal with the numbers (the CUDA engine refuses a count that cannot fit, with the
-    // numbers): weights + KV cache + recurrent state + split-K scratch + a reserve for the activations.
-    // Only enforced above the 8,192-token context the threadgroup attention could reach - at or below it
-    // every setup runs exactly as before - and STRATA_Q36M_MEM_OK=1 overrides it.
-    {
-        uint64_t kv_bytes = 0, sst_bytes = 0, conv_bytes = 0;
-        for (int64_t l = 0; l < m.g.n_layers; ++l) {
-            if (strata::core::is_qsa_layer(m.g, l)) {
-                kv_bytes += 2 * (uint64_t) m.g.n_head_kv * ctx * m.g.head_dim * sizeof(float);
-            } else {
-                sst_bytes += (uint64_t) m.g.ssm_v_heads * m.g.ssm_state_size * m.g.ssm_state_size * sizeof(float);
-                conv_bytes += (uint64_t) (m.g.ssm_d_conv - 1) * m.g.ssm_conv_channels * sizeof(float);
-            }
-        }
-        const uint64_t scratch_bytes = (uint64_t) ((ctx + SK_CELLS - 1) / SK_CELLS) * SK_ROWS_MAX * (SK_CELLS + 2) * sizeof(float);
-        const uint64_t est = total_weight_bytes + kv_bytes + sst_bytes + conv_bytes + scratch_bytes + (256ull << 20);
-        const uint64_t rec = cx.recommended_working_set();
-        if (ctx > SK_TG_CAP && est > rec && !env_flag("STRATA_Q36M_MEM_OK")) {
-            std::fprintf(stderr,
-                         "strata metal q36: ctx %d takes ~%.2f GB (weights %.2f + kv %.2f + ssm state %.2f + "
-                         "conv %.2f + attn scratch %.2f + reserve 0.25) past the recommended working set "
-                         "%.2f GB - lower --ctx or set STRATA_Q36M_MEM_OK=1\n",
-                         ctx, est / 1e9, total_weight_bytes / 1e9, kv_bytes / 1e9, sst_bytes / 1e9,
-                         conv_bytes / 1e9, scratch_bytes / 1e9, rec / 1e9);
-            return 1;
-        }
-    }
-
     // Allocate runtime state buffers
     State s;
     s.ctx = ctx;
