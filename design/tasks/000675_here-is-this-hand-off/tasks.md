@@ -9,7 +9,7 @@ decoding, FP16 KV cache. Branch `feat/qwen36-metal`, everything verified on the 
 | Phase | Scope | State |
 |---|---|---|
 | A split-K attention | ctx past 8K, 32K runs | **DONE, Mac-verified** (10/10 token-identical, 32K OK) |
-| B chunked prefill | 512-token chunks, bit-identical, then default flip | **~90%**: all kernels + tables race fixed (34/34 stage-exact); ENGINE still diverges - root-caused to layer 0's MoE (round 9 cuts): gate/up experts use k_expc (plain-gemv arithmetic) while decode uses k_gemv_lpr8 (different fma/butterfly) at n_in=2048 (~5e-7 sum diff -> token flips); G1-G7 bit-exact; G0 emb divergence unexplained (need embtype); G9/G10 huge - likely the down expert reading eh by entry index (srt_in_d) while eh is placed-ordered (a layout mismatch the stages never covered). Fix designed: k_gather_t + per-entry decode-lpr8 for gate/up (which also makes srt_in_d correct) + down identity fallback |
+| B chunked prefill | 512-token chunks, bit-identical, then default flip | **round 10: fix implemented, Mac verification pending.** Round 9 cuts decoded: G1-G7 bit-exact; G8 (routed experts) diverges ~5e-7 - the chunk's k_expc (plain-gemv order) vs the decode's k_gemv_lpr8 (deq_dot_block + butterfly) at n_in=2048, never stage-compared; G9/G10 downstream; G9's huge size also the down expc reading the placed-ordered eh through the entry-index table (a second bug). Fixed: k_gather_t + the per-entry decode-lpr8 for the gate/up (exact by construction, (t,k)-ordered eh, which also makes srt_in_d correct) + the identity map for non-lpr8 types + the FF==2048 down edge + stage 16 (the full MoE at n_in=2048, chunk vs decode). G0 (embedding) still diverges unexplained (-2.0214 vs -0.8025 while G1-G7 match) - r0/rl diagnostics added to settle it |
 | C MTP (--mtp 2) | blk.40 draft + verify, 1.2x+ decode | not started (gated on B) |
 | D FP16 KV / sampling | opt-in kv-f16, sampling profile, docs | not started |
 | wrap-up | docs/QWEN36_METAL.md numbers, full gates, PR | not started |
@@ -106,6 +106,30 @@ against its decode kernel and names the diverging stage in one Mac round.)
   token_embd GGUF type id). **Mac round 9, ask user:** `git pull && cmake --build build-metal`, rerun the
   two trace gates (WITH --log) + trace_cmp (now prints LAYERS: and CUTS: verdicts) + the json cmp. The
   first diverging cut names the dispatch; if all cuts match, the bug is one-graph-structural only.
+  **Round 9 verdict (decoded):** the script prints only diverging fields, and the chunk log's SECOND G
+  sequence is the last-token decode window's cuts (1-token values against the whole-chunk reference -
+  expected noise, ignore).  The chunk path's cuts: G1-G7 bit-exact; **G8 (routed experts) diverges ~5e-7**
+  (5.9148414304 vs 5.9148444452) - last-ulp arithmetic, not placement; G9/G10 huge (downstream).  **G0 (the
+  embedding) also diverges (-2.0214 vs -0.8025) while G1-G7 match** - paradoxical (the rms cannot remove a
+  scale bit-exactly: eps sits inside the rsqrt argument).  The engine's G0 line now also prints the
+  chunk's first/last row sums (r0/rl) and trace_cmp prints a G0 note (both embtypes, the decode's
+  first/last token values, the token count) to settle whether the rows differ or the comparison is off.
+  **Root cause of G8 (proven by the dispatch audit):** the decode's gate/up experts at n_in=2048 run
+  k_gemv_lpr8 (8 lanes x deq_dot_block over threadgroup-cached x + an 8-lane butterfly); the chunk's
+  k_expc mirrors the PLAIN k_gemv (32-lane strided units + simd_sum).  No stage ever compared expc vs
+  lpr8 (stage 5 = lpr8 vs lpr8; stages 7/7b = expc vs plain gemv at n_in=256).  push_c_gemv's comment
+  already documented this class for the dense products (round 5) - the routed experts were missed.
+  **The fix (round 10):** k_gather_t (pure row copies: the entries' input rows in (t,k) order) + the
+  decode k_gemv_lpr8 per entry (grid[1]=n_ent, ids_c) for the lpr8-typed gate/up -> eg/eu/eh come out
+  (t,k)-ordered with the decode's exact arithmetic; the down expc then reads eh through srt_in_d (the
+  entry index), which is CORRECT for the (t,k) layout - the old placed-ordered eh vs entry-index lookup
+  was a second bug.  Non-lpr8 gate/up types keep k_expc and the down reads via the new identity map
+  (s.ident_c); FF==2048 with an lpr8-typed down goes per-entry too (tables skipped, the combine reads
+  through the identity); the impossible mix (lpr8-typed down at n_ff 2048 with a non-lpr8 gate/up) is
+  refused at startup.  Perf note: the gate/up re-read their weights per entry (the decode's traffic) -
+  the down expc keeps its once-per-chunk read; if the long-chunk numbers demand it, an exact grouped
+  k_expc_lpr8 is the measured follow-up.  **Stage 16 added** (the full MoE at n_in=2048 with the real
+  expert formats: the chunk chain vs the decode chain per token) - would have caught this 9 rounds ago.
 
 ## Phase C — MTP speculative decoding
 
