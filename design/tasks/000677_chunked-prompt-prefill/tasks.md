@@ -111,21 +111,36 @@
       runs; p06's stop lengths 81/104/91).** The chunk is STILL run-varying with serial dispatches
       and the decode's own attention sequence — so the nondeterminism has a source that is neither
       dispatch ordering nor the attention arithmetic. The reproducible p03@6 flip = nameable.
-- [ ] Round 19 (user; the knob commit is Strata `b30049db` — pull + rebuild `strata`, the default
-      path is untouched): four independent discriminators, one session —
-      1. the decode's own determinism (the pivotal readout): the plain gate twice
-         (`/tmp/q36-baseA.json`, `/tmp/q36-baseB.json`) + `cmp_gate` — base-vs-base has never been
-         measured on one build; if it differs, the nondeterminism is engine-wide and pre-existing;
-      2. the post-helper TRACE pair + `q36_trace_cmp.py` — the LAYERS verdict (all 40 identical, or
-         which layer diverges with the attention shared?);
-      3. the stale-scratch test: `STRATA_Q36M_ZERO_STATE=1` on the chunked ladder twice
-         (`/tmp/q36-chunkZ1.json`, `/tmp/q36-chunkZ2.json`) + `cmp_gate` (timings inflate: the flag
-         memsets every scratch buffer per request) — self-consistent ⇒ the no-stale-read invariant
-         is broken somewhere; still varying ⇒ the leftover theory is dead;
-      4. the token dump at p03's flip (`[1:12]` from base/chunk1/chunk2).
-      Decision tree: baseA≠baseB → the engine wobbles everywhere (fix that first, the ladder
-      methodology is invalid meanwhile); Z1==Z2 → bisect the zero loop by buffer family next;
-      Z1≠Z2 → the trace's layer verdict + an empirical Metal probe round.
+- [x] **Round 19 (Mac, the four-instrument battery): the leftover theory is DEAD; the divergence
+      seeds inside the chunk's per-layer graphs.** (1) base×2: **10/10 identical** — the decode is
+      deterministic on the serial build, and the lengths match every prior round's base run, so it
+      was never the wobbler; the engine-wide branch is closed and the ladder methodology is valid.
+      (2) the post-helper trace pair: **LAYERS: all bit-identical** — with the shared attention
+      helper, the chunk's state matches the decode's at every one of the 40 layer boundaries (the
+      G-cut DIVERGES lines are the known whole-chunk-vs-window misalignment artifact; the G0 note's
+      r0 == decode token-0 stays the alignment proof). (3) `STRATA_Q36M_ZERO_STATE=1` chunk×2:
+      **6/10 against itself** (p00@25, p03@21, p05@121, p06 lengths 85/89 — lengths never seen in
+      any prior run, so the zeroing demonstrably fired and still changed the trajectories) and 6/10
+      against the base (p06@0 — the divergence starts at the decode window's first token, i.e. in
+      the chunk's final state, produced by the per-layer graphs). Zeroed scratch + static dispatch
+      sequence + host-synced per-layer commits + a deterministic decode leaves ONE suspect class:
+      ordering inside the chunk's multi-dispatch graphs — the trace's finer-grained per-cut commits
+      are bit-identical, the one-buffer-per-token decode is deterministic, so the pattern is
+      chunk-specific. (4) the p03 token dump: moot — superseded by the trace verdict.
+- [ ] Round 20 (user; the knobs are Strata `00cd22b7` + `cbe03cab` — pull + rebuild): the structure
+      ladder, one session —
+      1. the post-helper TRACE pair ×2 (`/tmp/q36-ct1.json`, `/tmp/q36-ct2.json` with
+         `STRATA_Q36M_TRACE=1 ... --prefill 512`) + `cmp_gate` — is ANY multi-dispatch chunk
+         structure self-consistent post-helper? (pre-helper the trace pair varied 4/10);
+      2. the init line `chunk expert kernels: gate/up lpr8=… down lpr8=… (the entry tables …)` —
+         tells us whether the placement atomics are even in play for this model;
+      3. `STRATA_Q36M_SYNC_EVERY=1` on the chunked ladder ×2 + `cmp_gate` (slow — one command
+         buffer per dispatch): 10/10 ⇒ an ordering/race between dispatches inside a layer graph is
+         CONFIRMED, and a stride bisect (SYNC_EVERY=2,4,8…) names the pair; still varying ⇒ the
+         nondeterminism is inside a single dispatch, and the poison knob (`STRATA_Q36M_POISON_STATE=1`)
+         + the trace name the kernel (the first NaN layer);
+      4. `cmp_gate /tmp/q36-<sync>1.json /tmp/q36-baseA.json` — whether the strongest structure
+         reproduces the base exactly.
 - [ ] Apply the mapped fix; one change per push, repeat until 10/10 twice
 
 ## Step 5 — Land
