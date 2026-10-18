@@ -2,7 +2,7 @@
 
 ## Bench tool (this Linux sandbox)
 
-- [ ] Add `tools/qwen35/q36_prefill_bench.py`: per-(size, round) seeded prompt ids (stop ids avoided, no shared prefixes), one engine start per `--prefill` value via `q36_harness.Eng`, discarded warm-up per start (parity prompt 0), per size × round GEN n=16 capturing client TTFT, PP lines and the DONE fields (prompt_ms, fresh), fresh-count assertion, median aggregation, JSON + markdown table output, `line()` timeout ≥ 1800 s
+- [~] Add `tools/qwen35/q36_prefill_bench.py`: per-(size, round) seeded prompt ids (stop ids avoided, no shared prefixes), one engine start per `--prefill` value via `q36_harness.Eng`, discarded warm-up per start (parity prompt 0), per size × round GEN n=16 capturing client TTFT, PP lines and the DONE fields (prompt_ms, fresh), fresh-count assertion, median aggregation, JSON + markdown table output, `line()` timeout ≥ 1800 s
 - [ ] Record a refused start (memory gate) as a row note instead of crashing
 - [ ] Smoke-test the tool against a stub engine (READY/INFO/PP/T/DONE script) and verify the JSON and table; `python3 -m py_compile` every touched file
 
