@@ -127,21 +127,33 @@
       ordering inside the chunk's multi-dispatch graphs — the trace's finer-grained per-cut commits
       are bit-identical, the one-buffer-per-token decode is deterministic, so the pattern is
       chunk-specific. (4) the p03 token dump: moot — superseded by the trace verdict.
-- [ ] Round 20 (user; the knobs are Strata `00cd22b7` + `cbe03cab` — pull + rebuild): the structure
-      ladder, one session —
-      1. the post-helper TRACE pair ×2 (`/tmp/q36-ct1.json`, `/tmp/q36-ct2.json` with
-         `STRATA_Q36M_TRACE=1 ... --prefill 512`) + `cmp_gate` — is ANY multi-dispatch chunk
-         structure self-consistent post-helper? (pre-helper the trace pair varied 4/10);
-      2. the init line `chunk expert kernels: gate/up lpr8=… down lpr8=… (the entry tables …)` —
-         tells us whether the placement atomics are even in play for this model;
-      3. `STRATA_Q36M_SYNC_EVERY=1` on the chunked ladder ×2 + `cmp_gate` (slow — one command
-         buffer per dispatch): 10/10 ⇒ an ordering/race between dispatches inside a layer graph is
-         CONFIRMED, and a stride bisect (SYNC_EVERY=2,4,8…) names the pair; still varying ⇒ the
-         nondeterminism is inside a single dispatch, and the poison knob (`STRATA_Q36M_POISON_STATE=1`)
-         + the trace name the kernel (the first NaN layer);
-      4. `cmp_gate /tmp/q36-<sync>1.json /tmp/q36-baseA.json` — whether the strongest structure
-         reproduces the base exactly.
-- [ ] Apply the mapped fix; one change per push, repeat until 10/10 twice
+- [x] **Round 20 (Mac, the structure ladder): ordering exonerated at every granularity.** The init
+      line: `gate/up lpr8=1 down lpr8=0 (the entry tables and their placement atomics are in play)`.
+      SYNC_EVERY=1 (one command buffer per dispatch, host wait between every pair) still varied 6/10
+      — and produced a *mostly deterministic* divergence from the base (both sync runs agree with
+      each other through p03@107/p06@48 while diverging from the base at 46/8) plus a late
+      run-variance. The bit-hash trace (fb3077b8) pointed: **first diverging (layer, token) =
+      (L=0, t=19)** — the GDN token loop, mid-chunk, with the chunk's G1/G2 cuts sum-exact and G3
+      (the GDN outputs) off 1.4e-4 while G3's state snapshot matched.
+- [x] **Root cause (round 21): `block_sum`'s read-completion race.** After the broadcast barrier,
+      every thread reads `sh[0]`; nothing ordered those reads before the NEXT block_sum call
+      overwrote `sh[0..3]` — in the GDN, the qn and kn calls are back-to-back on the same slots. A
+      torn qn corrupts sh_q → the outputs (`o = Σ Si·sh_q`) while the state update only touches
+      sh_k → **the final state stays exact** — exactly the G3 footprint. Intra-dispatch, so no
+      commit structure could mask it, and the harness's small grids never tripped the timing. Fix
+      `36b394c8`: one trailing barrier in `block_sum` (metal/kernels/q36.metal, the read hoisted
+      inside its protection) — one change, .metal only, compiled at run time (no rebuild).
+- [x] **Round 21 (Mac, the fix verdict): the plain chunked ladder, two runs, no knobs — 10/10
+      self-consistent AND 10/10 against baseA (the token-by-token reference), every stop length
+      matching. The whole flip-depth history re-reads as the race's dice: the "reproducible"
+      depths = where the torn read usually landed, the moves = scheduling, and per-layer/per-cut/
+      per-dispatch syncs could not touch an intra-dispatch race.** Parity-pending: the default
+      path's byte-identity on the fixed build (the base pair vs baseA) and the 38-stage harness
+      rerun (block_sum is shared by the stage kernels).
+- [ ] Round 22 (the closing checks, one session): the base pair on the fixed build ×2 + cmp vs
+      baseA (the default path byte-identical to the last release — the house rule), and
+      `./build-metal/q36_chunk_parity` (expect 38/38 — the barrier cannot change correct-execution
+      values, only remove the torn read). Then the roadmap T2 green + the PR.
 
 ## Step 5 — Land
 
