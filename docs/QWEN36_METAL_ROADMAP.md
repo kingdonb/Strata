@@ -54,8 +54,8 @@ short prompts (~20-40 tokens): TTFT ~30% faster with `--prefill 512`; a 4,098-to
 bound by the attention's KV reads (every query head of a KV group re-reads the same cells, ~8x), a term
 the parity contract keeps identical on both paths, and it grows with position (per-chunk 22 → 40 s).
 The lever this points at: a GQA-folded attention pass (one K/V read per KV-head group — same FLOPs,
-~1/8 the KV traffic at depth) would move the chunked read and the deep decode together; that is kernel
-work for its own ticket. The `--prefill` default stays token-by-token until a measurement says faster;
+~1/8 the KV traffic at depth) would move the chunked read and the deep decode together; that is T6's
+kernel work. The `--prefill` default stays token-by-token until a measurement says faster;
 `--prefill auto` resolves to 512 (never worse: ~20% better on short prompts, a wash at depth).
 Scope: TTFT and tok/s, chunked vs token-by-token, on 2K+-token prompts, same Mac, same day, same build;
 flip the `--prefill` default only with the numbers in hand (the project rule: change a default only where
@@ -80,7 +80,34 @@ memory difference at 8K and 32K; the documented text difference. Plus: profile h
 ≥2 ms/token, preserving the RNG stream and the chosen tokens.
 Gates: the memory and profile numbers measured; sampled parity with a fixed seed.
 
-## T6 — Wrap-up: docs, the batch upstream PR, maintenance
+## T6 — GQA-folded attention: one K/V read per KV-head group (new idea, from T3's first measurements)
+
+State: proposed (2026-10-18, from the T3 data). The measurement it comes from (M2, UD-Q2_K_XL, build
+`36b394c8` + PR #5): a 4,098-token prompt at `--ctx 16384` reads in ≈243 s chunked and ≈245 s token-by-token,
+per-chunk cost growing with position (22 → 40 s per 512), and the decode at pos ≈4,100 runs 8 tok/s vs 17 at
+the ctx-4096 ladder's shallow positions. At depth, both paths are bound by the attention's KV reads — and
+the model is grouped-query: ~8 query heads share each KV head, and today every one of them re-reads the same
+K/V cells (an ~8x traffic multiplier L2 is not catching). The parity contract keeps that term identical on
+both paths, which is exactly why chunked prefill cannot win at depth: the term it would have to beat is not
+the weights (which it does read once per chunk) but this re-read.
+Idea: an attention pass that reads each KV-head group's K/V ONCE and computes all its query heads' scores
+against it — same FLOPs, ~1/8 the KV traffic at depth (the exact factor is the model's H/HKV, to be read
+from the geometry, not assumed). Three places the same idea applies, one at a time: the decode `k_attn`
+(one threadgroup per head today), the chunk path's `k_attn_sk_part` row-blocked pair, and the non-split-K
+chunk rows. Same FLOPs means the per-head dot keeps its accumulation order — bit-parity is the design
+target, not an approximation to be tolerated.
+Scope: the folded kernel(s) behind a parity knob first (`STRATA_Q36M_ATTN_GQA=1`, the
+`STRATA_Q36M_ATTN_SK` pattern), the decode step and the chunk path through one shared helper (the
+`02d7aeec` pattern), the geometry guard (refuse H/HKV = 1 where folding is a no-op), then engage where
+measured.
+Gates: the compile test; forced-fold 10/10 token-identical vs the current path at 4K (the 10 parity
+prompts, greedy); the chunk ladder still 10/10 twice with the fold on; the measured read and decode
+deltas on the same Mac and day — the 4,098-token read at 16K and the decode tok/s at pos ≈4,100, before
+and after, numbers in docs/QWEN36_METAL.md; the default path byte-identical until a measurement says the
+fold flips it. Depends on nothing in T2-T5 (standalone); T7's wrap-up absorbs its doc numbers if it
+lands first.
+
+## T7 — Wrap-up: docs, the batch upstream PR, maintenance
 
 Scope: docs/QWEN36_METAL.md final numbers (what, hardware, date) replacing the hand-off's projections;
 every gate green on the M2 (build, `q36_compile_test`, the tools/qwen35 gates); confirm the CUDA/HIP
