@@ -6,6 +6,9 @@
       run `./build-metal/q36_chunk_parity`; paste back the full moe2048 block (diag + probeA/B/C
       lines) and the FAILURES line
 - [ ] Interpret the prints against the decision tree in design.md §B and name the mechanism
+- [ ] If the run leaves more than one viable hypothesis, bundle every surviving hypothesis's
+      discriminating probe into the next push (battery); expect ~one Mac round per hypothesis the
+      battery cannot separate in one run
 
 ## Step 2 — Fix the failing stage (test file only)
 

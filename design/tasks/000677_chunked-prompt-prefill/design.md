@@ -29,7 +29,7 @@ a mechanism.
 |---|---|---|
 | probeA: `x2g == 0` (host shows values); probeC: `x4 == x2` values | the 64 KB memcpy never reaches the GPU | Replace memcpy seeding with the proven-coherent pattern: write the row values once into a `std::vector<float>`, then loop-write `x1`, `x2`, `x3` (and `x4`) from it — identical bytes, the loop-write class proven to reach. Mirrors `x1`'s existing seeding. |
 | probeA: `x2g == host`; probeB: `x2m == 0` | something zeroes `x2`'s GPU view during the decode chain | Dump the decode chain's dispatch bindings for an overlapping buffer (allocation collision with untracked hazard tracking); fix the overlap, not the kernel. |
-| All copies reach; `moe2048 x` still fails | mechanism not the seeding | Keep the printed sums (`cpuD`/`cpuC` vs GPU deltas), add the missing discriminating probe in the next push (one hypothesis per round), fall back to the round-9 cut methodology inside the stage. |
+| All copies reach; `moe2048 x` still fails | mechanism not the seeding | Keep the printed sums (`cpuD`/`cpuC` vs GPU deltas); bundle a battery of discriminating probes for every surviving hypothesis into the next push, fall back to the round-9 cut methodology inside the stage. |
 
 **C. Promote the isolation combine to a checked stage.** After the fix, probeC becomes stage
 `moe2048 iso`: run `p_sumc` on a fresh buffer seeded the (fixed) coherent way and check it equals
@@ -63,10 +63,17 @@ layer/cut. Known candidates, in order:
    ladder fails only in one-graph mode, bisect the chunk graph by committing prefixes as separate
    command buffers.
 
-**F. Guardrails.** One change per commit; no CUDA/HIP/SYCL files; update
-`metal/tests/q36_compile_test.cpp` only if pipelines change (not expected); update the T2 State
-paragraph of `docs/QWEN36_METAL_ROADMAP.md` with the measured green (stage count, ladder result,
-Mac/date) as the last step.
+**F. Mac-round cadence (reviewer decision).** Bundled probe batteries are the default: when a round
+ends with several viable hypotheses, the next push carries every one's discriminating probe. But
+bundling only saves round trips when a single run can discriminate them — for hypotheses that need
+a fix applied before they can be tested, expect one round each. The round count scales with the
+number of unresolved hypotheses; every push must state which hypotheses its probes discriminate and
+how to read each outcome.
+
+**G. Guardrails.** One fix per Mac round; evidence (pasted console blocks) decides the next step.
+One change per commit; no CUDA/HIP/SYCL files; update `metal/tests/q36_compile_test.cpp` only if
+pipelines change (not expected); update the T2 State paragraph of `docs/QWEN36_METAL_ROADMAP.md`
+with the measured green (stage count, ladder result, Mac/date) as the last step.
 
 ## What success looks like
 

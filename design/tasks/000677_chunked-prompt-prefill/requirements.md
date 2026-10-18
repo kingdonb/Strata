@@ -54,14 +54,13 @@ safe to make the default later (T3 owns that flip, not this ticket).
 - Sandbox is Linux: nothing Metal compiles or runs here. Every push to `feat/qwen36-metal` ends
   with a request to build (`cmake --build build-metal`) and run the gates on the M2. Host C++ gets
   a `g++ -fsyntax-only` pass where headers allow.
-- One fix per Mac round; evidence (pasted console blocks) decides the next step.
+- One fix per Mac round; evidence (pasted console blocks) decides the next step. Bundled probe
+  batteries are the default (reviewer decision); the round count scales with the number of
+  unresolved hypotheses — no one-round guarantee.
 
 ## Open Questions
 
-1. **Stage count.** The ticket says 38/38 but the harness at tip `9d4c0aee` prints 37 named checks.
-   Plan: promote the isolation combine (probe C) to a checked stage `moe2048 iso` → 38. Confirm, or
-   name the 38th stage you had in mind.
-2. **Probe outcome ≠ memcpy.** If the probes show all host writes reach the GPU and `moe2048 x`
-   still fails, the mechanism is elsewhere. Is it acceptable to spend additional Mac rounds on a
-   narrow isolation ladder (one discriminating probe per push), or do you want a bundled battery of
-   probes per round to save Mac time?
+1. **Stage count (assumption — no objection at review).** The ticket's gate says 38/38; the harness
+   at tip `9d4c0aee` prints 37 named checks. Plan: promote the isolation combine (probe C) to a
+   checked stage `moe2048 iso` → 38. Say so before Step 2 lands if you'd rather name a different
+   38th stage.
