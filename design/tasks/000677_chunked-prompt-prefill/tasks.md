@@ -162,8 +162,9 @@
 - [x] The branch diff vs origin/main = 8 files, all Metal/tests/tools/docs (no CUDA/HIP/SYCL file
       changed); `--prefill` stays opt-in (default 0 = token-by-token; the chunk pipelines compile
       only when the flag is on; baseC vs baseA 10/10 is the measured byte-identity).
-- [x] PR proposed (feature/000677-chunked-prompt-prefill → main); the user merges, then the task
-      marks done.
+- [x] PR proposed (feature/000677-chunked-prompt-prefill → main) and **merged as PR #5 (2026-10-18,
+      https://github.com/kingdonb/Strata/pull/5)** — T2 lands with the round-23 serve fixes and the
+      T3/T6 roadmap entries. Task done.
 
 ## Round 23 — the serve protocol on the 16K test (rides PR #5)
 
