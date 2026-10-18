@@ -218,3 +218,34 @@ python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
   --args "--native $Q36_MODEL --ctx 32768 --prefill 0" --out /tmp/q36-tbt.json
 python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-tbt.json /tmp/q36-default.json
 ```
+
+The chunk-size benchmark that decides the `--prefill` default (2026-10-18, the M2 (macOS 26.6.2) with the
+model file from §5, `--ctx 32768`, greedy, 16 generated tokens per run, median of 3 rounds per cell, one
+discarded warm-up per engine start, deterministic seeded prompt ids per size and round so the prefix
+matcher never hides a read; `tools/qwen35/q36_prefill_bench.py`, the raw runs in
+`bench/results/2026-10-18-m2-q36-prefill/`):
+
+| Prompt tokens | --prefill | TTFT | prompt tok/s | vs token-by-token |
+|---:|---:|---:|---:|---:|
+| 2048 | 0 (token-by-token) | 139 s | 14.7 | 1.00x |
+| 2048 | 512 | 92 s | 22.3 | 1.51x |
+| 2048 | 1024 | 94 s | 21.8 | 1.48x |
+| 2048 | 2048 | 94 s | 21.8 | 1.48x |
+| 4096 | 0 (token-by-token) | 321 s | 12.8 | 1.00x |
+| 4096 | 512 | 225 s | 18.2 | 1.43x |
+| 4096 | 1024 | 233 s | 17.6 | 1.38x |
+| 4096 | 2048 | 231 s | 17.7 | 1.39x |
+| 8192 | 0 (token-by-token) | 823 s | 10.0 | 1.00x |
+| 8192 | 512 | 647 s | 12.7 | 1.27x |
+| 8192 | 1024 | 658 s | 12.5 | 1.25x |
+| 8192 | 2048 | 663 s | 12.4 | 1.24x |
+
+The flip gate is not met: the chunk path reads 1.24-1.51x the token-by-token rate — best at 2K, the gain
+shrinking with depth as the attention's KV reads grow — nowhere near the 5x a default change needs, so the
+no-flag default stays token-by-token (`default_prefill_chunk = 0` in `q36_metal.cpp`; `--prefill auto`
+stays 512). This is the full-matrix version of T3's first points (docs/QWEN36_METAL_ROADMAP.md): at depth
+both paths pay the same ~8x GQA KV re-read, and that term grows with position; a GQA-folded attention pass
+(T6) is the lever that would move the chunked read and the deep decode together. 512 is the best measured
+chunk on Metal; 1024 and 2048 read 1.5-3% slower at every size, so there is no bigger-chunk win here like
+the CUDA engine's. What the benchmark does show in the chunk path's favor: a 2K prompt's TTFT drops from
+139 s to 92 s and an 8K one from 823 s to 647 s — real, just not a default-changing factor of five.
