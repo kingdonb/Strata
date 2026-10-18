@@ -182,7 +182,16 @@
       so far, so both the read and the decode cost grows with position — not a regression, and the decode
       term is the same math on both paths (the parity contract). This run = the A/B baseline for the
       chunked read; the decode-at-depth cost is T4/T5 territory, not T2's.
-- [ ] The user rebuilds and re-runs the 16K test: the percent steps per chunk, and the
-      "[strata] request prompt ... prefill X tok/s" line gives the chunked-vs-token-by-token numbers
-      (the read should land ~3-5x under 245 s: the weights read once per chunk; the attention term stays;
-      the per-layer/pair commit floor ~1.2 s/chunk is T3's to shave).
+- [x] **The rebuild + rerun (M2, 2026-10-18, `--ctx 16384`, the same 4,098-token prompt): both fixes
+      verified in the wild — the percent steps per chunk ("512 of 4,098" … "4,096 of 4,098") and
+      `--prefill auto` lands on 512. The speed verdict: a WASH at this depth — the chunked read to the
+      first token ≈ 243 s vs the token-by-token baseline's ≈ 245 s (the 3-5x prediction was wrong: the
+      weight-reuse term is small at depth).** The PP lines make the structure visible: per-chunk 22 →
+      40 s (43 → 78 ms/token) growing with position — the position-proportional term dominates and is
+      the same on both paths by the parity contract. Read of it: at depth both paths are bound by the
+      attention's KV reads, where every one of the ~8 query heads per KV head re-reads the same cells
+      (the GQA re-read). Folding the heads of a KV group into one pass over the K/V (same FLOPs, ~1/8
+      the KV traffic at depth) is the lever that would move the chunked read AND the deep decode (8
+      tok/s at pos ~4,100 is mostly the same term). T3's default decision on this evidence: the no-flag
+      default stays token-by-token; `auto`→512 stays (never worse: ~20% better on short prompts, a wash
+      at depth). The fold = a follow-up kernel task, not this PR.
