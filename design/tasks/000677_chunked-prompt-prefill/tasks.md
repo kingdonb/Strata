@@ -106,9 +106,20 @@
       8,192-cell threadgroup score cap; the split-K pair — the round-2 decode form, stage-13-verified
       — above it). The decode's inline copy is replaced by the same call: the parity is structural.
       The MSL is untouched; net −11 lines.
-- [ ] Round 18 (user): rebuild, the ladder twice + chunk-vs-chunk2 (want 10/10 ×2), and
-      `q36_chunk_parity` (want 38/38 on the shared-helper build); if green, the trace pair once more
-      for the record (want LAYERS: all 40 identical)
+- [~] **Round 18 (Mac, shared-helper build): the parity holds 38/38; the ladder = 6/10 and the
+      divergence MOVED (p00 flipped at 100/100/100 pre-helper, now at 40; p03 at 6 — in both chunk
+      runs; p06's stop lengths 81/104/91).** The chunk is STILL run-varying with serial dispatches
+      and the decode's own attention sequence — so the nondeterminism has a source that is neither
+      dispatch ordering nor the attention arithmetic. The reproducible p03@6 flip = nameable.
+- [ ] Round 19 (user):
+      1. the post-helper TRACE pair + `q36_trace_cmp.py` — the LAYERS verdict now (all 40 identical,
+         or which layer diverges with the attention shared?);
+      2. the decode side's own determinism: the plain gate twice (`/tmp/q36-baseA.json`,
+         `/tmp/q36-baseB.json`) + `cmp_gate` — serial dispatches should make it stable; if NOT,
+         the nondeterminism is engine-wide (serve loop/sampling/state reuse), not chunk-specific;
+      3. the token dump at p03's flip (`[1:12]` from base/chunk1/chunk2) — is the flipped value
+         stable per chunk run.
+- [ ] Apply the mapped fix; one change per push, repeat until 10/10 twice
 
 ## Step 5 — Land
 
