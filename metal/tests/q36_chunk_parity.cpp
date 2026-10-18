@@ -1014,6 +1014,8 @@ int main() {
         mtl::Buffer sy0 = cx.alloc(4 * T * N2), gs0 = cx.alloc(4 * T);   // cx.alloc zeroes: the shared expert off
         for (int i = 0; i < T * N2; ++i) x1.as<float>()[i] = r.sym();
         std::memcpy(x2.ptr, x1.ptr, 4 * T * N2);
+        mtl::Buffer x3 = cx.alloc(4 * T * N2);
+        std::memcpy(x3.ptr, x1.ptr, 4 * T * N2);   // the pristine initial: neither combine touches it
 
         // the decode chain, per token (the engine's own shapes: gate/up lpr8 with x_stride 0, the down
         // plain gemv at x_stride FF, k_moe_sum on the token's K rows)
@@ -1158,6 +1160,29 @@ int main() {
             if (ok) std::printf("  %-14s OK\n", st);
         }
         check("moe2048 x", x1.ptr, x2.ptr, 4 * T * N2);
+        // which combine's delta is missing?  The host recomputes both sides' MoE sums in double from the
+        // very buffers the checks above just verified (ey1 == ey2 through pos2, shared wts2), so cpuD ==
+        // cpuC exactly; comparing them against the GPU deltas (x - x3) names the combine that never wrote.
+        {
+            const float* xi = x3.as<float>();
+            const float* a = ey1.as<float>();
+            const float* b = ey2.as<float>();
+            const float* ww = wts2.as<float>();
+            const int* pp = pos2.as<int>();
+            std::printf("  moe2048 diag: initial[0..2] = %.9g %.9g %.9g\n", xi[0], xi[1], xi[2]);
+            for (int t = 0; t < T; t += 7)
+                for (int i = 0; i < 2; ++i) {
+                    double sd = 0, sc = 0;
+                    for (int s = 0; s < K; ++s) {
+                        sd += (double) ww[t * K + s] * (double) a[((size_t)(t * K + s)) * N2 + i];
+                        sc += (double) ww[t * K + s] * (double) b[((size_t) pp[t * K + s]) * N2 + i];
+                    }
+                    std::printf("    t%d i%d: d_dec=%.9g d_chk=%.9g cpuD=%.9g cpuC=%.9g (x1=%.9g x2=%.9g)\n", t, i,
+                                x1.as<float>()[t * N2 + i] - xi[t * N2 + i],
+                                x2.as<float>()[t * N2 + i] - xi[t * N2 + i], sd, sc,
+                                x1.as<float>()[t * N2 + i], x2.as<float>()[t * N2 + i]);
+                }
+        }
     }
 
     std::printf(g_fails ? "FAILURES: %d\n" : "all stages bit-identical\n", g_fails);
