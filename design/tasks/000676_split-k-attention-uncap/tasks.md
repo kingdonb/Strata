@@ -1,8 +1,8 @@
 # Implementation Tasks: Split-K Attention Uncap Context Past 8K (32K-64K)
 
-- [~] Create task branch off `main` in Strata; cherry-pick `65037a91` (split-K kernels `k_attn_sk_part` / `k_attn_sk_merge` in `metal/kernels/q36.metal`, engine dispatch + memory gate + scratch buffers in `metal/src/engine/q36_metal.cpp`, split-K pipeline checks in `metal/tests/q36_compile_test.cpp`)
-- [ ] Apply the MSL fix from `5f84e2e5`: `constexpr int SK_HD/SK_CELLS` → `enum { ... }` in `q36.metal` (required for gate 1 on M2)
-- [ ] Confirm the cherry-picked `q36_compile_test.cpp` keeps the two split-K pipeline checks and does NOT pull in `5c367647`'s chunk-pipeline additions
+- [x] Create task branch off `main` in Strata; cherry-pick `65037a91` (split-K kernels `k_attn_sk_part` / `k_attn_sk_merge` in `metal/kernels/q36.metal`, engine dispatch + memory gate + scratch buffers in `metal/src/engine/q36_metal.cpp`, split-K pipeline checks in `metal/tests/q36_compile_test.cpp`) — branch is `feat/qwen36-splitk` per reviewer directive (renamed from the default `feature/000676-...`); cherry-pick clean at `e7a2de1d`
+- [x] Apply the MSL fix from `5f84e2e5`: `constexpr int SK_HD/SK_CELLS` → `enum { ... }` in `q36.metal` (required for gate 1 on M2) — done at `9fbd3769` (both hunks: enums at L510-511, unused `h` dropped in `k_attn_sk_merge` L608; part kernel's `kvh` line untouched)
+- [x] Confirm the cherry-picked `q36_compile_test.cpp` keeps the two split-K pipeline checks and does NOT pull in `5c367647`'s chunk-pipeline additions — verified: only `k_attn_sk_part`/`k_attn_sk_merge` at L18-21, zero "chunk" references in the file
 - [ ] Add the split-K bullet of docs §6 (knobs `STRATA_Q36M_ATTN_SK`, `STRATA_Q36M_MEM_OK`, engagement rule, gate commands) to `docs/QWEN36_METAL.md`, in the repo's plain-words/measured-numbers style, including the M2 gate numbers with hardware attribution ("measured on M2")
 - [ ] Add a `docs/TEST_REQUESTS.md` entry requesting same-build comparisons on other Apple Silicon (M1/M3) per `docs/COMMUNITY_BENCHMARKS.md` (same-day run of the build under test; say what was not tested)
 - [ ] Verify the branch contains ONLY split-K scope: no `d4ee3dbe`/`5c367647`/MTP/trace commits, and `git diff` vs `65037a91`+enum-fix is empty apart from the docs bullet
