@@ -8,6 +8,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -30,6 +32,7 @@ struct Pipeline {
     int max_threads = 0;      // maxTotalThreadsPerThreadgroup
     int simd_width = 0;       // threadExecutionWidth
     int static_tg_mem = 0;    // staticThreadgroupMemoryLength
+    int arg_min = 0;          // min bound args: max [[buffer(N)]] index + 1 (reflected at pipeline creation)
     std::string name;         // the function (+ its constants), for messages
 };
 
@@ -70,6 +73,18 @@ struct Dispatch {
 // STRATA_METAL_MAX_THREADS_CAP=N lowers every pipeline's reported limit to N (a test hook: it proves this check).
 void require_fit(const Pipeline& p, uint32_t threads, const char* where);
 inline void require_fit(const Dispatch& d, const char* where = "dispatch") {
+    // A dispatch binding fewer arguments than the kernel takes reads unbound slots as zeros (silent
+    // wrong answers - the round-12 failure: a stale 4-arg binary against the new 5-arg k_gather_t
+    // read count as 0 and every gather wrote nothing).  Stop loudly instead; extra bindings are fine.
+    if ((int) d.args.size() < d.p->arg_min) {
+        std::fprintf(stderr,
+                     "strata metal: the %s binds %zu arguments but the kernel %s takes %d - a stale binary "
+                     "against newer MSL reads unbound slots as zeros (silent wrong answers).  Rebuild the "
+                     "binaries.  Stopping here instead.  (#2323)\n",
+                     where, d.args.size(), d.p->name.empty() ? "?" : d.p->name.c_str(), d.p->arg_min);
+        std::fflush(stderr);
+        std::exit(6);
+    }
     require_fit(*d.p, d.tg[0] * d.tg[1] * d.tg[2], where);
 }
 

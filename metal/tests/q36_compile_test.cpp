@@ -24,12 +24,6 @@ int main() {
     auto p_gemv_q4k = cx.pipeline(lib, "k_gemv_T_Q4_K");
     std::printf("pipeline k_gemv_T_Q4_K created: %s (max threads: %d)\n", p_gemv_q4k.name.c_str(), p_gemv_q4k.max_threads);
 
-    // split-K attention (long context)
-    auto p_attn_sk_part = cx.pipeline(lib, "k_attn_sk_part");
-    std::printf("pipeline k_attn_sk_part created: %s (max threads: %d)\n", p_attn_sk_part.name.c_str(), p_attn_sk_part.max_threads);
-    auto p_attn_sk_merge = cx.pipeline(lib, "k_attn_sk_merge");
-    std::printf("pipeline k_attn_sk_merge created: %s (max threads: %d)\n", p_attn_sk_merge.name.c_str(), p_attn_sk_merge.max_threads);
-
     // prompt chunks
     const char* emb_types[] = {"T_F32", "T_BF16", "T_Q8_0", "T_Q3_K", "T_Q4_K", "T_Q5_K", "T_Q6_K", "T_IQ2_XS", "T_IQ3_XXS", "T_IQ4_XS"};
     for (const char* t : emb_types) {

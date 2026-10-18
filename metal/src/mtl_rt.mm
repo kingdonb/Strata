@@ -146,6 +146,12 @@ Pipeline Context::pipeline(int lib, const std::string& fn, const Constants& c) {
     Pipeline p;
     p.handle = (__bridge_retained void*)ps;
     p.max_threads = (int)ps.maxTotalThreadsPerThreadgroup;
+    // minimum bound arguments: the highest [[buffer(N)]] index + 1 (the guard against a stale binary
+    // binding fewer args than the kernel reads - see require_fit's Dispatch overload)
+    p.arg_min = 0;
+    if (NSArray<id<MTLFunctionArgument>>* fa = f.functionArguments)
+        for (id<MTLFunctionArgument> a in fa)
+            if (a.type == MTLArgumentTypeBuffer && (int) a.index + 1 > p.arg_min) p.arg_min = (int) a.index + 1;
     if (const char* cap = std::getenv("STRATA_METAL_MAX_THREADS_CAP")) {   // test hook, see require_fit
         const int lim = std::atoi(cap);
         if (lim > 0 && lim < p.max_threads) p.max_threads = lim;
