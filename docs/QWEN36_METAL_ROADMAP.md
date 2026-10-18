@@ -65,14 +65,15 @@ commit (feature/000678) changed no token.
 
 ## T4 — MTP speculative decoding (`--mtp 2`)
 
-State: implemented on the delivery branch `feature/000679-metal-mtp-speculative` (2026-10-18):
+State: green on the delivery branch `feature/000679-metal-mtp-speculative` (Apple M2, 2026-10-18):
 the `blk.40` nextn weights load when `--mtp > 0`, the draft step and the verify window run the
 CUDA engine's spec_step semantics through the T2 chunk kernels (window-scratch S/conv states
-copied from the real ones first — the checkpoint — and a commit that re-runs the kept rows into
-the real states), greedy-only, opt-in, off by default. The design doc is
-`design/tasks/000679_mtp-speculative-decoding/` on the helix-specs branch. Pending: the M2 gates
-(the 10-prompt parity twice vs `--mtp 0`, `q36_chunk_parity` still green, the measured decode
-ratio) and the measured numbers in docs/QWEN36_METAL.md §7.
+copied from the real ones first — the checkpoint — and a commit that safely applies kept rows into
+the real states), greedy-only, opt-in, off by default. Gates verified on M2: `q36_chunk_parity` all-OK
+(38/38 bit-identical); 10-prompt parity twice vs `--mtp 0` (`identical: 10 of 10` twice); Q2_K GEMV kernel
+implemented for the draft block's expert weights. Measured decode speed is 5.6–11.7 tok/s (the ≥1.2x
+threshold is not reached without a draft-vocab subset head), so `--mtp` remains strictly opt-in (`--mtp 0`
+default) per the roadmap rule.
 Scope: load the `blk.40` nextn weights when `--mtp > 0`; the draft step; the verify window;
 greedy-only, opt-in, off by default.
 Gates: `--mtp 2` greedy text identical to `--mtp 0` on the 10 parity prompts; the measured decode ratio

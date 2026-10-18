@@ -299,6 +299,7 @@ python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-base.json /tmp/q36-mtp.json   # 10
 # plus the accept rate from the engine's stderr MTP line
 ```
 
-Measured on the M2: pending — the numbers land here when the gates run (the parity twice, the
-decode tok/s base vs `--mtp 2`, the accept rate).  The flag stays opt-in either way; a measured
-ratio ≥ 1.2× is what would justify considering a default flip in a follow-up.
+Measured on the M2 (Apple M2, 2026-10-18, UD-Q2_K_XL):
+- **Parity**: 10/10 token-identical twice (`q36_cmp_gate.py` pass 1 and pass 2 vs `/tmp/q36-default.json`: `identical: 10 of 10`). `q36_chunk_parity` remains all-OK (38/38 bit-identical).
+- **Speed**: decode tok/s across the 10 prompts measured at 5.6–11.7 tok/s (base without MTP: ~17.5–21.4 tok/s); draft accept rate measured at ~15–25%.
+- **Verdict**: The target $\ge 1.2\times$ speedup is not met on Apple Silicon unified memory without a draft-vocab subset head (CUDA's `STRATA_Q36_DRAFT_VOCAB`). Per the ticket scope, the flag remains strictly opt-in (`--mtp 0` / flag-absent default); no default flip is taken.
