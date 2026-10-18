@@ -60,11 +60,25 @@
 
 ## Step 4 — Engine ladder (Mac)
 
-- [~] Mac round: `q36_solo_gate.py` plain → `/tmp/q36-base.json`; `--prefill 512` →
-      `/tmp/q36-chunk.json`; `q36_cmp_gate.py` must print `identical: 10 of 10`
-- [ ] If red: same round, rerun both trace gates with `--log` + `q36_trace_cmp.py`; name the first
-      diverging layer/cut and apply the mapped fix (design.md §E order: G0 embtype, G8 re-check,
-      one-graph hazard); bundled probe battery per push, ~one round per hypothesis it cannot split
+- [~] **Mac round 13 (user, 2026-10-18): the ladder is 5/10** (`cmp_gate`: p02/p04/p07/p08/p09
+      identical; p00 differs at 100, p01 at 3, p03 at 21, p05 at 121, p06 at 1 — len 81 vs 86). Up
+      from 0/10 — the gather-smash fix moved it — and the residual pattern is ULP-class drift
+      snowballing, not garbage. Incidental: the chunk path's TTFT is ~30% faster on every prompt
+      (p00 19.6 s → 8.9 s incl. the first-request JIT warmup) — T3's speed story, noted.
+- [ ] **Round 14 battery (no new code — existing instruments, bundled):**
+      1. rerun the ladder as-is — the determinism check: the same 5 prompts at the same depths ⇒ a
+         deterministic arithmetic/wiring divergence (the trace names the cut); different ⇒ a race ⇒
+         the fix is the chunk graph's structure;
+      2. both TRACE gates (WITH `--log`) + `q36_trace_cmp.py` (plain-log, chunk-log) — names the
+         first diverging layer and the layer-0 cut;
+      3. `cmp_gate` on the two TRACE-run jsons — if the trace-mode chunk text is 10/10, the
+         one-graph structure is the culprit (the fix: run the chunk path per-layer like the trace
+         does) — if still 5/10, the cut from (2) names the kernel.
+      Candidate notes: the conv is T-robust by read (tile t>0 re-reads qkv directly; tile 0's state
+      write handles short chunks), so the multi-tile theory is parked; the harness's chains (stage
+      14/16) order correctly within one graph on the M2, so plain-store/load dependencies are not
+      the old atomic-chain race class.
+- [ ] Apply the mapped fix; one change per push, repeat until 10/10
 
 ## Step 5 — Land
 
