@@ -254,3 +254,52 @@ Parity under the shipping default re-verified the same day on the same build: th
 `--prefill 0` run are 10/10 token-identical (`q36_solo_gate.py` at `--ctx 32768`, 128-token greedy,
 `q36_cmp_gate.py`: `identical: 10 of 10`) — with the flip not taken, this is the check that the default
 path (and the scaffolding commit that touched its arg parsing) changed no token.
+
+## 7. MTP speculative decoding (--mtp N)
+
+The GGUF carries its own MTP draft block, `blk.40` (`qwen35moe.nextn_predict_layers`): a
+full-attention layer + MoE plus `nextn.eh_proj` / `enorm` / `hnorm` / `shared_head_norm`, which
+proposes the next token from the main model's last hidden state. `--mtp N` (an integer number of
+drafts; 0 or absent = off, the default; Flash-Next's `--mtp <dir>` means nothing for this family)
+turns it on for greedy requests.  The design mirrors the CUDA engine's `spec_step`
+(`src/qwen35/q36_engine.cu`) dispatch for dispatch:
+
+- **The draft call** re-runs the last window's accepted drafts through the block at their
+  positions (each seeded by that window's main-model hidden row) and then the row of the next
+  decided token (seeded by the last kept row's hidden); the chained drafts seed from the block's
+  own output.  The block's row is the decode path's exact QSA dispatch sequence against the
+  block's own KV cache.
+- **The verify window** runs `[x, d1..dD]` (D+1 rows) through the main model as one chunk pass
+  (the T2 chunk kernels — bitwise the decode path), with the GDN/conv dispatches on
+  window-scratch states **copied from the real S/conv first** (the checkpoint: the real states
+  stay at the accept point whatever the window accepts), then a commit that re-runs the kept
+  rows' conv history and recurrence into the real states over the window's saved inputs.
+- **Kept = emitted**: a window cut short by EOS, cancel, `max_new` or the context end commits
+  only its shown prefix, so the state ends where the shown tokens end.  The engine prints the
+  offered/accepted draft counts on stderr; the serve `DONE` line is unchanged.
+
+Greedy only: the window's picks are argmaxes, so the kept text is the plain greedy text whatever
+the drafts proposed — with the parity gate green, `--mtp 2`'s tokens are the `--mtp 0` tokens.
+No new Metal kernels: `eh_proj` runs the type-generic GEMV (the dims travel in the dispatch
+params), the two RMSNorm halves land in one 2N buffer via arg offsets, the checkpoint copies are
+`k_gather_t` flat copies (K=1), and the picks are host argmaxes matching `sample_next`'s tie
+rule.  The block weights, its cache and the window scratch load only when `--mtp > 0`, and their
+bytes join the startup working-set refusal.
+
+Gates (same Mac, same day, same build):
+
+```bash
+# the base run and the MTP run over the 10 parity prompts (serve protocol, greedy, 128 tokens)
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096" --out /tmp/q36-base.json
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096 --mtp 2" --out /tmp/q36-mtp.json
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-base.json /tmp/q36-mtp.json   # 10/10 identical, twice
+# the decode ratio: the two runs' per-prompt tok/s (the solo_gate lines / the DONE decode_ms),
+# plus the accept rate from the engine's stderr MTP line
+```
+
+Measured on the M2 (Apple M2, 2026-10-18, UD-Q2_K_XL):
+- **Parity**: 10/10 token-identical twice (`q36_cmp_gate.py` pass 1 and pass 2 vs `/tmp/q36-default.json`: `identical: 10 of 10`). `q36_chunk_parity` remains all-OK (38/38 bit-identical).
+- **Speed**: decode tok/s across the 10 prompts measured at 5.6–11.7 tok/s (base without MTP: ~17.5–21.4 tok/s); draft accept rate measured at ~15–25%.
+- **Verdict**: The target $\ge 1.2\times$ speedup is not met on Apple Silicon unified memory without a draft-vocab subset head (CUDA's `STRATA_Q36_DRAFT_VOCAB`). Per the ticket scope, the flag remains strictly opt-in (`--mtp 0` / flag-absent default); no default flip is taken.
