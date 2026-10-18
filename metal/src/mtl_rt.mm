@@ -135,9 +135,10 @@ Pipeline Context::pipeline(int lib, const std::string& fn, const Constants& c) {
     MTLComputePipelineDescriptor* d = [MTLComputePipelineDescriptor new];
     d.computeFunction = f;
     d.supportIndirectCommandBuffers = YES;
+    MTLComputePipelineReflection* refl = nil;
     id<MTLComputePipelineState> ps = [impl_->dev newComputePipelineStateWithDescriptor:d
                                                                                options:MTLPipelineOptionNone
-                                                                            reflection:nil
+                                                                            reflection:&refl
                                                                                  error:&err];
     if (!ps) {
         std::fprintf(stderr, "mtl: pipeline %s: %s\n", fn.c_str(), [[err localizedDescription] UTF8String]);
@@ -146,6 +147,12 @@ Pipeline Context::pipeline(int lib, const std::string& fn, const Constants& c) {
     Pipeline p;
     p.handle = (__bridge_retained void*)ps;
     p.max_threads = (int)ps.maxTotalThreadsPerThreadgroup;
+    // minimum bound arguments: the highest [[buffer(N)]] index + 1, from the pipeline reflection (the
+    // stale-binary guard: a dispatch binding fewer args reads unbound slots as zeros - require_fit).
+    // MTLArgument.type is deprecated in favor of bindingType since macOS 13 but still present.
+    p.arg_min = 0;
+    for (MTLArgument* a in refl.arguments)
+        if (a.type == MTLArgumentTypeBuffer && (int) a.index + 1 > p.arg_min) p.arg_min = (int) a.index + 1;
     if (const char* cap = std::getenv("STRATA_METAL_MAX_THREADS_CAP")) {   // test hook, see require_fit
         const int lim = std::atoi(cap);
         if (lim > 0 && lim < p.max_threads) p.max_threads = lim;
@@ -295,20 +302,41 @@ double Context::run(const std::vector<Dispatch>& ds, int reps, bool concurrent, 
 
 double Context::run_graph(const std::vector<Dispatch>& ds) {
     @autoreleasepool {
-        id<MTLCommandBuffer> cb = [impl_->q commandBufferWithUnretainedReferences];
-        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
-        for (size_t i = 0; i < ds.size(); ++i) {
-            if (i > 0 && ds[i].barrier) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-            encode(enc, ds[i]);
+        // STRATA_Q36M_SYNC_EVERY=N diagnostic: commit every N dispatches as their own command buffer.
+        // N = 1 is the strongest structure the queue offers - one dispatch per buffer, a full host wait
+        // between every pair - so a ladder that becomes deterministic under it pins the divergence to
+        // the ordering INSIDE the multi-dispatch graphs; a stride bisect then names the pair.
+        static const int sync_every = [] {
+            const char* e = std::getenv("STRATA_Q36M_SYNC_EVERY");
+            return e && std::atoi(e) > 0 ? std::atoi(e) : 0;
+        }();
+        double gpu = 0;
+        // step 1 for an empty list: the loop body never runs, so an empty run_graph stays the
+        // harmless sync it was before the knob (the trace's cut flow calls it with nothing pending;
+        // the previous flush's waitUntilCompleted already ordered that work)
+        const size_t step = sync_every > 0 ? (size_t) sync_every : (ds.empty() ? 1 : ds.size());
+        for (size_t s0 = 0; s0 < ds.size(); s0 += step) {
+            const size_t end = std::min(s0 + step, ds.size());
+            id<MTLCommandBuffer> cb = [impl_->q commandBufferWithUnretainedReferences];
+            // Serial dispatches: the hardware executes them in order, so every barrier'd read-after-write
+            // dependency holds without trusting memoryBarrierWithScope (round 15: the chunk path raced
+            // nondeterministically even with per-layer graphs under the Concurrent type - the harness's
+            // small chains only looked stable; the k_tables race was the same class at 4 dispatches)
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
+            for (size_t i = s0; i < end; ++i) {
+                if (i > s0 && ds[i].barrier) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                encode(enc, ds[i]);
+            }
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (cb.status != MTLCommandBufferStatusCompleted) {
+                std::fprintf(stderr, "mtl: command buffer failed: %s\n", [[cb.error localizedDescription] UTF8String]);
+                std::exit(5);
+            }
+            gpu += cb.GPUEndTime - cb.GPUStartTime;
         }
-        [enc endEncoding];
-        [cb commit];
-        [cb waitUntilCompleted];
-        if (cb.status != MTLCommandBufferStatusCompleted) {
-            std::fprintf(stderr, "mtl: command buffer failed: %s\n", [[cb.error localizedDescription] UTF8String]);
-            std::exit(5);
-        }
-        return cb.GPUEndTime - cb.GPUStartTime;
+        return gpu;
     }
 }
 

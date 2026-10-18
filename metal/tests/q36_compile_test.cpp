@@ -1,4 +1,4 @@
-// metal/tests/q36_compile_test.cpp - verify compilation of q36.metal
+// metal/tests/q36_compile_test.cpp - verify compilation of q36.metal (decode + split-K + prompt chunks)
 #include "mtl_rt.h"
 #include <cstdio>
 
@@ -23,5 +23,33 @@ int main() {
     std::printf("pipeline k_gemv_T_Q8_0 created: %s (max threads: %d)\n", p_gemv_q8.name.c_str(), p_gemv_q8.max_threads);
     auto p_gemv_q4k = cx.pipeline(lib, "k_gemv_T_Q4_K");
     std::printf("pipeline k_gemv_T_Q4_K created: %s (max threads: %d)\n", p_gemv_q4k.name.c_str(), p_gemv_q4k.max_threads);
+
+    // prompt chunks
+    const char* emb_types[] = {"T_F32", "T_BF16", "T_Q8_0", "T_Q3_K", "T_Q4_K", "T_Q5_K", "T_Q6_K", "T_IQ2_XS", "T_IQ3_XXS", "T_IQ4_XS"};
+    for (const char* t : emb_types) {
+        auto p = cx.pipeline(lib, (std::string("k_emb_chunk_") + t).c_str());
+        std::printf("pipeline k_emb_chunk_%s created: (max threads: %d)\n", t, p.max_threads);
+    }
+    for (const char* t : emb_types) {
+        auto p = cx.pipeline(lib, (std::string("k_gemv_c_") + t).c_str());
+        std::printf("pipeline k_gemv_c_%s created: (max threads: %d)\n", t, p.max_threads);
+    }
+    const char* lpr8_types[] = {"T_Q4_K", "T_Q5_K", "T_Q6_K", "T_IQ2_XS"};
+    for (const char* t : lpr8_types) {
+        auto p = cx.pipeline(lib, (std::string("k_gemv_lpr8_") + t).c_str());
+        std::printf("pipeline k_gemv_lpr8_%s created: (max threads: %d)\n", t, p.max_threads);
+    }
+    for (const char* t : emb_types) {
+        auto p = cx.pipeline(lib, (std::string("k_expc_") + t).c_str());
+        std::printf("pipeline k_expc_%s created: (max threads: %d)\n", t, p.max_threads);
+    }
+    const char* fixed_kernels[] = {"k_route_chunk", "k_tables", "k_gather_t", "k_zero", "k_hist",
+                                   "k_exp_off", "k_place", "k_moe_sum_chunk", "k_conv_chunk", "k_gdn_chunk",
+                                   "k_gated_norm_chunk", "k_attn_prep_chunk"};
+    for (const char* k : fixed_kernels) {
+        auto p = cx.pipeline(lib, k);
+        std::printf("pipeline %s created: (max threads: %d)\n", k, p.max_threads);
+    }
+    std::printf("all q36 pipelines created\n");
     return 0;
 }
