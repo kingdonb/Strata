@@ -106,6 +106,7 @@ struct State {
     mtl::Buffer toks_c, xc, hc, yc, qkv_c, z_c, alpha_c, beta_c, conv_out_c, gdn_out_c, qg_c, k_c, v_c, q_c, gate_c, att_c;
     mtl::Buffer router_c, ids_c, wts_c, scr, srt_in_gu, srt_in_d, pos_c;
     mtl::Buffer eg_c, eu_c, eh_c, ey_c, sg_c, su_c, sh_c, sy_c, sgate_c;
+    mtl::Buffer hg_c, ident_c;   // the gathered expert input rows ((t,k)-ordered) + the identity entry map
     std::vector<mtl::Buffer> conv_state, S, kc, vc;
 
     void reset() {
@@ -163,6 +164,7 @@ struct Pipelines {
     // prompt-chunk pipelines (init_prompt, when --prefill is on)
     std::map<int, mtl::Pipeline> p_emb_c, p_gemv_c, p_expc;
     mtl::Pipeline p_route_c, p_tables, p_moe_sum_c, p_conv_c, p_gdn_c, p_gated_norm_c, p_attn_prep_c;
+    mtl::Pipeline p_gather_t;
     mtl::Buffer zero_ids;   // nt zeros: the decode lpr8's per-token dummy expert id (chunk dense products)
     std::map<int, mtl::Pipeline> p_gemv;
     std::map<int, mtl::Pipeline> p_gemv_lpr8;
@@ -268,6 +270,7 @@ struct Pipelines {
 
         p_route_c = cx.pipeline(lib, "k_route_chunk");
         p_tables = cx.pipeline(lib, "k_tables");
+        p_gather_t = cx.pipeline(lib, "k_gather_t");
         p_moe_sum_c = cx.pipeline(lib, "k_moe_sum_chunk");
         p_conv_c = cx.pipeline(lib, "k_conv_chunk");
         p_gdn_c = cx.pipeline(lib, "k_gdn_chunk");
@@ -745,6 +748,35 @@ void push_c_expc(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const T
     ds.push_back(d);
 }
 
+// The DECODE k_gemv_lpr8 over the chunk's n_ent entries (grid[1] = n_ent): ids[entry] picks the expert,
+// the x rows are (t, k)-ordered at x_stride, the outputs land entry-ordered.  This is the token-by-token
+// path's exact arithmetic for the n_in = 2048 expert products - k_expc mirrors the plain gemv, whose
+// order differs from lpr8's by ~1 ulp there, and greedy decoding turns that into different tokens.
+void push_c_lpr8(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const Tensor& w, const mtl::Buffer& x,
+                 const mtl::Buffer& ids, const mtl::Buffer& y, int n_ent, int x_stride) {
+    const int n_in = (int) w.shape[0], n_out = (int) w.shape[1];
+    auto it = pipes.p_gemv_lpr8.find(w.type);
+    if (it == pipes.p_gemv_lpr8.end()) {
+        std::fprintf(stderr, "q36_metal: no lpr8 pipeline for chunk expert type %d\n", w.type);
+        std::exit(1);
+    }
+    GemvParam prm;
+    prm.row_bytes = w.row_bytes;
+    prm.expert_bytes = w.shape.size() == 3 ? w.row_bytes * (size_t) w.shape[1] : 0;
+    prm.n_in = n_in;
+    prm.n_out = n_out;
+    prm.x_stride = (uint64_t) x_stride;
+
+    mtl::Dispatch d;
+    d.p = &it->second;
+    d.grid[0] = (uint32_t)((n_out + 15) / 16);
+    d.grid[1] = (uint32_t) n_ent;
+    d.tg[0] = 128;
+    d.barrier = true;
+    d.args = {mtl::Arg::B(w.b, w.offset), mtl::Arg::B(x), mtl::Arg::B(y), mtl::Arg::B(ids), mtl::Arg::V(prm)};
+    ds.push_back(d);
+}
+
 // Runs the chunk's nt tokens (absolute positions pos0 + t) through the chunk kernels, updating the same
 // recurrent states, conv histories and KV caches the decode path uses.  Every (token, output) is summed
 // in the decode kernels' exact order, so the states match a token-by-token run bit for bit.  The prompt's
@@ -793,12 +825,16 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
         d.barrier = true;
         ds.push_back(d);
     }
-    if (trc) {   // debug cut G0: the chunk's embedding rows (type= prints the token_embd GGUF type id)
+    if (trc) {   // debug cut G0: the chunk's embedding rows (type= prints the token_embd GGUF type id;
+                 // r0/rl = the first and last row's own sums, for the trace_cmp diagnostics)
         if (pos0 == 0) std::fprintf(stderr, "TRACE BEGIN C\n");
         cx.run_graph(ds);
         ds.clear();
-        std::fprintf(stderr, "TRACE G0 pos0=%d L=-1 x=%.17g embtype=%d\n", (int) pos0,
-                     trace_rows((const float*) s.xc.ptr, (size_t) nt, (size_t) N), (int) m.W("token_embd.weight").type);
+        std::fprintf(stderr, "TRACE G0 pos0=%d L=-1 x=%.17g r0=%.17g rl=%.17g embtype=%d\n", (int) pos0,
+                     trace_rows((const float*) s.xc.ptr, (size_t) nt, (size_t) N),
+                     trace_rows((const float*) s.xc.ptr, 1, (size_t) N),
+                     trace_rows((const float*) s.xc.ptr + (size_t)(nt - 1) * N, 1, (size_t) N),
+                     (int) m.W("token_embd.weight").type);
     }
 
     for (int64_t l = 0; l < g.n_layers; ++l) {
@@ -989,22 +1025,46 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                          trace_rows((const float*) s.wts_c.ptr, (size_t) nt, (size_t) K));
         }
 
-        // Entry tables in one dispatch (k_tables: threadgroup atomics inside; plain stores out), then the
-        // grouped experts read them across the ordinary barrier
-        {
-            mtl::Dispatch d;
-            d.p = &pipes.p_tables;
-            d.args = {mtl::Arg::B(s.ids_c), mtl::Arg::B(s.scr), mtl::Arg::B(s.srt_in_gu), mtl::Arg::B(s.srt_in_d),
-                      mtl::Arg::B(s.pos_c), mtl::Arg::V((int) g.n_expert), mtl::Arg::V(K), mtl::Arg::V(n_ent)};
-            d.grid[0] = 1;
-            d.tg[0] = 256;
-            d.barrier = true;
-            ds.push_back(d);
+        // Routed experts.  The gate/up products at n_in = 2048 run the DECODE k_gemv_lpr8 per entry (after
+        // k_gather_t copies each entry's token row): its deq_dot_block + butterfly is the token-by-token
+        // path's exact arithmetic, and k_expc's plain-gemv order differs by ~1 ulp there (round 9's G8
+        // cut).  Types without an lpr8 kernel keep k_expc - the decode runs the plain gemv for those too,
+        // so they already match; their eh stays placed-ordered and the down expc reads it by placed row.
+        const Tensor& wg = m.W(L(l, "ffn_gate_exps.weight"));
+        const Tensor& wu = m.W(L(l, "ffn_up_exps.weight"));
+        const Tensor& wd = m.W(L(l, "ffn_down_exps.weight"));
+        const bool gu_lpr8 = (int) wg.shape[0] == 2048 && pipes.p_gemv_lpr8.count(wg.type) > 0;
+        const bool dn_lpr8 = gu_lpr8 && (int) wd.shape[0] == 2048 && pipes.p_gemv_lpr8.count(wd.type) > 0;
+        if (!dn_lpr8) {
+            // Entry tables in one dispatch (k_tables: threadgroup atomics inside; plain stores out), then
+            // the grouped experts read them across the ordinary barrier
+            {
+                mtl::Dispatch d;
+                d.p = &pipes.p_tables;
+                d.args = {mtl::Arg::B(s.ids_c), mtl::Arg::B(s.scr), mtl::Arg::B(s.srt_in_gu), mtl::Arg::B(s.srt_in_d),
+                          mtl::Arg::B(s.pos_c), mtl::Arg::V((int) g.n_expert), mtl::Arg::V(K), mtl::Arg::V(n_ent)};
+                d.grid[0] = 1;
+                d.tg[0] = 256;
+                d.barrier = true;
+                ds.push_back(d);
+            }
         }
-
-        // Routed experts (grouped, every expert's weights read once per chunk) + shared expert
-        push_c_expc(ds, pipes, m.W(L(l, "ffn_gate_exps.weight")), s.hc, s.srt_in_gu, s.scr, 256 * sizeof(int), 0, s.eg_c, N);
-        push_c_expc(ds, pipes, m.W(L(l, "ffn_up_exps.weight")), s.hc, s.srt_in_gu, s.scr, 256 * sizeof(int), 0, s.eu_c, N);
+        if (gu_lpr8) {
+            {
+                mtl::Dispatch d;
+                d.p = &pipes.p_gather_t;
+                d.args = {mtl::Arg::B(s.hc), mtl::Arg::B(s.hg_c), mtl::Arg::V(N), mtl::Arg::V(K)};
+                d.grid[0] = (uint32_t)(n_ent * N);
+                d.tg[0] = 128;
+                d.barrier = true;
+                ds.push_back(d);
+            }
+            push_c_lpr8(ds, pipes, wg, s.hg_c, s.ids_c, s.eg_c, n_ent, N);
+            push_c_lpr8(ds, pipes, wu, s.hg_c, s.ids_c, s.eu_c, n_ent, N);
+        } else {
+            push_c_expc(ds, pipes, wg, s.hc, s.srt_in_gu, s.scr, 256 * sizeof(int), 0, s.eg_c, N);
+            push_c_expc(ds, pipes, wu, s.hc, s.srt_in_gu, s.scr, 256 * sizeof(int), 0, s.eu_c, N);
+        }
         {
             const int n_val = n_ent * FF;
             mtl::Dispatch d;
@@ -1015,11 +1075,13 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             d.barrier = true;
             ds.push_back(d);
         }
-        if (trc && l == 0) {   // debug cut G8: the routed experts' swiglu output (pos-ordered rows)
+        if (trc && l == 0) {   // debug cut G8: the routed experts' swiglu output ((t,k)-ordered rows when
+                               // the gate/up went per-entry, placed-ordered rows otherwise)
             cx.run_graph(ds);
             ds.clear();
             std::fprintf(stderr, "TRACE G8 pos0=%d L=0 eh=%.17g\n", (int) pos0,
-                         trace_rows_pos((const float*) s.eh_c.ptr, s.pos_c.as<int>(), n_ent, (size_t) FF));
+                         gu_lpr8 ? trace_rows((const float*) s.eh_c.ptr, n_ent, (size_t) FF)
+                                 : trace_rows_pos((const float*) s.eh_c.ptr, s.pos_c.as<int>(), n_ent, (size_t) FF));
         }
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_gate_shexp.weight")), s.hc, s.sg_c, nt, N);
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_up_shexp.weight")), s.hc, s.su_c, nt, N);
@@ -1033,23 +1095,31 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             d.barrier = true;
             ds.push_back(d);
         }
-        push_c_expc(ds, pipes, m.W(L(l, "ffn_down_exps.weight")), s.eh_c, s.srt_in_d, s.scr, 256 * sizeof(int), 0, s.ey_c, FF);
+        if (dn_lpr8) {   // eh is (t,k)-ordered here: the per-entry lpr8 reads it directly
+            push_c_lpr8(ds, pipes, wd, s.eh_c, s.ids_c, s.ey_c, n_ent, FF);
+        } else {
+            push_c_expc(ds, pipes, wd, s.eh_c, gu_lpr8 ? s.srt_in_d : s.ident_c, s.scr, 256 * sizeof(int), 0,
+                        s.ey_c, FF);
+        }
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_down_shexp.weight")), s.sh_c, s.sy_c, nt, FS);
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_gate_inp_shexp.weight")), s.hc, s.sgate_c, nt, N);
-        if (trc && l == 0) {   // debug cut G9: the down projections + the shared expert + its gate (pos-ordered ey)
+        if (trc && l == 0) {   // debug cut G9: the down projections + the shared expert + its gate
+                               // ((t,k)-ordered ey when the down went per-entry, placed-ordered otherwise)
             cx.run_graph(ds);
             ds.clear();
             std::fprintf(stderr, "TRACE G9 pos0=%d L=0 sh=%.17g sy=%.17g sgate=%.17g ey=%.17g\n", (int) pos0,
                          trace_rows((const float*) s.sh_c.ptr, (size_t) nt, (size_t) FS),
                          trace_rows((const float*) s.sy_c.ptr, (size_t) nt, (size_t) N),
                          trace_rows((const float*) s.sgate_c.ptr, (size_t) nt, 1),
-                         trace_rows_pos((const float*) s.ey_c.ptr, s.pos_c.as<int>(), n_ent, (size_t) N));
+                         dn_lpr8 ? trace_rows((const float*) s.ey_c.ptr, n_ent, (size_t) N)
+                                 : trace_rows_pos((const float*) s.ey_c.ptr, s.pos_c.as<int>(), n_ent, (size_t) N));
         }
         {
             mtl::Dispatch d;
             d.p = &pipes.p_moe_sum_c;
             d.args = {mtl::Arg::B(s.xc), mtl::Arg::B(s.ey_c), mtl::Arg::B(s.wts_c), mtl::Arg::B(s.sy_c),
-                      mtl::Arg::B(s.sgate_c), mtl::Arg::B(s.pos_c), mtl::Arg::V(K), mtl::Arg::V(N), mtl::Arg::V(N)};
+                      mtl::Arg::B(s.sgate_c), mtl::Arg::B(dn_lpr8 ? s.ident_c : s.pos_c), mtl::Arg::V(K),
+                      mtl::Arg::V(N), mtl::Arg::V(N)};
             d.grid[0] = (uint32_t) nt;
             d.grid[1] = (uint32_t)((N + 127) / 128);
             d.tg[0] = 128;
@@ -1294,9 +1364,18 @@ int run(int argc, char** argv) {
         s.sh_c = cx.alloc(CT * g.n_ff_shexp * sizeof(float));
         s.sy_c = cx.alloc(CT * N * sizeof(float));
         s.sgate_c = cx.alloc(CT * sizeof(float));
+        s.hg_c = cx.alloc((size_t) CT * K * N * sizeof(float));
+        s.ident_c = cx.alloc(CT * K * sizeof(int));
+        for (int i = 0; i < CT * K; ++i) s.ident_c.as<int>()[i] = i;
+        if ((int) g.n_ff == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_down_exps.weight")).type) > 0
+            && !((int) g.n_embd == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_gate_exps.weight")).type) > 0)) {
+            std::fprintf(stderr, "q36_metal: chunk prefill cannot reproduce the decode experts for this quant "
+                                 "mix (n_ff 2048, lpr8-typed down, non-lpr8 gate/up)\n");
+            std::exit(1);
+        }
         pipes.init_prompt(cx, prefill_chunk);
         std::fprintf(stderr, "strata metal q36: prompt chunks of %d tokens on (chunk buffers %.2f GB)\n",
-                     prefill_chunk, (double) (CT * K * (size_t) (3 * FF + N + 4)) / (1024.0 * 1024.0 * 1024.0)
+                     prefill_chunk, (double) (CT * K * (size_t) (3 * FF + 2 * N + 5)) / (1024.0 * 1024.0 * 1024.0)
                          + (double) (CT * (size_t) (6 * N + 2 * g.ssm_conv_channels + 2 * g.ssm_value_dim
                                                     + 2 * g.ssm_v_heads + 2 * g.n_head * g.head_dim + 2 * g.n_head_kv * g.head_dim
                                                     + 3 * g.n_head * g.head_dim + g.n_expert + 3 * g.n_ff_shexp + 1) * 4

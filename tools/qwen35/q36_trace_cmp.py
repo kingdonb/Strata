@@ -24,7 +24,7 @@ D_RE = re.compile(r"TRACE D pos=(-?\d+) L=(-?\d+) x=(-?[\d.eE+-]+) h=(-?[\d.eE+-
 C_RE = re.compile(r"TRACE C nt=(\d+) pos0=(-?\d+) L=(-?\d+) x=(-?[\d.eE+-]+) h=(-?[\d.eE+-]+)")
 G_RE = re.compile(r"TRACE G(\d+) pos0?=(-?\d+) L=(-?\d+)(.*)")
 SNAP_FIELDS = {"cst", "sst"}     # state snapshots: compared at the chunk's LAST token, not summed
-SKIP_FIELDS = {"embtype"}        # printed for information on both sides, not a sum
+SKIP_FIELDS = {"embtype", "r0", "rl"}   # printed for information on both sides, not a sum
 
 
 def parse(path):
@@ -91,6 +91,22 @@ def cut_compare(r0, c0):
     else:
         nt, pos0 = 10**9, 0
     last = pos0 + nt - 1
+
+    # G0 (embedding) diagnostics: the chunk's first/last row sums against the decode's first/last token
+    # values, plus the token_embd types - settles whether the embedding rows themselves differ (real) or
+    # the compared row count / alignment is off (artifact).  NOTE: the chunk log's LAST-token decode window
+    # also prints G cuts (pos = the last token); those are a 1-token value against a whole-chunk reference
+    # and are expected to "diverge" - only the chunk-path cuts (the first G sequence, pos0-tagged) count.
+    g0c = [e for e in cg if e[1] == 0]
+    g0r = [e for e in r0 if e[0] == "G" and e[1] == 0 and pos0 <= e[2] <= last]
+    if g0c and g0r:
+        cf, rf = g0c[0][4], g0r[0][4]
+        ct_ = int(cf["embtype"]) if "embtype" in cf else -1
+        rt_ = int(rf["embtype"]) if "embtype" in rf else -1
+        print(f"  G0 note: chunk embtype={ct_} x={cf.get('x', 0):.17g} r0={cf.get('r0', 0):.17g} "
+              f"rl={cf.get('rl', 0):.17g}")
+        print(f"  G0 note: decode embtype={rt_} first(pos={g0r[0][2]}) x={rf.get('x', 0):.17g} "
+              f"last(pos={g0r[-1][2]}) x={g0r[-1][4].get('x', 0):.17g} tokens={len(g0r)}")
 
     acc, snap = {}, {}
     for e in r0:

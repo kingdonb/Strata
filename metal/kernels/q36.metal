@@ -978,6 +978,21 @@ kernel void k_tables(device const int* ids [[buffer(0)]],
     }
 }
 
+// The chunk's routed-expert input rows in (token, slot) order: entry i = t*K + k is a copy of its token's
+// row (t = i / K).  The gate/up products then run the DECODE k_gemv_lpr8 per entry (grid[1] = n_ent,
+// ids[entry] picking the expert) - its deq_dot_block + 8-lane butterfly is the token-by-token path's exact
+// arithmetic, and k_expc's plain-gemv order (32-lane strided units + simd_sum) differs by ~1 ulp at
+// n_in = 2048 (round 9's G8 cut: a 5e-7 relative diff on the eh sum - greedy turns that into different
+// tokens).  Pure row copies, no arithmetic.
+kernel void k_gather_t(device const float* x [[buffer(0)]],
+                       device float* y [[buffer(1)]],
+                       constant int& width [[buffer(2)]],
+                       constant int& K [[buffer(3)]],
+                       uint i [[thread_position_in_grid]]) {
+    const uint row = i / (uint) width;   // the entry index (t*K + k); its token is row / K
+    y[i] = x[(ulong) (row / (uint) K) * width + i % (uint) width];
+}
+
 // Conv for T tokens, tiles of 16 side by side (q36_engine.cu's k_conv_seq tile mode, k_conv's math):
 // per channel a K-1-deep shift register; tile 0's registers start at the held history, tile t > 0's at
 // the tile's own preceding inputs; tile 0, as the only history writer, stores the last K - 1 inputs.

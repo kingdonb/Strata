@@ -150,6 +150,7 @@ int main() {
     mtl::Pipeline p_expc = pipe("k_expc_T_Q4_K");
     mtl::Pipeline p_expc_iq2 = pipe("k_expc_T_IQ2_XS"), p_expc_iq3 = pipe("k_expc_T_IQ3_XXS");
     mtl::Pipeline p_g_iq2 = pipe("k_gemv_T_IQ2_XS"), p_g_iq3 = pipe("k_gemv_T_IQ3_XXS");
+    mtl::Pipeline p_lpr8_iq2 = pipe("k_gemv_lpr8_T_IQ2_XS"), p_gather = pipe("k_gather_t");
     mtl::Pipeline p_swiglu = pipe("k_swiglu");
     mtl::Pipeline p_rms = pipe("k_rms");
     mtl::Pipeline p_tables = pipe("k_tables");
@@ -982,6 +983,158 @@ int main() {
         check("tables off", (const char*) scr_t.ptr + 4 * 256, (const char*) scr_o.ptr + 4 * 512, 4 * 256);
         check_placement("tables place", ids3.as<int>(), scr_t.as<int>(), gu_t.as<int>(), sd_t.as<int>(),
                         pos_t.as<int>(), T * K);
+    }
+
+    // ---- 16. the full routed MoE at the lpr8 geometry (n_in = 2048 gate/up, the engine's real expert
+    // formats): the chunk chain (gather + per-entry decode-lpr8 gate/up -> swiglu -> down expc reading the
+    // (t,k)-ordered eh through srt_in_d -> combine through pos) vs the decode chain per token (lpr8
+    // gate/up, plain-gemv down, k_moe_sum).  This is the pair round 9's G8 cut caught: k_expc's
+    // plain-gemv order differs from lpr8's by ~1 ulp at n_in = 2048.  The shared expert is zeroed on both
+    // sides (sgate = 0, sy = 0) so the compare isolates the routed machinery.
+    {
+        const int N2 = 2048;               // the lpr8 kernel's hardwired input width (the real n_embd)
+        const uint64_t RBG = 74ull * 8;    // IQ2_XS rows of n_in = 2048
+        const uint64_t RBD = 98ull;        // IQ3_XXS rows of n_in = FF (one 256-dim block, FF < 256)
+        const uint64_t EBG = RBG * FF, EBD = RBD * N2;
+        mtl::Buffer Wg = cx.alloc(NEXP * EBG), Wu = cx.alloc(NEXP * EBG), Wd = cx.alloc(NEXP * EBD);
+        for (size_t i = 0; i < Wg.bytes; ++i) Wg.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        for (size_t i = 0; i < Wu.bytes; ++i) Wu.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        for (size_t i = 0; i < Wd.bytes; ++i) Wd.as<unsigned char>()[i] = (unsigned char) (r.next() & 255);
+        sanitize(Wg);
+        sanitize(Wu);
+        sanitize(Wd);
+        mtl::Buffer hg = cx.alloc(4 * T * N2);
+        for (int i = 0; i < T * N2; ++i) hg.as<float>()[i] = r.sym();
+        mtl::Buffer eg1 = cx.alloc(4 * T * K * FF), eu1 = cx.alloc(4 * T * K * FF), eh1 = cx.alloc(4 * T * K * FF);
+        mtl::Buffer ey1 = cx.alloc(4 * T * K * N2), x1 = cx.alloc(4 * T * N2);
+        mtl::Buffer hgc = cx.alloc(4 * T * K * N2), eg2 = cx.alloc(4 * T * K * FF), eu2 = cx.alloc(4 * T * K * FF),
+                    eh2 = cx.alloc(4 * T * K * FF), ey2 = cx.alloc(4 * T * K * N2), x2 = cx.alloc(4 * T * N2);
+        mtl::Buffer scr2 = cx.alloc(4 * 2 * 256), sgu = cx.alloc(4 * T * K), sd = cx.alloc(4 * T * K),
+                    pos2 = cx.alloc(4 * T * K);
+        mtl::Buffer sy0 = cx.alloc(4 * N2), gs0 = cx.alloc(4);   // cx.alloc zeroes: the shared expert off
+        for (int i = 0; i < T * N2; ++i) x1.as<float>()[i] = r.sym();
+        std::memcpy(x2.ptr, x1.ptr, 4 * T * N2);
+
+        // the decode chain, per token (the engine's own shapes: gate/up lpr8 with x_stride 0, the down
+        // plain gemv at x_stride FF, k_moe_sum on the token's K rows)
+        {
+            std::vector<mtl::Dispatch> ds;
+            for (int t = 0; t < T; ++t) {
+                GemvParam pg{RBG, EBG, N2, FF, 0};
+                mtl::Dispatch dg;
+                dg.p = &p_lpr8_iq2;
+                dg.args = {mtl::Arg::B(Wg), mtl::Arg::B(hg, 4 * (size_t) t * N2),
+                           mtl::Arg::B(eg1, 4 * (size_t) t * K * FF), mtl::Arg::B(ids2, 4 * (size_t) t * K),
+                           mtl::Arg::V(pg)};
+                dg.grid[0] = (FF + 15) / 16;
+                dg.grid[1] = K;
+                dg.tg[0] = 128;
+                dg.barrier = true;
+                ds.push_back(dg);
+                mtl::Dispatch du;
+                du.p = &p_lpr8_iq2;
+                du.args = {mtl::Arg::B(Wu), mtl::Arg::B(hg, 4 * (size_t) t * N2),
+                           mtl::Arg::B(eu1, 4 * (size_t) t * K * FF), mtl::Arg::B(ids2, 4 * (size_t) t * K),
+                           mtl::Arg::V(pg)};
+                du.grid[0] = (FF + 15) / 16;
+                du.grid[1] = K;
+                du.tg[0] = 128;
+                du.barrier = true;
+                ds.push_back(du);
+            }
+            cx.run_graph(ds);
+            mtl::Dispatch dsw;
+            dsw.p = &p_swiglu;
+            dsw.args = {mtl::Arg::B(eg1), mtl::Arg::B(eu1), mtl::Arg::B(eh1), mtl::Arg::V(T * K * FF)};
+            dsw.grid[0] = (T * K * FF + 127) / 128;
+            dsw.tg[0] = 128;
+            dsw.barrier = true;
+            cx.run_graph({dsw});
+            std::vector<mtl::Dispatch> ds2;
+            for (int t = 0; t < T; ++t) {
+                GemvParam pd{RBD, EBD, FF, N2, (unsigned long) FF};
+                mtl::Dispatch dd;
+                dd.p = &p_g_iq3;
+                dd.args = {mtl::Arg::B(Wd), mtl::Arg::B(eh1, 4 * (size_t) t * K * FF),
+                           mtl::Arg::B(ey1, 4 * (size_t) t * K * N2), mtl::Arg::B(ids2, 4 * (size_t) t * K),
+                           mtl::Arg::V(pd)};
+                dd.grid[0] = (N2 + 7) / 8;
+                dd.grid[1] = K;
+                dd.tg[0] = 256;
+                dd.barrier = true;
+                ds2.push_back(dd);
+                mtl::Dispatch dm;
+                dm.p = &p_sum;
+                dm.args = {mtl::Arg::B(x1, 4 * (size_t) t * N2), mtl::Arg::B(ey1, 4 * (size_t) t * K * N2),
+                           mtl::Arg::B(wts2, 4 * (size_t) t * K), mtl::Arg::B(sy0), mtl::Arg::B(gs0),
+                           mtl::Arg::V(K), mtl::Arg::V(N2)};
+                dm.grid[0] = (N2 + 127) / 128;
+                dm.tg[0] = 128;
+                dm.barrier = true;
+                ds2.push_back(dm);
+            }
+            cx.run_graph(ds2);
+        }
+
+        // the chunk chain, one graph (k_tables -> gather -> per-entry lpr8 gate/up -> swiglu -> down expc
+        // reading the (t,k)-ordered eh through srt_in_d -> k_moe_sum_chunk through pos)
+        {
+            mtl::Dispatch dt;
+            dt.p = &p_tables;
+            dt.args = {mtl::Arg::B(ids2), mtl::Arg::B(scr2), mtl::Arg::B(sgu), mtl::Arg::B(sd), mtl::Arg::B(pos2),
+                       mtl::Arg::V(NEXP), mtl::Arg::V(K), mtl::Arg::V(T * K)};
+            dt.grid[0] = 1;
+            dt.tg[0] = 256;
+            dt.barrier = true;
+            mtl::Dispatch dga;
+            dga.p = &p_gather;
+            dga.args = {mtl::Arg::B(hg), mtl::Arg::B(hgc), mtl::Arg::V(N2), mtl::Arg::V(K)};
+            dga.grid[0] = T * K * N2;
+            dga.tg[0] = 128;
+            dga.barrier = true;
+            mtl::Dispatch dsw;
+            dsw.p = &p_swiglu;
+            dsw.args = {mtl::Arg::B(eg2), mtl::Arg::B(eu2), mtl::Arg::B(eh2), mtl::Arg::V(T * K * FF)};
+            dsw.grid[0] = (T * K * FF + 127) / 128;
+            dsw.tg[0] = 128;
+            dsw.barrier = true;
+            mtl::Dispatch dsum;
+            dsum.p = &p_sumc;
+            dsum.args = {mtl::Arg::B(x2), mtl::Arg::B(ey2), mtl::Arg::B(wts2), mtl::Arg::B(sy0), mtl::Arg::B(gs0),
+                         mtl::Arg::B(pos2), mtl::Arg::V(K), mtl::Arg::V(N2), mtl::Arg::V(N2)};
+            dsum.grid[0] = T;
+            dsum.grid[1] = (N2 + 127) / 128;
+            dsum.tg[0] = 128;
+            dsum.barrier = true;
+            std::vector<mtl::Dispatch> ds = {dt, dga};
+            for (int wi = 0; wi < 2; ++wi) {
+                GemvParam p{RBG, EBG, N2, FF, (unsigned long) N2};
+                mtl::Dispatch d;
+                d.p = &p_lpr8_iq2;
+                d.args = {mtl::Arg::B(wi == 0 ? Wg : Wu), mtl::Arg::B(hgc), mtl::Arg::B(wi == 0 ? eg2 : eu2),
+                          mtl::Arg::B(ids2), mtl::Arg::V(p)};
+                d.grid[0] = (FF + 15) / 16;
+                d.grid[1] = T * K;
+                d.tg[0] = 128;
+                d.barrier = true;
+                ds.push_back(d);
+            }
+            ds.push_back(dsw);
+            GemvParam pd{RBD, EBD, FF, N2, (unsigned long) FF};
+            mtl::Dispatch dd;
+            dd.p = &p_expc_iq3;
+            dd.args = {mtl::Arg::B(Wd), mtl::Arg::B(eh2), mtl::Arg::B(sd), mtl::Arg::B(scr2, 256 * 4),
+                       mtl::Arg::B(scr2), mtl::Arg::B(ey2), mtl::Arg::V(pd)};
+            dd.grid[0] = (N2 + 7) / 8;
+            dd.grid[1] = NEXP;
+            dd.tg[0] = 256;
+            dd.barrier = true;
+            ds.push_back(dd);
+            ds.push_back(dsum);
+            cx.run_graph(ds);
+        }
+        check("moe2048 eh", eh1.ptr, eh2.ptr, 4 * T * K * FF);
+        check("moe2048 x", x1.ptr, x2.ptr, 4 * T * N2);
     }
 
     std::printf(g_fails ? "FAILURES: %d\n" : "all stages bit-identical\n", g_fails);
