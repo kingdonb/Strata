@@ -32,7 +32,11 @@
       nothing was written at all; the decode side stayed correct.
 - [x] Dedupe the compile test's sk declarations + add the under-binding guard: every pipeline
       reflects its max `[[buffer(N)]]` index + 1 at creation; a dispatch binding fewer args exits
-      loudly with a rebuild hint instead of silently reading unbound slots (`0c0608da`)
+      loudly with a rebuild hint instead of silently reading unbound slots (`0c0608da`); the
+      reflection API corrected for the real SDK — `MTLFunction.functionArguments` does not exist,
+      the list comes from `MTLComputePipelineReflection.arguments` via the pipeline-creation call's
+      out-param (`76ba259d`); site sweep (engine q36 + q35 + harness): zero under-bound dispatches,
+      the guard cannot false-fire
 - [ ] Mac round 13 (user): rebuild (`cmake --build build-metal`), `./build-metal/q36_chunk_parity` —
       expect 38/38 OK, 0 failures (probeA/B print the seeded values again, `dga` populates `hgc`,
       `moe2048 iso` present); then the ladder (Step 4)
