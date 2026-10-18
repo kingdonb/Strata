@@ -304,6 +304,147 @@ template <> inline float deq<T_Q5_1>(device const uchar* b, int, thread float* q
     return rdh(b);
 }
 
+template <> inline float deq<T_F32>(device const uchar* b, int, thread float* q, threadgroup const uint*) {
+    device const float* p = (device const float*)b;
+    for (int j = 0; j < 16; ++j) {
+        q[j] = p[j];
+    }
+    return 1.0f;
+}
+
+template <> inline float deq<T_BF16>(device const uchar* b, int, thread float* q, threadgroup const uint*) {
+    device const ushort* p = (device const ushort*)b;
+    for (int j = 0; j < 16; ++j) {
+        q[j] = as_type<float>((uint)p[j] << 16);
+    }
+    return 1.0f;
+}
+
+static inline void get_scale_min_k4(int j, device const uchar* q, thread uchar* d, thread uchar* m) {
+    if (j < 4) {
+        *d = q[j]   & 63;
+        *m = q[j+4] & 63;
+    } else {
+        *d = (q[j+4] & 0x0F) | ((q[j-4] & 0xC0) >> 2);
+        *m = ((q[j+4] >> 4) & 0x0F) | ((q[j]   & 0xC0) >> 2);
+    }
+}
+
+template <> inline float deq<T_Q4_K>(device const uchar* b, int ui, thread float* q, threadgroup const uint*) {
+    device const block_q4_K* blk = (device const block_q4_K*)b;
+    const float d = float(blk->dm[0]);
+    const float dmin = float(blk->dm[1]);
+    uchar sc, m;
+    get_scale_min_k4(ui, blk->scales, &sc, &m);
+    const float d_sc = d * float(sc);
+    const float m_sc = dmin * float(m);
+    device const uchar* q_src = blk->qs + (ui / 2) * 32;
+    if ((ui & 1) == 0) {
+        for (int l = 0; l < 32; ++l) {
+            q[l] = d_sc * float(q_src[l] & 0x0F) - m_sc;
+        }
+    } else {
+        for (int l = 0; l < 32; ++l) {
+            q[l] = d_sc * float(q_src[l] >> 4) - m_sc;
+        }
+    }
+    return 1.0f;
+}
+
+template <> inline float deq<T_Q5_K>(device const uchar* b, int ui, thread float* q, threadgroup const uint*) {
+    device const block_q5_K* blk = (device const block_q5_K*)b;
+    const float d = float(blk->dm[0]);
+    const float dmin = float(blk->dm[1]);
+    uchar sc, m;
+    get_scale_min_k4(ui, blk->scales, &sc, &m);
+    const float d_sc = d * float(sc);
+    const float m_sc = dmin * float(m);
+    device const uchar* ql = blk->qs + (ui / 2) * 32;
+    device const uchar* qh = blk->qh;
+    const uint u_bit = 1u << ui;
+    if ((ui & 1) == 0) {
+        for (int l = 0; l < 32; ++l) {
+            const int val = (ql[l] & 0x0F) + ((qh[l] & u_bit) ? 16 : 0);
+            q[l] = d_sc * float(val) - m_sc;
+        }
+    } else {
+        for (int l = 0; l < 32; ++l) {
+            const int val = (ql[l] >> 4) + ((qh[l] & u_bit) ? 16 : 0);
+            q[l] = d_sc * float(val) - m_sc;
+        }
+    }
+    return 1.0f;
+}
+
+template <> inline float deq<T_Q6_K>(device const uchar* b, int ui, thread float* q, threadgroup const uint*) {
+    device const block_q6_K* blk = (device const block_q6_K*)b;
+    const float d = float(blk->d);
+    const int h_part = ui / 4;
+    const int sub = ui % 4;
+    device const uchar* ql_base = blk->ql + h_part * 64;
+    device const uchar* qh_base = blk->qh + h_part * 32;
+    device const char* sc_base = (device const char*)blk->scales + h_part * 8;
+
+    const int ql_offset = (sub & 1) ? 32 : 0;
+    const int ql_shift = (sub >= 2) ? 4 : 0;
+    const int qh_shift = 2 * sub;
+    const int sc_offset = 2 * sub;
+
+    for (int l = 0; l < 32; ++l) {
+        const int is = l / 16;
+        const int low = (ql_base[l + ql_offset] >> ql_shift) & 0x0F;
+        const int high = ((qh_base[l] >> qh_shift) & 3) << 4;
+        const int q_val = (low | high) - 32;
+        q[l] = d * float(sc_base[is + sc_offset]) * float(q_val);
+    }
+    return 1.0f;
+}
+
+template <> inline float deq<T_Q3_K>(device const uchar* b, int ui, thread float* q, threadgroup const uint*) {
+    device const block_q3_K* blk = (device const block_q3_K*)b;
+    const float d_all = float(blk->d);
+
+    device const uint* sc_p = (device const uint*)blk->scales;
+    const uint a0 = sc_p[0];
+    const uint a1 = sc_p[1];
+    const uint a2 = sc_p[2];
+
+    uint aux_val;
+    if (ui < 2) {
+        aux_val = (a0 & 0x0f0f0f0f) | (((a2 >> 0) & 0x03030303) << 4);
+    } else if (ui < 4) {
+        aux_val = (a1 & 0x0f0f0f0f) | (((a2 >> 2) & 0x03030303) << 4);
+    } else if (ui < 6) {
+        aux_val = ((a0 >> 4) & 0x0f0f0f0f) | (((a2 >> 4) & 0x03030303) << 4);
+    } else {
+        aux_val = ((a1 >> 4) & 0x0f0f0f0f) | (((a2 >> 6) & 0x03030303) << 4);
+    }
+    const int sub_pair = ui % 2;
+    const int sc0 = as_type<char>(uchar((aux_val >> (16 * sub_pair)) & 0xFF)) - 32;
+    const int sc1 = as_type<char>(uchar((aux_val >> (16 * sub_pair + 8)) & 0xFF)) - 32;
+
+    const float dl0 = d_all * float(sc0);
+    const float dl1 = d_all * float(sc1);
+
+    const int h_part = ui / 4;
+    const int j = ui % 4;
+    const int shift = 2 * j;
+    const uint m = 1u << ui;
+    device const uchar* q_base = blk->qs + h_part * 32;
+    device const uchar* hm = blk->hmask;
+
+    for (int l = 0; l < 16; ++l) {
+        const int q0 = (q_base[l] >> shift) & 3;
+        const int val0 = q0 - ((hm[l] & m) ? 0 : 4);
+        q[l] = dl0 * float(val0);
+
+        const int q1 = (q_base[l + 16] >> shift) & 3;
+        const int val1 = q1 - ((hm[l + 16] & m) ? 0 : 4);
+        q[l + 16] = dl1 * float(val1);
+    }
+    return 1.0f;
+}
+
 // sum over groups of LPR consecutive lanes (LPR = 1, 2, 4, 8, 16 or 32); the result is valid in every lane
 template <int LPR>
 static inline float lane_sum(float v) {
@@ -311,3 +452,339 @@ static inline float lane_sum(float v) {
     for (ushort o = LPR / 2; o > 0; o >>= 1) v += simd_shuffle_xor(v, o);
     return v;
 }
+
+template <int F>
+METAL_FUNC float deq_dot(device const uchar* b, int ui, device const float* xu, threadgroup const uint* tab) {
+    constexpr int UNIT = fmt<F>::UNIT;
+    thread float q[UNIT];
+    const float scale = deq<F>(b, ui, q, tab);
+    float udot = 0.0f;
+    for (int l = 0; l < UNIT; ++l) {
+        udot += q[l] * xu[l];
+    }
+    return scale * udot;
+}
+
+template <>
+METAL_FUNC float deq_dot<T_Q4_K>(device const uchar* b, int ui, device const float* xu, threadgroup const uint*) {
+    device const block_q4_K* blk = (device const block_q4_K*)b;
+    const float d = float(blk->dm[0]);
+    const float dmin = float(blk->dm[1]);
+    uchar sc, m;
+    get_scale_min_k4(ui, blk->scales, &sc, &m);
+    const float d_sc = d * float(sc);
+    const float m_sc = dmin * float(m);
+    device const uint* q_src32 = (device const uint*)(blk->qs + (ui / 2) * 32);
+    device const float4* x4 = (device const float4*)xu;
+
+    float acc_dot = 0.0f;
+    float acc_xsum = 0.0f;
+    const int shift = (ui & 1) ? 4 : 0;
+
+    for (int g = 0; g < 8; ++g) {
+        const uint w = q_src32[g];
+        const float4 v = float4(float((w >> shift) & 0x0F),
+                                float(((w >> 8) >> shift) & 0x0F),
+                                float(((w >> 16) >> shift) & 0x0F),
+                                float(((w >> 24) >> shift) & 0x0F));
+        const float4 x = x4[g];
+        acc_dot += dot(v, x);
+        acc_xsum += (x.x + x.y) + (x.z + x.w);
+    }
+    return d_sc * acc_dot - m_sc * acc_xsum;
+}
+
+template <>
+METAL_FUNC float deq_dot<T_Q5_K>(device const uchar* b, int ui, device const float* xu, threadgroup const uint*) {
+    device const block_q5_K* blk = (device const block_q5_K*)b;
+    const float d = float(blk->dm[0]);
+    const float dmin = float(blk->dm[1]);
+    uchar sc, m;
+    get_scale_min_k4(ui, blk->scales, &sc, &m);
+    const float d_sc = d * float(sc);
+    const float m_sc = dmin * float(m);
+    device const uint* ql32 = (device const uint*)(blk->qs + (ui / 2) * 32);
+    device const uint* qh32 = (device const uint*)(blk->qh);
+    device const float4* x4 = (device const float4*)xu;
+    const uint u_bit = 1u << ui;
+    const int shift = (ui & 1) ? 4 : 0;
+
+    float acc_dot = 0.0f;
+    float acc_xsum = 0.0f;
+
+    for (int g = 0; g < 8; ++g) {
+        const uint wl = ql32[g];
+        const uint wh = qh32[g];
+        const float4 v = float4(float(((wl >> shift) & 0x0F) + ((wh & u_bit) ? 16 : 0)),
+                                float((((wl >> 8) >> shift) & 0x0F) + (((wh >> 8) & u_bit) ? 16 : 0)),
+                                float((((wl >> 16) >> shift) & 0x0F) + (((wh >> 16) & u_bit) ? 16 : 0)),
+                                float((((wl >> 24) >> shift) & 0x0F) + (((wh >> 24) & u_bit) ? 16 : 0)));
+        const float4 x = x4[g];
+        acc_dot += dot(v, x);
+        acc_xsum += (x.x + x.y) + (x.z + x.w);
+    }
+    return d_sc * acc_dot - m_sc * acc_xsum;
+}
+
+template <>
+METAL_FUNC float deq_dot<T_Q6_K>(device const uchar* b, int ui, device const float* xu, threadgroup const uint*) {
+    device const block_q6_K* blk = (device const block_q6_K*)b;
+    const float d = float(blk->d);
+    const int h_part = ui / 4;
+    const int sub = ui % 4;
+    device const uchar* ql_base = blk->ql + h_part * 64;
+    device const uchar* qh_base = blk->qh + h_part * 32;
+    device const char* sc_base = (device const char*)blk->scales + h_part * 8;
+
+    const int ql_offset = (sub & 1) ? 32 : 0;
+    const int ql_shift = (sub >= 2) ? 4 : 0;
+    const int qh_shift = 2 * sub;
+    const int sc_offset = 2 * sub;
+
+    const float sc0 = d * float(sc_base[0 + sc_offset]);
+    const float sc1 = d * float(sc_base[1 + sc_offset]);
+
+    float dot0 = 0.0f;
+    for (int l = 0; l < 16; ++l) {
+        const int low = (ql_base[l + ql_offset] >> ql_shift) & 0x0F;
+        const int high = ((qh_base[l] >> qh_shift) & 3) << 4;
+        const int q_val = (low | high) - 32;
+        dot0 += float(q_val) * xu[l];
+    }
+
+    float dot1 = 0.0f;
+    for (int l = 16; l < 32; ++l) {
+        const int low = (ql_base[l + ql_offset] >> ql_shift) & 0x0F;
+        const int high = ((qh_base[l] >> qh_shift) & 3) << 4;
+        const int q_val = (low | high) - 32;
+        dot1 += float(q_val) * xu[l];
+    }
+
+    return sc0 * dot0 + sc1 * dot1;
+}
+
+template <typename T> struct vec4_ptr;
+template <> struct vec4_ptr<device const float*> { typedef device const float4* type; };
+template <> struct vec4_ptr<threadgroup const float*> { typedef threadgroup const float4* type; };
+
+template <int F, typename T_X>
+METAL_FUNC float deq_dot(device const uchar* b, int ui, T_X xu, threadgroup const uint* tab) {
+    constexpr int UNIT = fmt<F>::UNIT;
+    thread float q[UNIT];
+    const float scale = deq<F>(b, ui, q, tab);
+    float udot = 0.0f;
+    for (int l = 0; l < UNIT; ++l) {
+        udot += q[l] * xu[l];
+    }
+    return scale * udot;
+}
+
+template <int F, typename T_X>
+METAL_FUNC float deq_dot_block(device const uchar* b, T_X x_blk, threadgroup const uint* tab = nullptr) {
+    constexpr int UNIT = fmt<F>::UNIT;
+    constexpr int QK = fmt<F>::QK;
+    constexpr int UPB = QK / UNIT;
+    float acc = 0.0f;
+    for (int ui = 0; ui < UPB; ++ui) {
+        T_X xu = x_blk + ui * UNIT;
+        acc += deq_dot<F>(b, ui, xu, tab);
+    }
+    return acc;
+}
+
+template <typename T_X>
+METAL_FUNC float deq_dot_block_q4_K(device const uchar* b, T_X x_blk) {
+    device const block_q4_K* blk = (device const block_q4_K*)b;
+    const float d = float(blk->dm[0]);
+    const float dmin = float(blk->dm[1]);
+
+    float d_sc[8];
+    float m_sc[8];
+    for (int ui = 0; ui < 8; ++ui) {
+        uchar sc, m;
+        get_scale_min_k4(ui, blk->scales, &sc, &m);
+        d_sc[ui] = d * float(sc);
+        m_sc[ui] = dmin * float(m);
+    }
+
+    device const uint* qs32 = (device const uint*)blk->qs;
+    auto x4 = (typename vec4_ptr<T_X>::type)x_blk;
+
+    float acc = 0.0f;
+
+    for (int pair = 0; pair < 4; ++pair) {
+        device const uint* q_pair = qs32 + pair * 8;
+        auto x4_0 = x4 + (pair * 2) * 8;
+        auto x4_1 = x4 + (pair * 2 + 1) * 8;
+
+        float dot0 = 0.0f, xsum0 = 0.0f;
+        float dot1 = 0.0f, xsum1 = 0.0f;
+
+        for (int g = 0; g < 8; ++g) {
+            const uint w = q_pair[g];
+            const float4 v0 = float4(float(w & 0x0F),
+                                     float((w >> 8) & 0x0F),
+                                     float((w >> 16) & 0x0F),
+                                     float((w >> 24) & 0x0F));
+            const float4 v1 = float4(float((w >> 4) & 0x0F),
+                                     float((w >> 12) & 0x0F),
+                                     float((w >> 20) & 0x0F),
+                                     float((w >> 28) & 0x0F));
+            const float4 val_x0 = x4_0[g];
+            const float4 val_x1 = x4_1[g];
+
+            dot0 += dot(v0, val_x0);
+            xsum0 += (val_x0.x + val_x0.y) + (val_x0.z + val_x0.w);
+
+            dot1 += dot(v1, val_x1);
+            xsum1 += (val_x1.x + val_x1.y) + (val_x1.z + val_x1.w);
+        }
+
+        acc += (d_sc[pair * 2] * dot0 - m_sc[pair * 2] * xsum0) +
+               (d_sc[pair * 2 + 1] * dot1 - m_sc[pair * 2 + 1] * xsum1);
+    }
+
+    return acc;
+}
+
+template <>
+METAL_FUNC float deq_dot_block<T_Q4_K, device const float*>(device const uchar* b, device const float* x_blk, threadgroup const uint*) {
+    return deq_dot_block_q4_K(b, x_blk);
+}
+template <>
+METAL_FUNC float deq_dot_block<T_Q4_K, threadgroup const float*>(device const uchar* b, threadgroup const float* x_blk, threadgroup const uint*) {
+    return deq_dot_block_q4_K(b, x_blk);
+}
+
+template <typename T_X>
+METAL_FUNC float deq_dot_block_q5_K(device const uchar* b, T_X x_blk) {
+    device const block_q5_K* blk = (device const block_q5_K*)b;
+    const float d = float(blk->dm[0]);
+    const float dmin = float(blk->dm[1]);
+
+    float d_sc[8];
+    float m_sc[8];
+    for (int ui = 0; ui < 8; ++ui) {
+        uchar sc, m;
+        get_scale_min_k4(ui, blk->scales, &sc, &m);
+        d_sc[ui] = d * float(sc);
+        m_sc[ui] = dmin * float(m);
+    }
+
+    device const uint* ql32 = (device const uint*)blk->qs;
+    device const uint* qh32 = (device const uint*)blk->qh;
+    auto x4 = (typename vec4_ptr<T_X>::type)x_blk;
+
+    uint wh[8];
+    for (int g = 0; g < 8; ++g) {
+        wh[g] = qh32[g];
+    }
+
+    float acc = 0.0f;
+
+    for (int pair = 0; pair < 4; ++pair) {
+        device const uint* q_pair = ql32 + pair * 8;
+        auto x4_0 = x4 + (pair * 2) * 8;
+        auto x4_1 = x4 + (pair * 2 + 1) * 8;
+
+        const uint u_bit0 = 1u << (pair * 2);
+        const uint u_bit1 = 1u << (pair * 2 + 1);
+
+        float dot0 = 0.0f, xsum0 = 0.0f;
+        float dot1 = 0.0f, xsum1 = 0.0f;
+
+        for (int g = 0; g < 8; ++g) {
+            const uint wl = q_pair[g];
+            const uint w_high = wh[g];
+
+            const float4 v0 = float4(float((wl & 0x0F) + ((w_high & u_bit0) ? 16 : 0)),
+                                     float(((wl >> 8) & 0x0F) + (((w_high >> 8) & u_bit0) ? 16 : 0)),
+                                     float(((wl >> 16) & 0x0F) + (((w_high >> 16) & u_bit0) ? 16 : 0)),
+                                     float(((wl >> 24) & 0x0F) + (((w_high >> 24) & u_bit0) ? 16 : 0)));
+
+            const float4 v1 = float4(float(((wl >> 4) & 0x0F) + ((w_high & u_bit1) ? 16 : 0)),
+                                     float(((wl >> 12) & 0x0F) + (((w_high >> 8) & u_bit1) ? 16 : 0)),
+                                     float(((wl >> 20) & 0x0F) + (((w_high >> 16) & u_bit1) ? 16 : 0)),
+                                     float(((wl >> 28) & 0x0F) + (((w_high >> 24) & u_bit1) ? 16 : 0)));
+
+            const float4 val_x0 = x4_0[g];
+            const float4 val_x1 = x4_1[g];
+
+            dot0 += dot(v0, val_x0);
+            xsum0 += (val_x0.x + val_x0.y) + (val_x0.z + val_x0.w);
+
+            dot1 += dot(v1, val_x1);
+            xsum1 += (val_x1.x + val_x1.y) + (val_x1.z + val_x1.w);
+        }
+
+        acc += (d_sc[pair * 2] * dot0 - m_sc[pair * 2] * xsum0) +
+               (d_sc[pair * 2 + 1] * dot1 - m_sc[pair * 2 + 1] * xsum1);
+    }
+
+    return acc;
+}
+
+template <>
+METAL_FUNC float deq_dot_block<T_Q5_K, device const float*>(device const uchar* b, device const float* x_blk, threadgroup const uint*) {
+    return deq_dot_block_q5_K(b, x_blk);
+}
+template <>
+METAL_FUNC float deq_dot_block<T_Q5_K, threadgroup const float*>(device const uchar* b, threadgroup const float* x_blk, threadgroup const uint*) {
+    return deq_dot_block_q5_K(b, x_blk);
+}
+
+template <typename T_X>
+METAL_FUNC float deq_dot_block_q6_K(device const uchar* b, T_X x_blk) {
+    device const block_q6_K* blk = (device const block_q6_K*)b;
+    const float d = float(blk->d);
+
+    float acc = 0.0f;
+    for (int h_part = 0; h_part < 2; ++h_part) {
+        device const uchar* ql_base = blk->ql + h_part * 64;
+        device const uchar* qh_base = blk->qh + h_part * 32;
+        device const char* sc_base = (device const char*)blk->scales + h_part * 8;
+        T_X x_h = x_blk + h_part * 128;
+
+        for (int sub = 0; sub < 4; ++sub) {
+            const int ql_offset = (sub & 1) ? 32 : 0;
+            const int ql_shift = (sub >= 2) ? 4 : 0;
+            const int qh_shift = 2 * sub;
+            const int sc_offset = 2 * sub;
+
+            const float sc0 = d * float(sc_base[0 + sc_offset]);
+            const float sc1 = d * float(sc_base[1 + sc_offset]);
+            T_X xu = x_h + sub * 32;
+
+            float dot0 = 0.0f;
+            for (int l = 0; l < 16; ++l) {
+                const int low = (ql_base[l + ql_offset] >> ql_shift) & 0x0F;
+                const int high = ((qh_base[l] >> qh_shift) & 3) << 4;
+                const int q_val = (low | high) - 32;
+                dot0 += float(q_val) * xu[l];
+            }
+
+            float dot1 = 0.0f;
+            for (int l = 16; l < 32; ++l) {
+                const int low = (ql_base[l + ql_offset] >> ql_shift) & 0x0F;
+                const int high = ((qh_base[l] >> qh_shift) & 3) << 4;
+                const int q_val = (low | high) - 32;
+                dot1 += float(q_val) * xu[l];
+            }
+
+            acc += sc0 * dot0 + sc1 * dot1;
+        }
+    }
+    return acc;
+}
+
+template <>
+METAL_FUNC float deq_dot_block<T_Q6_K, device const float*>(device const uchar* b, device const float* x_blk, threadgroup const uint*) {
+    return deq_dot_block_q6_K(b, x_blk);
+}
+template <>
+METAL_FUNC float deq_dot_block<T_Q6_K, threadgroup const float*>(device const uchar* b, threadgroup const float* x_blk, threadgroup const uint*) {
+    return deq_dot_block_q6_K(b, x_blk);
+}
+
+
+

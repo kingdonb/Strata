@@ -363,6 +363,7 @@ public:
     uint32_t version() const { return version_; }
     uint64_t data_start() const { return data_start_; }
     uint64_t file_size() const { return size_; }
+    const uint8_t* data() const { return base_; }
     uint64_t alignment() const { return alignment_; }
     const std::string& path() const { return path_; }
 
