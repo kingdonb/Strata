@@ -135,43 +135,65 @@ If you have unlimited time, compute, and optimization resources, here is the pri
   ./run-q36.sh 8082
   ```
 
-## 6. Long context, chunked prefill (in progress on this branch)
+## 6. Long context (split-K attention)
 
-Two additions land on top of the sections above (commit 65037a91 onward). Both leave the default paths
-unchanged: attention stays in the threadgroup `k_attn` at 8,192 cells and below, and prompts run
-token-by-token unless `--prefill` is set.
+`k_attn` keeps the attention scores in threadgroup memory, and Metal's threadgroup budget is 32 KB —
+8,192 score cells — so `--ctx` stopped at 8K. The split-K kernels lift that ceiling: the context is now
+limited by the KV cache and unified memory only. The default decode path is unchanged at 8,192 cells and
+below.
 
-- **Split-K attention** (q36_engine.cu's `k_attn_part` / `k_attn_merge` on Metal): one partial per (query
-  row, 256-cell chunk) in device scratch, a merge kernel folds the chunks and applies the gate. Engages
-  automatically above 8,192 cells, or at any length with `STRATA_Q36M_ATTN_SK=1` (the parity knob against
-  `k_attn`). Context is now limited by the KV cache, and the engine refuses a `--ctx` whose weights + KV +
-  state + scratch do not fit the recommended working set, with the numbers (`STRATA_Q36M_MEM_OK=1`
-  overrides; 8,192 and below is never refused).
-- **Chunked prompt prefill** (`--prefill N`, or `STRATA_Q36M_PREFILL=1` for 512): the chunk of T tokens
-  runs as T-wide dispatches — embedding rows in one dispatch, dense projections with the tokens walked
-  inside the threadgroup (`k_gemv_c` / `k_gemv_lpr8_c`: every weight row read once per chunk, each
-  (token, output) summed in the decode kernels' exact order), routed experts grouped per expert
-  (`k_hist` / `k_exp_off` / `k_place` entry tables on device atomics, `k_expc` walking each expert's
-  entries once), the conv in 16-token tiles and the delta rule sequential per token (`k_conv_chunk` /
-  `k_gdn_chunk`, the CUDA engine's tile mode with `k_conv` / `k_gdn`'s math), and attention through the
-  split-K kernels row by row-block. Every state the decode path keeps (recurrent S, conv history, KV
-  cache) is updated by the same arithmetic in the same order, and the prompt's last token still runs as a
-  decode window, which is where the logits come from.
+- **Split-K attention** (`k_attn_sk_part` / `k_attn_sk_merge` in `metal/kernels/q36.metal`, ported from
+  q36_engine.cu's `k_attn_part` / `k_attn_merge`): one partial per (query row, 256-cell chunk) in device
+  scratch — the chunk's scores, running max `m`, sum `l` and `P·V` accumulator — and a merge kernel that
+  folds the chunks (the online-softmax rescale) and applies the sigmoid gate. The math and its order
+  match the CUDA engine's kernels. The decode step passes the head's query rows; scratch is bounded by
+  `SK_ROWS_MAX = 256` rows per dispatch, sized once at startup from `--ctx`. The chunked-prefill path
+  reuses the same kernels row-blocked (`row0` per dispatch).
+- **Engagement**: automatic on the decode step as soon as `n_pos` passes 8,192 cells; at or below it the
+  original `k_attn` runs unchanged. `STRATA_Q36M_ATTN_SK=1` forces split-K at any length — the parity
+  knob against `k_attn` at short context.
+- **Memory gate at startup**: the engine refuses a `--ctx` above 8,192 whose weights + KV + SSM state +
+  conv state + attention scratch + 0.25 GB reserve exceed `recommended_working_set()`, and prints every
+  component in GB (`STRATA_Q36M_MEM_OK=1` overrides; 8,192 and below is never refused, so existing setups
+  behave exactly as before).
+- The kernels are written for `SK_HD = 256` (the qwen35moe head_dim); the host refuses anything else.
+  Program-scope constants in `q36.metal` are `enum`, not `constexpr` — MSL rejects the latter.
+- **Chunked prompt prefill** (`--prefill N`, or `STRATA_Q36M_PREFILL=1` for 512; in progress on the
+  feat/qwen36-metal line): the chunk of T tokens runs as T-wide dispatches — embedding rows in one
+  dispatch, dense projections with the tokens walked inside the threadgroup (`k_gemv_c` /
+  `k_gemv_lpr8_c`: every weight row read once per chunk, each (token, output) summed in the decode
+  kernels' exact order), routed experts grouped per expert (`k_tables` builds the entry tables in one
+  dispatch; `k_expc` walks each expert's entries once; the lpr8-typed gate/up run the decode kernel per
+  entry through `k_gather_t`), the conv in 16-token tiles and the delta rule sequential per token
+  (`k_conv_chunk` / `k_gdn_chunk`, the CUDA engine's tile mode with `k_conv` / `k_gdn`'s math), and
+  attention through the split-K kernels row by row-block. Every state the decode path keeps (recurrent
+  S, conv history, KV cache) is updated by the same arithmetic in the same order, and the prompt's last
+  token still runs as a decode window, which is where the logits come from. Prompts run token-by-token
+  unless `--prefill` is set.
 
-Gates (the tools/qwen35 gates speak the serve protocol and drive this engine directly):
+Gates, measured on the M2 (macOS 26.6.2) with the model file from §5, on this exact build (2026-10-18):
+the compile test creates all pipelines including the two split-K ones; forced split-K at 4K is 10/10
+token-identical to the default `k_attn` path (128-token greedy; the prompts that hit a stop condition
+agree on every token they share); `--ctx 32768` loads (READY 32768) and the 10 parity prompts generate
+without crashes, decode 16.9–19.3 tok/s. Prompt processing at 32K stays sequential per token and costs
+~1.1–2.3 s even for the ~30-token parity prompts (10.1 s on the first request after load) — the
+chunked-prefill work targets exactly that.
 
 ```bash
-# the reference run (the build before these commits, if it is still around: same commands without them)
+# the reference run
 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
   --args "--native $Q36_MODEL --ctx 4096" --out /tmp/q36-base.json
 # split-K forced at short context: tokens must equal the default path's
 STRATA_Q36M_ATTN_SK=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
   --args "--native $Q36_MODEL --ctx 4096" --out /tmp/q36-sk.json
+# long context: 32K boots and generates
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 32768" --out /tmp/q36-32k.json
 # chunked prefill: tokens must equal the token-by-token run's (the chunk kernels keep its exact order)
 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
   --args "--native $Q36_MODEL --ctx 4096 --prefill 512" --out /tmp/q36-chunk.json
 python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-base.json /tmp/q36-chunk.json
-# long context: a 2K-token prompt read, 128 generated, at 16K and 32K
+# long context with chunked prefill: a 2K-token prompt read, 128 generated, at 32K
 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
   --args "--native $Q36_MODEL --ctx 32768 --prefill 512" --out /tmp/q36-32k.json
 ```
