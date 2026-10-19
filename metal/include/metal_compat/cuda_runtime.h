@@ -46,12 +46,10 @@ inline constexpr unsigned cudaEventDisableTiming = strata::gpu::kEventDisableTim
 inline constexpr unsigned cudaEventBlockingSync = strata::gpu::kEventBlockingSync;
 inline constexpr unsigned cudaStreamNonBlocking = strata::gpu::kStreamNonBlocking;
 enum cudaStreamCaptureMode { cudaStreamCaptureModeGlobal = 0, cudaStreamCaptureModeThreadLocal = 1, cudaStreamCaptureModeRelaxed = 2 };
+// (the compute capability is asked by the 0.1.45 Turing defaults in verify.cpp: no answer here, which reads as "not a Turing card")
 enum cudaDeviceAttr {
-    cudaDevAttrClockRate = 13,
-    cudaDevAttrMultiProcessorCount = 16,
-    cudaDevAttrIntegrated = 18,
-    cudaDevAttrComputeCapabilityMajor = 75,
-    cudaDevAttrComputeCapabilityMinor = 76,
+    cudaDevAttrClockRate = 13, cudaDevAttrMultiProcessorCount = 16, cudaDevAttrIntegrated = 18,
+    cudaDevAttrComputeCapabilityMajor = 75, cudaDevAttrComputeCapabilityMinor = 76
 };
 
 // ---- errors, devices
@@ -71,19 +69,14 @@ inline cudaError_t cudaDeviceGetAttribute(int* v, cudaDeviceAttr a, int d) {
         case cudaDevAttrIntegrated: return strata::gpu::device_integrated(v, d);
         case cudaDevAttrMultiProcessorCount: return strata::gpu::device_sm_count(v, d);
         case cudaDevAttrClockRate: return strata::gpu::device_clock_khz(v, d);
-        case cudaDevAttrComputeCapabilityMajor: if (v) *v = 0; return strata::gpu::kSuccess;
-        case cudaDevAttrComputeCapabilityMinor: if (v) *v = 0; return strata::gpu::kSuccess;
+        case cudaDevAttrComputeCapabilityMajor:
+        case cudaDevAttrComputeCapabilityMinor: return strata::gpu::compat_detail::bad();
     }
     return strata::gpu::compat_detail::bad();
 }
 inline cudaError_t cudaDeviceCanAccessPeer(int* v, int d, int p) { return strata::gpu::device_can_access_peer(v, d, p); }
 inline cudaError_t cudaDeviceEnablePeerAccess(int p, unsigned f) { return strata::gpu::device_enable_peer_access(p, f); }
-inline cudaError_t cudaDeviceDisablePeerAccess(int p) { (void)p; return strata::gpu::kSuccess; }
-inline cudaError_t cudaDeviceGetStreamPriorityRange(int* lo, int* top) {
-    if (lo) *lo = 0;
-    if (top) *top = 0;
-    return strata::gpu::kSuccess;
-}
+inline cudaError_t cudaDeviceDisablePeerAccess(int) { return cudaSuccess; }   // a Mac has one GPU: nothing to disable
 
 // ---- memory and copies
 template <class T> inline cudaError_t cudaMalloc(T** p, size_t n) { return strata::gpu::malloc_device(p, n); }
@@ -104,21 +97,19 @@ inline cudaError_t cudaMemcpy2DAsync(void* d, size_t dp, const void* s, size_t s
                                      cudaStream_t st = nullptr) {
     return strata::gpu::memcpy_2d_async(d, dp, s, sp, w, h, k, st);
 }
-inline cudaError_t cudaMemcpyPeer(void* d, int dd, const void* s, int sd, size_t n) {
-    (void)dd; (void)sd;
-    return strata::gpu::memcpy_sync(d, s, n, strata::gpu::kCopyDefault);
-}
 inline cudaError_t cudaMemcpyPeerAsync(void* d, int dd, const void* s, int sd, size_t n, cudaStream_t st = nullptr) {
     return strata::gpu::memcpy_peer_async(d, dd, s, sd, n, st);
+}
+inline cudaError_t cudaMemcpyPeer(void* d, int dd, const void* s, int sd, size_t n) {
+    const cudaError_t e = cudaMemcpyPeerAsync(d, dd, s, sd, n, nullptr);
+    return e != cudaSuccess ? e : cudaDeviceSynchronize();
 }
 
 // ---- streams, events, host functions
 inline cudaError_t cudaStreamCreate(cudaStream_t* s) { return strata::gpu::stream_create(s); }
 inline cudaError_t cudaStreamCreateWithFlags(cudaStream_t* s, unsigned f) { return strata::gpu::stream_create(s, f); }
-inline cudaError_t cudaStreamCreateWithPriority(cudaStream_t* s, unsigned f, int p) {
-    (void)p;
-    return strata::gpu::stream_create(s, f);
-}
+inline cudaError_t cudaDeviceGetStreamPriorityRange(int*, int*) { return strata::gpu::compat_detail::bad(); }   // no priorities: callers fall back to a plain stream
+inline cudaError_t cudaStreamCreateWithPriority(cudaStream_t* s, unsigned f, int) { return strata::gpu::stream_create(s, f); }
 inline cudaError_t cudaStreamDestroy(cudaStream_t s) { return strata::gpu::stream_destroy(s); }
 inline cudaError_t cudaStreamSynchronize(cudaStream_t s) { return strata::gpu::stream_synchronize(s); }
 inline cudaError_t cudaStreamQuery(cudaStream_t s) { return strata::gpu::stream_query(s); }
