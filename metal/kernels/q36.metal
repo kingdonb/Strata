@@ -302,6 +302,17 @@ kernel void k_gated_norm(device float* o [[buffer(0)]],
     oh[tid] = v * rsqrt(s / float(D) + eps) * w[tid] * silu(z[(ulong)h * D + tid]);
 }
 
+// --kv-f16 (STRATA_KV_F16): the KV caches (kc/vc) store half floats.  Every load unpacks to fp32 at
+// the load site (an identity cast in the default build), every store rounds once ((KV_T)v, round-to-
+// nearest-even); the arithmetic chains between stay fp32 - only storage changes.  The engine compiles
+// this file twice (metal/src/engine/q36_metal.cpp Pipelines::init_kv_f16) and selects the flagged
+// pipelines only when --kv-f16 is passed.
+#ifdef STRATA_KV_F16
+typedef half KV_T;
+#else
+typedef float KV_T;
+#endif
+
 kernel void k_attn_prep(device const float* qg [[buffer(0)]],
                         device const float* kx [[buffer(1)]],
                         device const float* vx [[buffer(2)]],
@@ -309,8 +320,8 @@ kernel void k_attn_prep(device const float* qg [[buffer(0)]],
                         device const float* kw [[buffer(4)]],
                         device float* q [[buffer(5)]],
                         device float* gate [[buffer(6)]],
-                        device float* kc [[buffer(7)]],
-                        device float* vc [[buffer(8)]],
+                        device KV_T* kc [[buffer(7)]],
+                        device KV_T* vc [[buffer(8)]],
                         constant int& H [[buffer(9)]],
                         constant int& D [[buffer(10)]],
                         constant int& n_rot [[buffer(11)]],
@@ -340,7 +351,6 @@ kernel void k_attn_prep(device const float* qg [[buffer(0)]],
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    device float* dst = isq ? q + (ulong)head * D : kc + ((ulong)(head - H) * ctx + pos) * D;
     const int half_rot = n_rot / 2;
     for (int i = tid; i < D; i += 128) {
         float v = buf[i];
@@ -350,7 +360,8 @@ kernel void k_attn_prep(device const float* qg [[buffer(0)]],
             float cs = cos(theta), sn = sin(theta);
             v = (i < half_rot) ? buf[i] * cs - buf[i + half_rot] * sn : buf[i - half_rot] * sn + buf[i] * cs;
         }
-        dst[i] = v;
+        if (isq) q[(ulong) head * D + i] = v;
+        else kc[((ulong)(head - H) * ctx + pos) * D + i] = (KV_T) v;
     }
     if (isq) {
         for (int i = tid; i < D; i += 128) {
@@ -358,14 +369,14 @@ kernel void k_attn_prep(device const float* qg [[buffer(0)]],
         }
     } else {
         for (int i = tid; i < D; i += 128) {
-            vc[((ulong)(head - H) * ctx + pos) * D + i] = vx[(ulong)(head - H) * D + i];
+            vc[((ulong)(head - H) * ctx + pos) * D + i] = (KV_T) vx[(ulong)(head - H) * D + i];
         }
     }
 }
 
 kernel void k_attn(device const float* q [[buffer(0)]],
-                   device const float* kc [[buffer(1)]],
-                   device const float* vc [[buffer(2)]],
+                   device const KV_T* kc [[buffer(1)]],
+                   device const KV_T* vc [[buffer(2)]],
                    device const float* gate [[buffer(3)]],
                    device float* out [[buffer(4)]],
                    constant int& H [[buffer(5)]],
@@ -384,9 +395,9 @@ kernel void k_attn(device const float* q [[buffer(0)]],
     device const float* qh = q + (ulong)h * D;
 
     for (int p = tid; p < n_pos; p += 128) {
-        device const float* kp = kc + ((ulong)kvh * ctx + p) * D;
+        device const KV_T* kp = kc + ((ulong)kvh * ctx + p) * D;
         float s = 0.0f;
-        for (int i = 0; i < D; ++i) s += qh[i] * kp[i];
+        for (int i = 0; i < D; ++i) s += qh[i] * float(kp[i]);
         sc[p] = s * scale;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -415,7 +426,7 @@ kernel void k_attn(device const float* q [[buffer(0)]],
 
     for (int i = tid; i < D; i += 128) {
         float acc = 0.0f;
-        for (int p = 0; p < n_pos; ++p) acc += sc[p] * vc[((ulong)kvh * ctx + p) * D + i];
+        for (int p = 0; p < n_pos; ++p) acc += sc[p] * float(vc[((ulong)kvh * ctx + p) * D + i]);
         out[(ulong)h * D + i] = (acc * inv_sum) * sigm(gate[(ulong)h * D + i]);
     }
 }
@@ -549,8 +560,8 @@ static inline float sk_sum(float v, threadgroup float* sh, ushort lane, ushort s
 }
 
 kernel void k_attn_sk_part(device const float* q [[buffer(0)]],
-                           device const float* kc [[buffer(1)]],
-                           device const float* vc [[buffer(2)]],
+                           device const KV_T* kc [[buffer(1)]],
+                           device const KV_T* vc [[buffer(2)]],
                            constant int& H [[buffer(3)]],
                            constant int& HKV [[buffer(4)]],
                            constant int& ctx [[buffer(5)]],
@@ -582,9 +593,9 @@ kernel void k_attn_sk_part(device const float* q [[buffer(0)]],
     const int p = p0 + j;
     float s = -INFINITY;
     if (p < npos) {
-        device const float* kp = kc + ((ulong) kvh * ctx + p) * SK_HD;
+        device const KV_T* kp = kc + ((ulong) kvh * ctx + p) * SK_HD;
         float a = 0.0f;
-        for (int i = 0; i < SK_HD; ++i) a += qs[i] * kp[i];
+        for (int i = 0; i < SK_HD; ++i) a += qs[i] * float(kp[i]);
         s = a * scale;
     }
     const float m = sk_max(s, sh, lane, sgid);
@@ -594,8 +605,8 @@ kernel void k_attn_sk_part(device const float* q [[buffer(0)]],
 
     const int n = min(SK_CELLS, npos - p0);
     float acc = 0.0f;
-    device const float* vp = vc + ((ulong) kvh * ctx + p0) * SK_HD + j;
-    for (int k = 0; k < n; ++k) acc += sc[k] * vp[(ulong) k * SK_HD];
+    device const KV_T* vp = vc + ((ulong) kvh * ctx + p0) * SK_HD + j;
+    for (int k = 0; k < n; ++k) acc += sc[k] * float(vp[(ulong) k * SK_HD]);
 
     const ulong o = (ulong) (row - row0) * (ulong) n_chunk + (ulong) c;
     pacc[o * SK_HD + j] = acc;
@@ -655,7 +666,7 @@ kernel void k_attn_sk_merge(device const float* pacc [[buffer(0)]],
 // [head][cell] (row stride n_pos, the GLOBAL head index - all HKV groups' rows live at once);
 // the merge kernel finds the per-head max from them (exact, tree-free).
 kernel void k_attn_gqa_part(device const float* q [[buffer(0)]],
-                            device const float* kc [[buffer(1)]],
+                            device const KV_T* kc [[buffer(1)]],
                             device float* scr [[buffer(2)]],
                             constant int& H [[buffer(3)]],
                             constant int& HKV [[buffer(4)]],
@@ -674,11 +685,11 @@ kernel void k_attn_gqa_part(device const float* q [[buffer(0)]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (p < n_pos) {
-        device const float* kp = kc + ((ulong) kvh * ctx + p) * D;
+        device const KV_T* kp = kc + ((ulong) kvh * ctx + p) * D;
         for (int hh = 0; hh < HG; ++hh) {
             threadgroup const float* qh = qs + (ulong) hh * D;
             float s = 0.0f;
-            for (int i = 0; i < D; ++i) s += qh[i] * kp[i];   // k_attn's exact chain
+            for (int i = 0; i < D; ++i) s += qh[i] * float(kp[i]);   // k_attn's exact chain
             scr[(ulong)(kvh * HG + hh) * n_pos + p] = s * scale;
         }
     }
@@ -694,7 +705,7 @@ kernel void k_attn_gqa_part(device const float* q [[buffer(0)]],
 // measured deep-decode collapse.  Hoisting the head loop into the grid restores the occupancy
 // and the per-head-once V reads while keeping every chain's arithmetic identical.)  The tile is
 // n_pos floats, the same threadgroup budget k_attn's score buffer takes.
-kernel void k_attn_gqa_merge(device const float* vc [[buffer(0)]],
+kernel void k_attn_gqa_merge(device const KV_T* vc [[buffer(0)]],
                              device const float* gate [[buffer(1)]],
                              device const float* scr [[buffer(2)]],
                              device float* out [[buffer(3)]],
@@ -738,7 +749,7 @@ kernel void k_attn_gqa_merge(device const float* vc [[buffer(0)]],
 
     for (int i = (int) tid; i < D; i += 128) {
         float acc = 0.0f;
-        for (int p = 0; p < n_pos; ++p) acc += et[p] * vc[((ulong) kvh * ctx + p) * D + i];
+        for (int p = 0; p < n_pos; ++p) acc += et[p] * float(vc[((ulong) kvh * ctx + p) * D + i]);
         out[h * D + i] = (acc * inv_sum) * sigm(gate[h * D + i]);
     }
 }
@@ -753,8 +764,8 @@ kernel void k_attn_gqa_merge(device const float* vc [[buffer(0)]],
 // Threadgroup budget: HG * (SK_HD + 8 + SK_CELLS) floats - the host refuses HG past the 32 KB
 // ceiling (HG <= 15 at SK_HD = 256).
 kernel void k_attn_sk_part_gqa(device const float* q [[buffer(0)]],
-                               device const float* kc [[buffer(1)]],
-                               device const float* vc [[buffer(2)]],
+                               device const KV_T* kc [[buffer(1)]],
+                               device const KV_T* vc [[buffer(2)]],
                                constant int& H [[buffer(3)]],
                                constant int& HKV [[buffer(4)]],
                                constant int& ctx [[buffer(5)]],
@@ -790,14 +801,14 @@ kernel void k_attn_sk_part_gqa(device const float* q [[buffer(0)]],
 
     const int p = p0 + j;
     const int n = min(SK_CELLS, npos - p0);
-    device const float* vp = vc + ((ulong) kvh * ctx + p0) * SK_HD + j;
+    device const KV_T* vp = vc + ((ulong) kvh * ctx + p0) * SK_HD + j;
     for (int hh = 0; hh < HG; ++hh) {
         const ulong o = (ulong)(kvh * HG + hh) * (ulong) n_chunk + (ulong) c;
         float s = -INFINITY;
         if (p < npos) {
-            device const float* kp = kc + ((ulong) kvh * ctx + p) * SK_HD;
+            device const KV_T* kp = kc + ((ulong) kvh * ctx + p) * SK_HD;
             float a = 0.0f;
-            for (int i = 0; i < SK_HD; ++i) a += qs[(ulong) hh * SK_HD + i] * kp[i];
+            for (int i = 0; i < SK_HD; ++i) a += qs[(ulong) hh * SK_HD + i] * float(kp[i]);
             s = a * scale;
         }
         const float m = sk_max(s, shs + (ulong) hh * 8, lane, sgid);
@@ -807,7 +818,7 @@ kernel void k_attn_sk_part_gqa(device const float* q [[buffer(0)]],
         const float l = sk_sum(e, shs + (ulong) hh * 8, lane, sgid);
 
         float acc = 0.0f;
-        for (int k = 0; k < n; ++k) acc += scs[(ulong) hh * SK_CELLS + k] * vp[(ulong) k * SK_HD];
+        for (int k = 0; k < n; ++k) acc += scs[(ulong) hh * SK_CELLS + k] * float(vp[(ulong) k * SK_HD]);
         pacc[o * SK_HD + j] = acc;
         if (tid == 0) {
             pm[o] = m;
@@ -1329,8 +1340,8 @@ kernel void k_attn_prep_chunk(device const float* qg [[buffer(0)]],
                               device const float* kw [[buffer(4)]],
                               device float* q [[buffer(5)]],
                               device float* gate [[buffer(6)]],
-                              device float* kc [[buffer(7)]],
-                              device float* vc [[buffer(8)]],
+                              device KV_T* kc [[buffer(7)]],
+                              device KV_T* vc [[buffer(8)]],
                               constant int& H [[buffer(9)]],
                               constant int& HKV [[buffer(10)]],
                               constant int& D [[buffer(11)]],
@@ -1365,8 +1376,6 @@ kernel void k_attn_prep_chunk(device const float* qg [[buffer(0)]],
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    device float* dst = isq ? q + (ulong) (t * H + (int) head) * D
-                            : kc + ((ulong)(head - H) * ctx + pos) * D;
     const int half_rot = n_rot / 2;
     for (int i = tid; i < D; i += 128) {
         float v = buf[i];
@@ -1376,7 +1385,8 @@ kernel void k_attn_prep_chunk(device const float* qg [[buffer(0)]],
             float cs = cos(theta), sn = sin(theta);
             v = (i < half_rot) ? buf[i] * cs - buf[i + half_rot] * sn : buf[i - half_rot] * sn + buf[i] * cs;
         }
-        dst[i] = v;
+        if (isq) q[(ulong) (t * H + (int) head) * D + i] = v;
+        else kc[((ulong)(head - H) * ctx + pos) * D + i] = (KV_T) v;
     }
     if (isq) {
         for (int i = tid; i < D; i += 128) {
@@ -1384,7 +1394,7 @@ kernel void k_attn_prep_chunk(device const float* qg [[buffer(0)]],
         }
     } else {
         for (int i = tid; i < D; i += 128) {
-            vc[((ulong)(head - H) * ctx + pos) * D + i] = vx[(ulong) t * HKV * D + (ulong)(head - H) * D + i];
+            vc[((ulong)(head - H) * ctx + pos) * D + i] = (KV_T) vx[(ulong) t * HKV * D + (ulong)(head - H) * D + i];
         }
     }
 }

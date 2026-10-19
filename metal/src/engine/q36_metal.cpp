@@ -213,6 +213,14 @@ struct Pipelines {
     mtl::Pipeline p_rms, p_conv, p_gdn_gb, p_gdn, p_gated_norm, p_attn_prep, p_attn, p_swiglu, p_add, p_moe_sum, p_topk_router;
     mtl::Pipeline p_attn_sk_part, p_attn_sk_merge;
     mtl::Pipeline p_attn_gqa_part, p_attn_gqa_merge, p_attn_sk_part_gqa;   // the GQA-folded kernels
+    // --kv-f16 (init_kv_f16): the same seven KV kernels from a second runtime compile with STRATA_KV_F16
+    // defined - same names, same arity, half caches.  Only flagged runs pay the ~1-2 s compile; the
+    // default lib and every pipeline above are untouched otherwise.
+    bool kv_f16 = false;
+    int lib_f16 = -1;
+    mtl::Pipeline p_attn_prep_f16, p_attn_f16, p_attn_sk_part_f16;
+    mtl::Pipeline p_attn_gqa_part_f16, p_attn_gqa_merge_f16, p_attn_sk_part_gqa_f16;
+    mtl::Pipeline p_attn_prep_c_f16;
     // prompt-chunk pipelines (init_prompt, when --prefill is on)
     std::map<int, mtl::Pipeline> p_emb_c, p_gemv_c, p_expc;
     mtl::Pipeline p_route_c, p_tables, p_moe_sum_c, p_conv_c, p_gdn_c, p_gated_norm_c, p_attn_prep_c;
@@ -281,6 +289,22 @@ struct Pipelines {
         get_row(T_IQ2_XS, "k_row_T_IQ2_XS");
         get_row(T_IQ3_XXS, "k_row_T_IQ3_XXS");
         get_row(T_IQ4_XS, "k_row_T_IQ4_XS");
+    }
+
+    // The STRATA_KV_F16 lib: the second runtime compile that --kv-f16 runs pay (the prelude define goes
+    // through the hole mtl_rt's compile already has), then the seven KV-kernel pipelines from it.
+    // Called from run() right after init() and only when the flag is set - the no-flag startup does
+    // nothing extra, and k_attn_sk_merge stays on the default lib (it reads the float partials, not K/V).
+    void init_kv_f16(mtl::Context& cx) {
+        kv_f16 = true;
+        lib_f16 = cx.compile({"quant.metal", "q36.metal"}, "#define STRATA_KV_F16 1\n");
+        p_attn_prep_f16 = cx.pipeline(lib_f16, "k_attn_prep");
+        p_attn_f16 = cx.pipeline(lib_f16, "k_attn");
+        p_attn_sk_part_f16 = cx.pipeline(lib_f16, "k_attn_sk_part");
+        p_attn_gqa_part_f16 = cx.pipeline(lib_f16, "k_attn_gqa_part");
+        p_attn_gqa_merge_f16 = cx.pipeline(lib_f16, "k_attn_gqa_merge");
+        p_attn_sk_part_gqa_f16 = cx.pipeline(lib_f16, "k_attn_sk_part_gqa");
+        p_attn_prep_c_f16 = cx.pipeline(lib_f16, "k_attn_prep_chunk");
     }
 
     // The prompt-chunk kernels (k_*_chunk / k_gemv_c / k_expc): compiled and created only when --prefill
@@ -388,6 +412,7 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
     // rows, the MTP draft rows - gets the fold with no threading to miss; run() reads the same env
     // once for the startup guard and the score scratch.
     const bool gqa = env_flag("STRATA_Q36M_ATTN_GQA");
+    const bool kf = pipes.kv_f16;   // --kv-f16: the reader pipelines come from the STRATA_KV_F16 lib
     const int HG = H / HKV;
     for (int i = 0; i < rows; ++i) {
         const int n_pos = (int) pos0 + i + 1;
@@ -398,7 +423,8 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
             }
             const int n_chunk = (n_pos + SK_CELLS - 1) / SK_CELLS;
             mtl::Dispatch d;
-            d.p = gqa ? &pipes.p_attn_sk_part_gqa : &pipes.p_attn_sk_part;
+            d.p = gqa ? (kf ? &pipes.p_attn_sk_part_gqa_f16 : &pipes.p_attn_sk_part_gqa)
+                      : (kf ? &pipes.p_attn_sk_part_f16 : &pipes.p_attn_sk_part);
             d.args = {mtl::Arg::B(q), mtl::Arg::B(kc), mtl::Arg::B(vc),
                       mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(s.ctx), mtl::Arg::V(scale),
                       mtl::Arg::V(n_chunk), mtl::Arg::V((int) pos0), mtl::Arg::V(i * H),
@@ -423,7 +449,7 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
             // then the per-head one-pass softmax + P.V against one V read - k_attn's exact
             // arithmetic per head, see the kernels' contract comment
             mtl::Dispatch d;
-            d.p = &pipes.p_attn_gqa_part;
+            d.p = kf ? &pipes.p_attn_gqa_part_f16 : &pipes.p_attn_gqa_part;
             d.args = {mtl::Arg::B(q, 4 * (size_t) i * H * D), mtl::Arg::B(kc), mtl::Arg::B(s.gqa_scr),
                       mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(D), mtl::Arg::V(n_pos), mtl::Arg::V(s.ctx),
                       mtl::Arg::V(scale)};
@@ -434,7 +460,7 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
             d.barrier = true;
             ds.push_back(d);
             mtl::Dispatch dm;
-            dm.p = &pipes.p_attn_gqa_merge;
+            dm.p = kf ? &pipes.p_attn_gqa_merge_f16 : &pipes.p_attn_gqa_merge;
             dm.args = {mtl::Arg::B(vc), mtl::Arg::B(gate, 4 * (size_t) i * H * D), mtl::Arg::B(s.gqa_scr),
                        mtl::Arg::B(att, 4 * (size_t) i * H * D), mtl::Arg::V(H), mtl::Arg::V(HKV),
                        mtl::Arg::V(D), mtl::Arg::V(n_pos), mtl::Arg::V(s.ctx)};
@@ -446,7 +472,7 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
             ds.push_back(dm);
         } else {
             mtl::Dispatch d;
-            d.p = &pipes.p_attn;
+            d.p = kf ? &pipes.p_attn_f16 : &pipes.p_attn;
             d.args = {mtl::Arg::B(q, 4 * (size_t) i * H * D), mtl::Arg::B(kc), mtl::Arg::B(vc),
                       mtl::Arg::B(gate, 4 * (size_t) i * H * D), mtl::Arg::B(att, 4 * (size_t) i * H * D),
                       mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(D), mtl::Arg::V(n_pos), mtl::Arg::V(s.ctx),
@@ -595,7 +621,7 @@ void forward_token(mtl::Context& cx, const Pipelines& pipes, const Model& m, Sta
                 const int H_val = H, D_val = D, n_rot_val = m.n_rot, pos_val = s.pos, ctx_val = s.ctx;
                 const float base_val = m.rope_base, eps_val = m.eps;
                 mtl::Dispatch d;
-                d.p = &pipes.p_attn_prep;
+                d.p = pipes.kv_f16 ? &pipes.p_attn_prep_f16 : &pipes.p_attn_prep;
                 d.args = {mtl::Arg::B(s.qg), mtl::Arg::B(s.k), mtl::Arg::B(s.v),
                           mtl::Arg::B(m.F(L(l, "attn_q_norm.weight"))), mtl::Arg::B(m.F(L(l, "attn_k_norm.weight"))),
                           mtl::Arg::B(s.q), mtl::Arg::B(s.gate), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]),
@@ -1045,7 +1071,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             push_c_gemv(ds, pipes, m.W(L(l, "attn_v.weight")), s.hc, s.v_c, nt, N);
             {
                 mtl::Dispatch d;
-                d.p = &pipes.p_attn_prep_c;
+                d.p = pipes.kv_f16 ? &pipes.p_attn_prep_c_f16 : &pipes.p_attn_prep_c;
                 d.args = {mtl::Arg::B(s.qg_c), mtl::Arg::B(s.k_c), mtl::Arg::B(s.v_c),
                           mtl::Arg::B(m.F(L(l, "attn_q_norm.weight"))), mtl::Arg::B(m.F(L(l, "attn_k_norm.weight"))),
                           mtl::Arg::B(s.q_c), mtl::Arg::B(s.gate_c), mtl::Arg::B(s.kc[l]), mtl::Arg::B(s.vc[l]),
@@ -1357,7 +1383,7 @@ static void push_mtp_block_row(std::vector<mtl::Dispatch>& ds, const Pipelines& 
     push_gemv(ds, pipes, m.W(L(l, "attn_v.weight")), s.h, s.v, nullptr, 1, 0, false);
     {
         mtl::Dispatch d;
-        d.p = &pipes.p_attn_prep;
+        d.p = pipes.kv_f16 ? &pipes.p_attn_prep_f16 : &pipes.p_attn_prep;
         d.args = {mtl::Arg::B(s.qg), mtl::Arg::B(s.k), mtl::Arg::B(s.v),
                   mtl::Arg::B(m.F(L(l, "attn_q_norm.weight"))), mtl::Arg::B(m.F(L(l, "attn_k_norm.weight"))),
                   mtl::Arg::B(s.q), mtl::Arg::B(s.gate), mtl::Arg::B(s.mtp_kc), mtl::Arg::B(s.mtp_vc),
@@ -1590,6 +1616,7 @@ int run(int argc, char** argv) {
     bool serve_mode = false;
     int mtp_d = 0;           // --mtp N: MTP draft tokens per speculative step (0 = off, as before)
     int draft_vocab = -1;    // --draft-vocab N: the MTP drafts pick among the first N rows of the head (-1 = unset)
+    bool kv_f16 = false;     // --kv-f16: the QSA KV caches (and the MTP draft cache) store fp16
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -1634,6 +1661,10 @@ int run(int argc, char** argv) {
             // src/qwen35/q36_engine.cu, takes the same integer here; a subset FILE is Flash-Next's
             // --mtp-draft-vocab, a different name)
             draft_vocab = std::atoi(argv[++i]);
+        } else if (a == "--kv-f16") {
+            kv_f16 = true;
+            std::fprintf(stderr, "strata metal q36: --kv-f16: the QSA KV caches (and the MTP draft cache) store "
+                                 "fp16, unpacked to fp32 in the attention kernels\n");
         }
     }
     if (prefill_chunk < 0) prefill_chunk = 0;
@@ -1657,6 +1688,7 @@ int run(int argc, char** argv) {
 
     Pipelines pipes;
     pipes.init(cx);
+    if (kv_f16) pipes.init_kv_f16(cx);   // the second runtime compile + the seven f16 pipelines, flagged runs only
 
     Model m;
     std::string err;
@@ -1909,13 +1941,23 @@ int run(int argc, char** argv) {
         if (mtp_d > 0) {
             int64_t n_gdn = 0;
             for (int64_t l = 0; l < g.n_layers; ++l) if (!strata::core::is_qsa_layer(g, l)) ++n_gdn;
-            mtp_bytes = 2 * (uint64_t) g.n_head_kv * (size_t) ctx * g.head_dim * 4   // the draft block's cache
+            mtp_bytes = 2 * (uint64_t) g.n_head_kv * (size_t) ctx * g.head_dim * (kv_f16 ? 2 : 4)   // the draft block's cache
                         + (uint64_t) n_gdn * ((g.ssm_d_conv - 1) * g.ssm_conv_channels
                                               + g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size) * 4
                         + (2 * (size_t) g.n_embd + 3 * (size_t) g.n_embd + g.n_vocab
                            + (size_t) (mtp_d + 1) * (g.n_embd + g.n_vocab)) * 4;   // the draft/window scratch
         }
-        const uint64_t est = cx.allocated() + mtp_bytes + (256ull << 20);
+        // --kv-f16: est also counts the main KV caches it is about to allocate (they halve under the flag,
+        // so a bigger ctx can fit).  The default path's est stays exactly as it has always been - it has
+        // never counted the per-layer KV (they allocate below this gate), and the fp32 refusal behavior
+        // is frozen (requirements OQ1).
+        uint64_t kv_est = 0;
+        if (kv_f16) {
+            int64_t n_qsa = 0;
+            for (int64_t l = 0; l < g.n_layers; ++l) if (strata::core::is_qsa_layer(g, l)) ++n_qsa;
+            kv_est = (uint64_t) n_qsa * 2 * (uint64_t) g.n_head_kv * (uint64_t) ctx * (uint64_t) g.head_dim * 2;
+        }
+        const uint64_t est = cx.allocated() + mtp_bytes + kv_est + (256ull << 20);
         const uint64_t rec = cx.recommended_working_set();
         if ((ctx > SK_TG_CAP || prefill_chunk > 0 || mtp_d > 0) && est > rec && !env_flag("STRATA_Q36M_MEM_OK")) {
             std::fprintf(stderr,
@@ -1931,7 +1973,9 @@ int run(int argc, char** argv) {
         if (strata::core::is_qsa_layer(g, l)) {
             s.conv_state.push_back({});
             s.S.push_back({});
-            const size_t cache_bytes = (size_t) g.n_head_kv * s.ctx * g.head_dim * sizeof(float);
+            const size_t cache_bytes =
+                (size_t) g.n_head_kv * s.ctx * g.head_dim * (kv_f16 ? 2 : 4);   // fp16 KV: 2 B/elem (the host
+                // never reads or writes KV values - the memsets only; zero bytes are zero half)
             s.kc.push_back(cx.alloc(cache_bytes));
             s.vc.push_back(cx.alloc(cache_bytes));
             std::memset(s.kc.back().ptr, 0, cache_bytes);
@@ -1951,7 +1995,7 @@ int run(int argc, char** argv) {
     // MTP speculative decoding (--mtp N): the draft block's own KV cache (it is a full-attention
     // layer), the verify window's scratch recurrent states, and the draft/window scratch.
     if (mtp_d > 0) {
-        const size_t cache_bytes = (size_t) g.n_head_kv * s.ctx * g.head_dim * sizeof(float);
+        const size_t cache_bytes = (size_t) g.n_head_kv * s.ctx * g.head_dim * (kv_f16 ? 2 : 4);   // fp16 KV: 2 B/elem
         s.mtp_kc = cx.alloc(cache_bytes);
         s.mtp_vc = cx.alloc(cache_bytes);
         std::memset(s.mtp_kc.ptr, 0, cache_bytes);
@@ -1975,6 +2019,28 @@ int run(int argc, char** argv) {
         s.logits_w = cx.alloc((size_t) (mtp_d + 1) * g.n_vocab * sizeof(float));
         std::fprintf(stderr, "strata metal q36: mtp %d drafts: the draft block's cache and the window's "
                              "scratch states are up\n", mtp_d);
+    }
+
+    // --kv-f16: the real KV numbers (gate 5's measurement - the memory table in docs/QWEN36_METAL.md §9
+    // reads off this line).
+    if (kv_f16) {
+        int64_t n_qsa = 0;
+        for (int64_t l = 0; l < g.n_layers; ++l) if (strata::core::is_qsa_layer(g, l)) ++n_qsa;
+        const uint64_t kv16 = (uint64_t) n_qsa * 2 * (uint64_t) g.n_head_kv * (uint64_t) s.ctx * (uint64_t) g.head_dim * 2;
+        if (mtp_d > 0) {
+            const uint64_t d16 = 2 * (uint64_t) g.n_head_kv * (uint64_t) s.ctx * (uint64_t) g.head_dim * 2;
+            std::fprintf(stderr,
+                         "strata metal q36: --kv-f16: KV caches fp16: %lld QSA layers x 2 (K,V) x %lld KV heads x "
+                         "%d ctx x %d dims x 2 B = %.2f GB (fp32: %.2f GB); draft block %.2f GB (fp32: %.2f GB)\n",
+                         (long long) n_qsa, (long long) g.n_head_kv, s.ctx, (int) g.head_dim,
+                         kv16 / 1e9, kv16 * 2.0 / 1e9, d16 / 1e9, d16 * 2.0 / 1e9);
+        } else {
+            std::fprintf(stderr,
+                         "strata metal q36: --kv-f16: KV caches fp16: %lld QSA layers x 2 (K,V) x %lld KV heads x "
+                         "%d ctx x %d dims x 2 B = %.2f GB (fp32: %.2f GB)\n",
+                         (long long) n_qsa, (long long) g.n_head_kv, s.ctx, (int) g.head_dim,
+                         kv16 / 1e9, kv16 * 2.0 / 1e9);
+        }
     }
 
     auto sample_next = [&](float temp, float top_p) -> int {

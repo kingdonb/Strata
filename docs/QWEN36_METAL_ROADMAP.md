@@ -110,6 +110,26 @@ memory difference at 8K and 32K; the documented text difference. Plus: profile h
 ≥2 ms/token, preserving the RNG stream and the chosen tokens.
 Gates: the memory and profile numbers measured; sampled parity with a fixed seed.
 
+State (2026-10-19): the KV half is implemented on `feature/000680-fp16-kv-cache-kv-f16-for` — the
+`KV_T` typedef and the seven kernels' half caches under a `STRATA_KV_F16` prelude define (a second
+runtime compile only flagged runs pay for), the engine's `--kv-f16` flag, selection, allocation math
+(2 B/elem), the flagged working-set `est` term, and the parity harness's f16 mode with the cross
+stage (both libs bit-identical on half-exact caches; the random-cache rel-L1 bounded 1e-3, the CUDA
+`qsa_parity` precedent). Mechanism, kernel table and memory math: docs/QWEN36_METAL.md §9. The M2
+gates all ran green the same day (2026-10-19, build `5bcf2485`): the compile test creates the f16
+lib's seven pipelines; `q36_chunk_parity` is all-OK in both modes (the f16 cross stage bit-identical
+on half-exact caches, the random-cache rel-L1 measured at 1.75e-4 vs the 1e-3 bound); the no-flag
+base json is 10/10 against the pre-change build's (the byte-identical default path); two flagged
+ladder runs are 10/10 identical, and the fp32-vs-f16 text difference is 7 of 10 prompts
+token-identical, first divergence at generated tokens 46–100 of ≤128 (the positions in §9); the KV
+lines read 0.17 GB (fp32 0.34) at 8K and 0.67 GB (fp32 1.34) at 32K; the SK/GQA/MTP cross-checks and
+the `--draft-vocab` composition are all 10/10. The KV half is green — delivered, strictly opt-in.
+The sampling
+half (the profile, the ≥2 ms/token GPU argmax prefilter gate, the fixed-seed parity gate) moves to
+its own card; the hours-class benchmark matrix (the deep-decode tok/s A/B the halved KV traffic
+should buy) is deliberately deferred until the dimensional-improvements showcase — its ready-to-run
+command is in §9.
+
 ## T6 — GQA-folded attention: one K/V read per KV-head group (new idea, from T3's first measurements)
 
 State: built on the delivery branch `feature/000681-gqa-folded-attention-one` (2026-10-19): the folded

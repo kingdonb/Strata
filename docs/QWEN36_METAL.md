@@ -65,9 +65,10 @@ To rapidly achieve 100% numerical correctness, zero host regressions, and clean 
 - **Rationale**: Simplifies synchronization, prevents resource contention on M2's unified shader cores, and ensures deterministic completion.
 
 ### 3.3. FP32 Activations and KV-Cache
-- **Current State**: All intermediate activation vectors (`x`, `h`, `y`, `qkv`, `z`, `S`) and the KV cache are allocated in 32-bit floating point (`float`).
+- **Current State**: All intermediate activation vectors (`x`, `h`, `y`, `qkv`, `z`, `S`) are allocated in 32-bit floating point (`float`), and the KV cache defaults to fp32.
 - **Concession**: KV cache and activations use 2x the memory compared to FP16/BF16.
 - **Rationale**: Eliminates underflow/overflow risks during the GDN delta-rule recurrence ($S_t = S_{t-1} + \dots$) and norm scaling, ensuring identical output quality.
+- **Update (2026-10-19)**: the KV-cache half of this concession is now opt-in — `--kv-f16` stores K and V as fp16 with the fp32 unpack inside the kernels (§9). The activations and the GDN's S/conv states stay fp32, and the default path is unchanged.
 
 ### 3.4. Threadgroup Memory Ceiling in `k_attn`
 - **Current State**: In `k_attn`, attention scores `sc` are allocated in dynamic threadgroup memory (`d.tg_mem = (pos + 1) * sizeof(float)`).
@@ -110,6 +111,7 @@ If you have unlimited time, compute, and optimization resources, here is the pri
   - Store `kc` and `vc` as FP16 (or BF16).
   - Unpack to FP32 during dot-product in `k_attn`.
   - **Impact**: Halves KV cache memory to **20 KB / token**. A 64K context window will take only **1.28 GB** instead of 2.56 GB!
+- **Delivered (2026-10-19)**: `--kv-f16`, FP16 only, strictly opt-in — the mechanism, kernels, memory math and gates are §9. (BF16 remains a possible follow-up if a measured need appears.)
 
 ### Priority 5: SIMD-Group Matrix Operations (AMX / Apple Neural Accelerators)
 - **Problem**: GEMV dequantization executes via scalar SIMD lanes.
@@ -152,10 +154,15 @@ below.
 - **Engagement**: automatic on the decode step as soon as `n_pos` passes 8,192 cells; at or below it the
   original `k_attn` runs unchanged. `STRATA_Q36M_ATTN_SK=1` forces split-K at any length — the parity
   knob against `k_attn` at short context.
-- **Memory gate at startup**: the engine refuses a `--ctx` above 8,192 whose weights + KV + SSM state +
-  conv state + attention scratch + 0.25 GB reserve exceed `recommended_working_set()`, and prints every
-  component in GB (`STRATA_Q36M_MEM_OK=1` overrides; 8,192 and below is never refused, so existing setups
-  behave exactly as before).
+- **Memory gate at startup**: before the per-layer caches allocate, the engine refuses a `--ctx` above
+  8,192 (and `--prefill`/`--mtp` runs at any context) when its working-set estimate exceeds
+  `recommended_working_set()`: everything allocated so far (the wrapped weights, the decode and chunk
+  scratch) + the MTP draft block's cache when `--mtp` + a 0.25 GB reserve (`STRATA_Q36M_MEM_OK=1`
+  overrides; a token-by-token run at 8,192 or below is never refused, so existing setups behave exactly
+  as before). The per-layer KV and S/conv caches allocate after this gate, so the fp32 path's estimate
+  has never counted the main KV term — that fp32 refusal behavior is frozen; with `--kv-f16` the
+  estimate adds the (halved) main-KV projection it is about to allocate, so a flagged run's refusal
+  counts the thing the flag halves (§9).
 - The kernels are written for `SK_HD = 256` (the qwen35moe head_dim); the host refuses anything else.
   Program-scope constants in `q36.metal` are `enum`, not `constexpr` — MSL rejects the latter.
 - **Chunked prompt prefill** (`--prefill N`; `--prefill auto` = 512, the parity-verified chunk — what setup
@@ -453,3 +460,152 @@ Measured on the M2: **pending** — the numbers (the 4,098-token read at 16K, fo
 tok/s at pos ~4,100; the same-day gate 2/3 results) land here when the gates run on the M2, in this
 section's format: what, hardware, date. Until then the knob stays opt-in and the default path is
 byte-identical (the fold-off base json vs the pre-change build's base json, 10/10, is part of gate 2).
+
+## 9. FP16 KV cache (`--kv-f16`)
+
+The QSA layers' KV cache (§6's geometry: 10 full-attention layers, 16 query heads sharing 2 KV heads,
+head_dim 256) stores every past token's K and V in fp32 — 10 layers × 2 (K,V) × 2 heads × 256 dims ×
+4 B = **40,960 B ≈ 40 KB per generated token**, resident for the whole run in unified memory the
+weights and the expert cache also need (0.34 GB at an 8K context, 1.34 GB at 32K, 2.68 GB at 64K).
+`--kv-f16` is the opt-in flag that halves it: K and V store as fp16 (`half`), and every kernel load
+unpacks to fp32 at the load site — every dot product, softmax and P·V chain keeps its exact fp32
+arithmetic. **20,480 B/token** over the QSA layers (0.17 GB at 8K, 0.67 GB at 32K, 1.34 GB at 64K).
+The MTP draft block's own cache (`s.mtp_kc`/`s.mtp_vc`, one full-attention layer) halves with it.
+FP16, not BF16: MSL has a native `half`; BF16 would need manual bit-twiddling in every kernel for a
+range win this model does not need (K and V are norm-scaled, |x| ≈ O(1)).
+
+**Mechanism — one extra runtime compile, selected pipelines.** MSL cannot switch a buffer's pointee
+type at runtime, so `metal/kernels/q36.metal` compiles twice: the default lib exactly as before, and
+— only when the flag is passed — a second lib built with `#define STRATA_KV_F16 1` through the
+prelude hole `mtl::Context::compile` already has (`Pipelines::init_kv_f16`, called from `run()` right
+after `pipes.init(cx)`). The flagged lib's seven KV kernels take `device (const) KV_T*` caches
+(`KV_T` = `half` under the define, `float` otherwise — an identity cast in the default build); the
+engine selects them at the dispatch sites only when the flag is set. Buffer binding is positional
+into typeless buffers, so no argument list moves. The default path's source diff is casts-only and
+its startup does nothing extra — the second compile (~1–2 s) is flagged-runs-only.
+
+| Kernel | K/V access | f16 change |
+|---|---|---|
+| `k_attn_prep` | writes `kc`, `vc` (the RoPE'd K row, the V row) | `(KV_T)v` at the two stores |
+| `k_attn_prep_chunk` | writes both, T rows at `pos0 + t` | `(KV_T)v` at the two stores |
+| `k_attn` | reads both (score loop, P·V loop) | `float(kp[i])` / `float(vc[...])` at the loads |
+| `k_attn_sk_part` | reads both | same at the loads |
+| `k_attn_gqa_part` | reads `kc` (scores to the scratch) | same at the loads |
+| `k_attn_gqa_merge` | reads `vc` | same at the loads |
+| `k_attn_sk_part_gqa` | reads both | same at the loads |
+
+`k_attn_sk_merge` stays on the default lib in every mode: it reads the float partials, not K/V. The
+same selective compile is what keeps a half cache from ever meeting an fp32 reader or vice versa —
+nothing in the dispatch plumbing could catch that mix, the gates below are the catch.
+
+**Memory.** The allocations halve with the flag (2 B/elem instead of 4 — the host never reads or
+writes KV values, the memsets only; zero bytes are zero half):
+
+| Context | fp32 (default) | fp16 (`--kv-f16`) | draft block fp32 → fp16 |
+|---|---|---|---|
+| 8,192 | 0.34 GB (335,544,320 B) | 0.17 GB (167,772,160 B) | 0.03 GB → 0.02 GB |
+| 32,768 | 1.34 GB (1,342,177,280 B) | 0.67 GB (671,088,640 B) | 0.13 GB → 0.07 GB |
+| 65,536 | 2.68 GB (2,684,354,560 B) | 1.34 GB (1,342,177,280 B) | 0.27 GB → 0.13 GB |
+
+The engine prints the real numbers once the caches are up, e.g. at `--ctx 32768 --kv-f16`:
+
+```
+strata metal q36: --kv-f16: KV caches fp16: 10 QSA layers x 2 (K,V) x 2 KV heads x 32768 ctx x 256 dims x 2 B = 0.67 GB (fp32: 1.34 GB)
+```
+
+(with `--mtp` the line continues `; draft block 0.07 GB (fp32: 0.13 GB)`). Measured on the M2
+(2026-10-19, branch build `5bcf2485`): both gate-5 lines matched the table exactly — `--ctx 8192`:
+`... x 8192 ctx x 256 dims x 2 B = 0.17 GB (fp32: 0.34 GB)`; `--ctx 32768`: `... x 32768 ctx x
+256 dims x 2 B = 0.67 GB (fp32: 1.34 GB)`.
+
+The startup refusal's estimate changes only under the flag: `--kv-f16` adds the main-KV projection
+it is about to allocate to `est` (the fp32 path's estimate has never counted the per-layer KV — they
+allocate after the gate — and that fp32 behavior is frozen; §6's memory-gate bullet has the reading).
+
+**Text difference (expected, documented — not a bug).** The fp16 cache rounds K and V once at write
+(round-to-nearest-even); runs with the flag are deterministic (two flagged runs are 10/10 identical
+to each other) but differ from the fp32 runs' text. Measured on the M2 (2026-10-19, the 10 parity
+prompts, ≤128 generated tokens each): **7 of 10 prompts are token-identical across the whole run**;
+the three that diverge do so at generated token 100 (p00), 69 (p01) and 46 (p03) — never at the
+first tokens (the garbage-class signature of a half cache meeting an fp32 pipeline), and every
+prompt is identical up to its divergence point. The parity harness's f16 mode
+(`STRATA_Q36M_KV_F16=1 ./build-metal/q36_chunk_parity`) measures the rounding's own cost directly:
+on a cache of half-exact values both libs' `k_attn` and split-K pair produce bit-identical outputs
+(the "only storage changed" proof), and on a random cache the rel-L1 against the fp32 kernels is
+printed and bounded at 1e-3 (the CUDA `qsa_parity.cpp` precedent's metric and phase bound for FP16
+paths). Measured (M2, 2026-10-19): the half-exact cross is bit-identical on both kernel pairs, and
+the random-cache rel-L1 is **1.75e-4** vs the 1e-3 bound (`kv f16 cross   OK (random-cache rel-L1
+0.000175 <= 1e-03)`).
+
+**Interactions.** Works with `--prefill` (the chunk writer `k_attn_prep_chunk` has an f16 pipeline;
+the MTP verify window rides it), with `--mtp N` (the draft cache halves), and with either attention
+knob (`STRATA_Q36M_ATTN_SK=1`, `STRATA_Q36M_ATTN_GQA=1` — all four reader variants have f16
+pipelines). Never mix: a half cache with an fp32 pipeline (or the reverse) reads garbage — the
+cross-checks below exist to catch a missed selection site.
+
+Gates (same Mac, same day, same build):
+
+```bash
+# gate 1: the compile test also compiles the STRATA_KV_F16 lib and lists its seven pipelines
+cmake --build build-metal && ./build-metal/q36_compile_test
+# gate 2: parity both modes - default 38/38, f16 mode all-OK incl. the kv f16 cross stage
+./build-metal/q36_chunk_parity
+STRATA_Q36M_KV_F16=1 ./build-metal/q36_chunk_parity
+# gate 3: the default path byte-identical - the no-flag base json vs the pre-change build's
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096" --out /tmp/q36-base2.json
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-base.json /tmp/q36-base2.json      # 10/10 required
+# gate 4: the f16 ladder is deterministic - two flagged runs 10/10 identical to each other; the
+# fp32-vs-f16 cmp's first-divergence positions are the documented text difference (recorded above)
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096 --kv-f16" --out /tmp/q36-f16a.json
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096 --kv-f16" --out /tmp/q36-f16b.json
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-f16a.json /tmp/q36-f16b.json       # 10/10
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-base2.json /tmp/q36-f16a.json      # divergence positions
+# gate 5: the KV line at both contexts (the memory table above reads off these)
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 32768 --kv-f16" --out /tmp/q36-32kf16.json
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 8192 --kv-f16" --out /tmp/q36-8kf16.json
+# gate 6: cross-checks under the flag, each twice and 10/10 self-identical (a missed selection site
+# - a half cache meeting an fp32 pipeline - reads garbage; these catch it)
+STRATA_Q36M_ATTN_SK=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096 --kv-f16" --out /tmp/q36-skf16a.json    # ...then run b, cmp 10/10
+STRATA_Q36M_ATTN_GQA=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096 --kv-f16" --out /tmp/q36-gqaf16a.json   # ...then run b, cmp 10/10
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096 --mtp 2 --kv-f16" --out /tmp/q36-mtpf16a.json   # ...then b, cmp 10/10
+```
+
+Measured on the M2 (Apple M2, macOS 26.6.2, 2026-10-19, branch build `5bcf2485`, UD-Q2_K_XL — every
+gate from this list, same build, same day):
+
+- **gate 1**: green — the f16 lib (index 1) compiles and its seven pipelines create (`all q36 f16
+  pipelines created`), on top of the default lib's full list.
+- **gate 2**: default mode all stages bit-identical (the 38-check suite); f16 mode all-OK plus the
+  cross stage (rel-L1 1.75e-4, above).
+- **gate 3**: the no-flag base json vs the pre-change build's base json — `identical: 10 of 10`.
+  This is the byte-identical proof the contributing rule asks for.
+- **gate 4**: two flagged runs `identical: 10 of 10` (deterministic); the fp32-vs-f16 cmp is 7 of 10
+  with the divergence positions above.
+- **gate 5**: the two KV lines match the memory table exactly (0.17/0.67 GB f16, fp32 would-be
+  0.34/1.34 GB).
+- **gate 6**: split-K-forced, GQA-fold and `--mtp 2` under the flag — each pair twice 10/10
+  self-identical, and each 10/10 token-identical to the plain flagged run (the knob paths and the
+  speculative path agree with the default attention under the flag). The composition
+  `--mtp 2 --kv-f16 --draft-vocab 8192` twice 10/10 self-identical and 10/10 vs the plain flagged
+  run — the draft-vocab head slicing (§7) and the halved caches compose as the review predicted.
+
+**Speed (ready to run, not run yet).** The halved KV traffic should show up as a deep-decode
+tok/s gain; the A/B is documented here and deliberately not a gate (the hours-class benchmark
+matrix waits for the dimensional-improvements showcase):
+
+```bash
+python3 tools/qwen35/q36_prefill_bench.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 16384" --sizes 2048,4098 --chunks 0,512 --rounds 3 --gen 128 \
+  --out bench/results/<date>-m2-q36-kvf16/bench-off.json
+python3 tools/qwen35/q36_prefill_bench.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 16384 --kv-f16" --sizes 2048,4098 --chunks 0,512 --rounds 3 --gen 128 \
+  --out bench/results/<date>-m2-q36-kvf16/bench-on.json
+```

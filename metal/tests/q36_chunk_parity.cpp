@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -111,6 +112,18 @@ void check_scattered2(const char* stage, const float* a_rows, const int* pos_a, 
     std::printf("  %-14s OK\n", stage);
 }
 
+void check_bytes(const char* stage, const void* a, const void* b, size_t bytes) {
+    const unsigned char* x = (const unsigned char*) a;
+    const unsigned char* y = (const unsigned char*) b;
+    for (size_t i = 0; i < bytes; ++i)
+        if (x[i] != y[i]) {
+            std::printf("  %-14s FAIL at byte %zu (%02x vs %02x)\n", stage, i, x[i], y[i]);
+            ++g_fails;
+            return;
+        }
+    std::printf("  %-14s OK\n", stage);
+}
+
 // k_tables' placement invariant: pos is a permutation of the entry rows, each row -> its entry index and
 // token, each entry inside its expert's [off, off + cnt) run (the rank order itself varies run to run)
 void check_placement(const char* stage, const int* ids, const int* cnt_off, const int* srt_gu, const int* srt_d,
@@ -138,7 +151,21 @@ int main() {
     std::printf("device %s\n", cx.device_name().c_str());
     const float eps = 1e-6f;
 
+    // STRATA_Q36M_KV_F16=1: the attention stages run against the STRATA_KV_F16 lib's kernels (the same
+    // seven, half caches) - stages 12-13 adapt their cache buffers to 2 B/elem, and the f16-only cross
+    // stage at the end proves both libs bit-identical on half-exact values.  Default mode is untouched.
+    const char* kf_env = std::getenv("STRATA_Q36M_KV_F16");
+    const bool kf = kf_env && *kf_env && std::atoi(kf_env) != 0;
+    int lib_f16 = -1;
+    if (kf) {
+        lib_f16 = cx.compile({"quant.metal", "q36.metal"}, "#define STRATA_KV_F16 1\n");
+        std::printf("kv f16 mode: the STRATA_KV_F16 lib is %d; the attention stages route from it\n", lib_f16);
+    }
+
     auto pipe = [&](const char* n) { return cx.pipeline(lib, n); };
+    // the attention stages' pipelines come from the f16 lib in kv f16 mode; p_sk_merge stays on the
+    // default lib (it reads the float partials, not K/V)
+    auto pipe_kv = [&](const char* n) { return kf ? cx.pipeline(lib_f16, n) : cx.pipeline(lib, n); };
     mtl::Pipeline p_row = pipe("k_row_T_Q8_0"), p_emb = pipe("k_emb_chunk_T_Q8_0");
     mtl::Pipeline p_g_f32 = pipe("k_gemv_T_F32"), p_g_q8 = pipe("k_gemv_T_Q8_0"), p_g_q4k = pipe("k_gemv_T_Q4_K");
     mtl::Pipeline p_g_q5k = pipe("k_gemv_T_Q5_K"), p_g_q6k = pipe("k_gemv_T_Q6_K");
@@ -158,8 +185,8 @@ int main() {
     mtl::Pipeline p_gdn = pipe("k_gdn"), p_gdnc = pipe("k_gdn_chunk");
     mtl::Pipeline p_gn = pipe("k_gated_norm"), p_gnc = pipe("k_gated_norm_chunk");
     mtl::Pipeline p_sum = pipe("k_moe_sum"), p_sumc = pipe("k_moe_sum_chunk");
-    mtl::Pipeline p_prep = pipe("k_attn_prep"), p_prep_c = pipe("k_attn_prep_chunk");
-    mtl::Pipeline p_sk_part = pipe("k_attn_sk_part"), p_sk_merge = pipe("k_attn_sk_merge");
+    mtl::Pipeline p_prep = pipe_kv("k_attn_prep"), p_prep_c = pipe_kv("k_attn_prep_chunk");
+    mtl::Pipeline p_sk_part = pipe_kv("k_attn_sk_part"), p_sk_merge = pipe("k_attn_sk_merge");
 
     ref::Rng r(20260717);
     mtl::Buffer dummy_ids = cx.alloc(sizeof(int));
@@ -705,8 +732,9 @@ int main() {
         }
         mtl::Buffer q1 = cx.alloc(4 * T * H * HD), gate1 = cx.alloc(4 * T * H * HD);
         mtl::Buffer q2 = cx.alloc(4 * T * H * HD), gate2 = cx.alloc(4 * T * H * HD);
-        mtl::Buffer kc1 = cx.alloc(4 * HKV * CTX * HD), vc1 = cx.alloc(4 * HKV * CTX * HD);
-        mtl::Buffer kc2 = cx.alloc(4 * HKV * CTX * HD), vc2 = cx.alloc(4 * HKV * CTX * HD);
+        const size_t kvb = (size_t) HKV * CTX * HD * (kf ? 2 : 4);   // the f16 lib's caches are 2 B/elem
+        mtl::Buffer kc1 = cx.alloc(kvb), vc1 = cx.alloc(kvb);
+        mtl::Buffer kc2 = cx.alloc(kvb), vc2 = cx.alloc(kvb);
         std::vector<mtl::Dispatch> ds;
         for (int t = 0; t < T; ++t) {
             mtl::Dispatch d;
@@ -734,8 +762,15 @@ int main() {
         cx.run_graph({d});
         check("prep q", q1.ptr, q2.ptr, 4 * T * H * HD);
         check("prep gate", gate1.ptr, gate2.ptr, 4 * T * H * HD);
-        check("prep kc", kc1.ptr, kc2.ptr, 4 * HKV * CTX * HD);
-        check("prep vc", vc1.ptr, vc2.ptr, 4 * HKV * CTX * HD);
+        if (kf) {   // half caches compare byte-wise: the f16 stores are deterministic (round-to-nearest-
+                    // even), so the two forms' bytes must be identical; the float check() would misread
+                    // the pairs as one float
+            check_bytes("prep kc", kc1.ptr, kc2.ptr, kvb);
+            check_bytes("prep vc", vc1.ptr, vc2.ptr, kvb);
+        } else {
+            check("prep kc", kc1.ptr, kc2.ptr, kvb);
+            check("prep vc", vc1.ptr, vc2.ptr, kvb);
+        }
     }
 
     // ---- 13. split-K attention rows: per-token form vs the row-blocked chunk form (row0 = 0 and 16) ----------
@@ -744,10 +779,16 @@ int main() {
         const float scale = 1.0f / std::sqrt((float) 256);
         mtl::Buffer q_a = cx.alloc(4 * T * H * 256);
         for (int i = 0; i < T * H * 256; ++i) q_a.as<float>()[i] = r.sym();
-        mtl::Buffer kc = cx.alloc(4 * HKV * CTX * 256), vc = cx.alloc(4 * HKV * CTX * 256);
+        const size_t kvb = (size_t) HKV * CTX * 256 * (kf ? 2 : 4);
+        mtl::Buffer kc = cx.alloc(kvb), vc = cx.alloc(kvb);
         for (int i = 0; i < HKV * CTX * 256; ++i) {
-            kc.as<float>()[i] = r.sym();
-            vc.as<float>()[i] = r.sym();
+            if (kf) {   // seed through the float->half rounding once, so both row forms read identical halves
+                ((uint16_t*) kc.ptr)[i] = ref::f32_to_f16(r.sym());
+                ((uint16_t*) vc.ptr)[i] = ref::f32_to_f16(r.sym());
+            } else {
+                kc.as<float>()[i] = r.sym();
+                vc.as<float>()[i] = r.sym();
+            }
         }
         mtl::Buffer gate_all = cx.alloc(4 * T * H * 256);
         for (int i = 0; i < T * H * 256; ++i) gate_all.as<float>()[i] = r.sym();
@@ -1253,6 +1294,135 @@ int main() {
             dsum3.tg[0] = 128;
             cx.run_graph({dsum3});
             check("moe2048 iso", x5.ptr, x1.ptr, 4 * T * N2);
+        }
+    }
+
+    // ---- 39. kv-f16 cross (STRATA_Q36M_KV_F16=1 only): both libs' attention kernels against the same
+    // VALUES in the two storages - the fp32 cache the default lib reads, the fp16 cache (the same values
+    // as halves) the f16 lib reads.  On a half-exact cache (every value a float->half->float round trip)
+    // the f16 kernels' unpack is exact, so k_attn and the split-K pair must produce bit-identical
+    // outputs from both libs: the "only storage changed" proof.  On a random (non-representable) cache
+    // the outputs differ by the input rounding only; the rel-L1 against the fp32 kernels is printed and
+    // bounded at 1e-3 (the CUDA qsa_parity precedent's phase bound for FP16 paths, and its metric
+    // sum |a-b| / sum |a|).  The stage prints one line (the suite's 39th in this mode).
+    if (kf) {
+        const int CTX = 64;
+        const float scale = 1.0f / std::sqrt((float) 256);
+        mtl::Pipeline p_attn_d = pipe("k_attn"), p_attn_f = cx.pipeline(lib_f16, "k_attn");
+        mtl::Pipeline p_sk_d = pipe("k_attn_sk_part"), p_sk_f = cx.pipeline(lib_f16, "k_attn_sk_part");
+
+        mtl::Buffer q_a = cx.alloc(4 * T * H * 256), gate_all = cx.alloc(4 * T * H * 256);
+        for (int i = 0; i < T * H * 256; ++i) {
+            q_a.as<float>()[i] = r.sym();
+            gate_all.as<float>()[i] = r.sym();
+        }
+        mtl::Buffer ck_f32 = cx.alloc(4 * HKV * CTX * 256), cv_f32 = cx.alloc(4 * HKV * CTX * 256);
+        mtl::Buffer ck_f16 = cx.alloc(2 * HKV * CTX * 256), cv_f16 = cx.alloc(2 * HKV * CTX * 256);
+        mtl::Buffer att_d = cx.alloc(4 * T * H * 256), att_f = cx.alloc(4 * T * H * 256);
+        mtl::Buffer pacc_s = cx.alloc(4 * 256 * 256), pm_s = cx.alloc(4 * 256), pl_s = cx.alloc(4 * 256);
+
+        auto run_attn = [&](mtl::Pipeline& p, const mtl::Buffer& kc, const mtl::Buffer& vc, mtl::Buffer& out) {
+            std::vector<mtl::Dispatch> ds;
+            for (int t = 0; t < T; ++t) {
+                mtl::Dispatch d;
+                d.p = &p;
+                d.args = {mtl::Arg::B(q_a, 4 * (size_t) t * H * 256), mtl::Arg::B(kc), mtl::Arg::B(vc),
+                          mtl::Arg::B(gate_all, 4 * (size_t) t * H * 256), mtl::Arg::B(out, 4 * (size_t) t * H * 256),
+                          mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(256), mtl::Arg::V(t + 1), mtl::Arg::V(CTX),
+                          mtl::Arg::V(scale)};
+                d.grid[0] = H;
+                d.tg[0] = 128;
+                d.tg_mem = (uint32_t) ((t + 1) * sizeof(float));
+                d.barrier = true;
+                ds.push_back(d);
+            }
+            cx.run_graph(ds);
+        };
+        auto run_sk = [&](mtl::Pipeline& p, const mtl::Buffer& kc, const mtl::Buffer& vc, mtl::Buffer& out) {
+            std::vector<mtl::Dispatch> ds;
+            for (int t = 0; t < T; ++t) {
+                mtl::Dispatch dp;
+                dp.p = &p;
+                dp.args = {mtl::Arg::B(q_a, 4 * (size_t) t * H * 256), mtl::Arg::B(kc), mtl::Arg::B(vc),
+                           mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(CTX), mtl::Arg::V(scale), mtl::Arg::V(1),
+                           mtl::Arg::V(t), mtl::Arg::V(0), mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s)};
+                dp.grid[0] = 1;
+                dp.grid[1] = H;
+                dp.tg[0] = 256;
+                dp.barrier = true;
+                ds.push_back(dp);
+                mtl::Dispatch dm;
+                dm.p = &p_sk_merge;   // the common merge: float partials, either lib's part can feed it
+                dm.args = {mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s),
+                           mtl::Arg::B(gate_all, 4 * (size_t) t * H * 256), mtl::Arg::B(out, 4 * (size_t) t * H * 256),
+                           mtl::Arg::V(H), mtl::Arg::V(1), mtl::Arg::V(t), mtl::Arg::V(0)};
+                dm.grid[0] = H;
+                dm.tg[0] = 256;
+                dm.barrier = true;
+                ds.push_back(dm);
+            }
+            cx.run_graph(ds);
+        };
+
+        bool ok = true;
+        const char* detail = "";
+        // (a) half-exact values: bit-identity, both kernel pairs
+        for (int i = 0; i < HKV * CTX * 256; ++i) {
+            const float v = ref::f16_to_f32(ref::f32_to_f16(r.sym()));
+            ck_f32.as<float>()[i] = v;
+            cv_f32.as<float>()[i] = ref::f16_to_f32(ref::f32_to_f16(r.sym()));
+            ((uint16_t*) ck_f16.ptr)[i] = ref::f32_to_f16(ck_f32.as<float>()[i]);
+            ((uint16_t*) cv_f16.ptr)[i] = ref::f32_to_f16(cv_f32.as<float>()[i]);
+        }
+        run_attn(p_attn_d, ck_f32, cv_f32, att_d);
+        run_attn(p_attn_f, ck_f16, cv_f16, att_f);
+        if (std::memcmp(att_d.ptr, att_f.ptr, 4 * T * H * 256) != 0) {
+            ok = false;
+            detail = "k_attn outputs differ on the half-exact cache";
+        }
+        if (ok) {
+            run_sk(p_sk_d, ck_f32, cv_f32, att_d);
+            run_sk(p_sk_f, ck_f16, cv_f16, att_f);
+            if (std::memcmp(att_d.ptr, att_f.ptr, 4 * T * H * 256) != 0) {
+                ok = false;
+                detail = "split-K outputs differ on the half-exact cache";
+            }
+        }
+        // (b) random values: the cache rounding's own cost, the qsa_parity rel-L1 metric
+        double rel = 0.0;
+        if (ok) {
+            for (int i = 0; i < HKV * CTX * 256; ++i) {
+                const float k = r.sym(), v = r.sym();
+                ck_f32.as<float>()[i] = k;
+                cv_f32.as<float>()[i] = v;
+                ((uint16_t*) ck_f16.ptr)[i] = ref::f32_to_f16(k);
+                ((uint16_t*) cv_f16.ptr)[i] = ref::f32_to_f16(v);
+            }
+            for (int pair = 0; pair < 2; ++pair) {
+                if (pair == 0) {
+                    run_attn(p_attn_d, ck_f32, cv_f32, att_d);
+                    run_attn(p_attn_f, ck_f16, cv_f16, att_f);
+                } else {
+                    run_sk(p_sk_d, ck_f32, cv_f32, att_d);
+                    run_sk(p_sk_f, ck_f16, cv_f16, att_f);
+                }
+                double num = 0, den = 0;
+                for (int i = 0; i < T * H * 256; ++i) {
+                    num += std::fabs((double) att_f.as<float>()[i] - (double) att_d.as<float>()[i]);
+                    den += std::fabs((double) att_d.as<float>()[i]);
+                }
+                const double r1 = num / (den > 1e-30 ? den : 1e-30);
+                if (r1 > rel) rel = r1;
+            }
+            if (rel > 1e-3) {
+                ok = false;
+                detail = "random-cache rel-L1 over the 1e-03 bound";
+            }
+        }
+        if (ok) std::printf("  %-14s OK (random-cache rel-L1 %.3g <= 1e-03)\n", "kv f16 cross", rel);
+        else {
+            std::printf("  %-14s FAIL: %s\n", "kv f16 cross", detail);
+            ++g_fails;
         }
     }
 
