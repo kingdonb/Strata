@@ -181,8 +181,8 @@ follow-through paths for hardware the maintainers do not have.
 ## Phase 2: Post-0.2.0 Milestones — Benchmarking Against Unsloth & Uncapped Context
 
 On 2026-10-19, empirical benchmarks were conducted on an Apple M2 comparing Strata's custom Metal Qwen3.6 engine against Unsloth's `Qwen3.6-35B-A3B-MTP-GGUF` (`UD-Q2_K_XL`):
-- **Unsloth Highlights**: Achieved ~236.7 tok/s prefill on fresh prompt deltas via batched SIMD-group matrix multiply and prompt prefix caching (5,858 cache hits). Reached 31.2 tok/s generation via Multi-Token Prediction (MTP).
-- **Unsloth Limitation**: Hard ceiling at 8,192 tokens (`8.2k / 8.2k`). When prefilling a ~5.8k-cached conversation with a 2.3k document (`AI_SETUP.md`), Unsloth generated exactly 2 tokens before halting with *"Response hit the Max Tokens limit."*
+- **Unsloth Highlights**: Achieved ~263.6 tok/s prefill on bulk prompts (5,862 tokens in 22.24s) via batched SIMD-group matrix multiply, and sustained 23.8 tok/s generation across 2,328 tokens via Multi-Token Prediction (MTP). Demonstrated instant prefix caching (5,858 cache hits on resume).
+- **Unsloth Limitation**: Hard ceiling at 8,192 tokens (`8.2k / 8.2k`). When the 5,862 prompt tokens combined with 2,328 generated tokens reached 8,190 tokens, a resume attempt could only emit 2 additional tokens before halting mid-sentence with *"Response hit the Max Tokens limit."*
 - **Strata Advantage**: Strata's custom Split-K attention and dynamic memory budgeting already sustain continuous generation at 6,000+ context depth (7.2 tok/s decode) up to 16k+ without hitting a hard 8.2k wall. However, Strata's prefill currently runs at ~25 tok/s due to parity-first row-by-row dispatch in `forward_prompt_chunk`.
 
 The following candidate initiatives form the Phase 2 roadmap to achieve prefill throughput parity with Unsloth while maintaining Strata's deep-context edge:
