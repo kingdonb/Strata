@@ -314,13 +314,18 @@ the whole KV-head group and compute its heads' scores against each K/V cell once
 the parity knob `STRATA_Q36M_ATTN_GQA=1` (the `STRATA_Q36M_ATTN_SK` pattern); the default path is
 unchanged until a measurement says otherwise.
 
-- **Path A — the `k_attn` range (n_pos <= 8,192 cells)**: `k_attn_gqa_part` (one threadgroup per
-  KV head; the group's q rows staged in threadgroup memory; thread tid computes the group's HG
-  scores for cells p = tid (mod 128), the K row read once, all HG dots chaining against it) and
-  `k_attn_gqa_merge` (per head, k_attn's own one-pass sequence over the staged scores: max, exp
-  into the tile, `block_sum`, the P·V chains per output dim — the V cells read once per group).
-  Scores travel through a device scratch (`[head][cell]`, H x ctx floats, allocated only when the
-  knob is on) because HG x n_pos scores cannot fit the 32 KB threadgroup ceiling.
+- **Path A — the `k_attn` range (n_pos <= 8,192 cells)**: `k_attn_gqa_part` (grid (HKV,
+  ceil(n_pos/128)) — one threadgroup per (KV head, 128-cell tile), one cell per thread; the K row
+  read once, all HG dots of the group chaining against it) and `k_attn_gqa_merge` (grid (HKV, HG) —
+  one threadgroup per (KV head, query head): k_attn's own one-pass sequence for that head over the
+  staged scores — max, exp into the tile, `block_sum`, the P·V chains per output dim, the V cells
+  read once per head exactly as `k_attn` itself reads them).  Scores travel through a device scratch
+  (`[head][cell]`, H x ctx floats, allocated only when the knob is on) because HG x n_pos scores
+  cannot fit the 32 KB threadgroup ceiling.  (An intermediate revision looped the heads inside one
+  (HKV)-grid threadgroup — bit-identical output, but the per-head V re-walks streamed the whole
+  slice through a too-small L1 once per head and the dispatch ran on 2 threadgroups: measured deep
+  decode collapsed to 2.7-3.2 tok/s vs the 8 tok/s baseline at pos ~4,100.  Hoisting the head loop
+  into the grid is the fix; bit-identity re-proven on the host sim.)
 - **Path B — the split-K range (n_pos > 8,192, or `STRATA_Q36M_ATTN_SK=1`)**:
   `k_attn_sk_part_gqa` (one threadgroup per (256-cell chunk, KV head) covers the group's HG rows —
   `k_attn_sk_part`'s body per head) writes the same (row, chunk) partial slots, so
