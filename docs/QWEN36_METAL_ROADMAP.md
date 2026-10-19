@@ -81,14 +81,15 @@ on the same Mac and day; it stays opt-in unless ≥1.2x is measured. Depends on 
 
 ## T4.5 — The draft-vocab subset head (`--draft-vocab N`, ticket 000682)
 
-State: built on `feature/000682-draft-vocab-subset-head` (`acd8c8a0`); compiles clean on the M2 and
-the startup traffic line is verified there (Apple M2, 2026-10-19, UD-Q2_K_XL: the head is Q4_K,
-1,152 B/row — 8,192 rows read 9.4 MB of the full head's 286 MB, 30.4×); the subset's parity ladder
-is done — `--mtp 2 --draft-vocab 8192` token-identical to `--mtp 0` (10/10) and to `--mtp 2` (full
-head, 10/10); the measurement table and the GQA-composability run (`STRATA_Q36M_ATTN_GQA=1`) are in
-flight (docs/QWEN36_METAL.md §7). T4's verdict named this as the missing piece: the draft step's
-head GEMV read the whole 248,320-row `output.weight` and the host argmax scanned all of it, every
-draft step.
+State: done — all gates green on the M2 (Apple M2, 2026-10-19, build `acd8c8a0`, UD-Q2_K_XL):
+build + `q36_compile_test` clean; `q36_chunk_parity` 38/38; the subset's parity 10/10 vs `--mtp 0`
+and vs `--mtp 2` (full head), and 10/10 with the GQA fold on (`STRATA_Q36M_ATTN_GQA=1`); the
+traffic line verified (9.4 MB of the full head's 286 MB per draft step, 30.4×). Measured 5.0–8.7
+tok/s against the ~17 base: the ≥1.2x rule is **not met** — with the head cut, the verify window
+(three rows through 40 layers at a ~15–25% accept rate) is the round's dominant term — so
+`--draft-vocab` ships strictly opt-in with the numbers recorded (docs/QWEN36_METAL.md §7). T4's
+verdict named this as the missing piece; the piece is now in, and the M2's verdict is that the
+window, not the head, is what keeps MTP net-negative there.
 Scope: `--draft-vocab N` (the env `STRATA_Q36_DRAFT_VOCAB` as the fallback, the flag wins — the
 CUDA engine's flag and env, `src/qwen35/q36_engine.cu`): the draft pick runs over the head's first
 N rows in place (a shrunken view of the same tensor, row i = token id i — no gather, no map, no new
