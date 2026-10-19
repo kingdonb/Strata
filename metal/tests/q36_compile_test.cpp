@@ -56,6 +56,34 @@ int main() {
         auto p = cx.pipeline(lib, k);
         std::printf("pipeline %s created: (max threads: %d)\n", k, p.max_threads);
     }
+
+    // --kv-f16's second runtime compile: the STRATA_KV_F16 lib (the prelude define) and its seven KV
+    // pipelines.  A q36.metal syntax error under the define surfaces here (or at engine startup),
+    // which is the only check MSL gets on a Mac round - Linux cannot compile MSL.
+    int lib_f16 = cx.compile({"quant.metal", "q36.metal"}, "#define STRATA_KV_F16 1\n");
+    std::printf("q36.metal compiled with STRATA_KV_F16, lib index: %d\n", lib_f16);
+    auto p_attn_prep_f16 = cx.pipeline(lib_f16, "k_attn_prep");
+    std::printf("pipeline k_attn_prep (f16 lib) created: %s (max threads: %d)\n", p_attn_prep_f16.name.c_str(),
+                p_attn_prep_f16.max_threads);
+    auto p_attn_f16 = cx.pipeline(lib_f16, "k_attn");
+    std::printf("pipeline k_attn (f16 lib) created: %s (max threads: %d)\n", p_attn_f16.name.c_str(),
+                p_attn_f16.max_threads);
+    auto p_attn_sk_part_f16 = cx.pipeline(lib_f16, "k_attn_sk_part");
+    std::printf("pipeline k_attn_sk_part (f16 lib) created: %s (max threads: %d)\n", p_attn_sk_part_f16.name.c_str(),
+                p_attn_sk_part_f16.max_threads);
+    auto p_attn_gqa_part_f16 = cx.pipeline(lib_f16, "k_attn_gqa_part");
+    std::printf("pipeline k_attn_gqa_part (f16 lib) created: %s (max threads: %d)\n", p_attn_gqa_part_f16.name.c_str(),
+                p_attn_gqa_part_f16.max_threads);
+    auto p_attn_gqa_merge_f16 = cx.pipeline(lib_f16, "k_attn_gqa_merge");
+    std::printf("pipeline k_attn_gqa_merge (f16 lib) created: %s (max threads: %d)\n", p_attn_gqa_merge_f16.name.c_str(),
+                p_attn_gqa_merge_f16.max_threads);
+    auto p_attn_sk_part_gqa_f16 = cx.pipeline(lib_f16, "k_attn_sk_part_gqa");
+    std::printf("pipeline k_attn_sk_part_gqa (f16 lib) created: %s (max threads: %d)\n",
+                p_attn_sk_part_gqa_f16.name.c_str(), p_attn_sk_part_gqa_f16.max_threads);
+    auto p_attn_prep_c_f16 = cx.pipeline(lib_f16, "k_attn_prep_chunk");
+    std::printf("pipeline k_attn_prep_chunk (f16 lib) created: %s (max threads: %d)\n", p_attn_prep_c_f16.name.c_str(),
+                p_attn_prep_c_f16.max_threads);
+    std::printf("all q36 f16 pipelines created\n");
     std::printf("all q36 pipelines created\n");
     return 0;
 }
