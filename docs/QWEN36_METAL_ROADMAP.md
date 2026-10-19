@@ -110,6 +110,19 @@ memory difference at 8K and 32K; the documented text difference. Plus: profile h
 ≥2 ms/token, preserving the RNG stream and the chosen tokens.
 Gates: the memory and profile numbers measured; sampled parity with a fixed seed.
 
+State (2026-10-19): the KV half is implemented on `feature/000680-fp16-kv-cache-kv-f16-for` — the
+`KV_T` typedef and the seven kernels' half caches under a `STRATA_KV_F16` prelude define (a second
+runtime compile only flagged runs pay for), the engine's `--kv-f16` flag, selection, allocation math
+(2 B/elem), the flagged working-set `est` term, and the parity harness's f16 mode with the cross
+stage (both libs bit-identical on half-exact caches; the random-cache rel-L1 bounded 1e-3, the CUDA
+`qsa_parity` precedent). Mechanism, kernel table and memory math: docs/QWEN36_METAL.md §9. The M2
+gates (compile test both libs, parity both modes, the ladder runs, the KV lines at 8K/32K) are the
+next step — §9's measured numbers and this paragraph's green marker land when they run. The sampling
+half (the profile, the ≥2 ms/token GPU argmax prefilter gate, the fixed-seed parity gate) moves to
+its own card; the hours-class benchmark matrix (the deep-decode tok/s A/B the halved KV traffic
+should buy) is deliberately deferred until the dimensional-improvements showcase — its ready-to-run
+command is in §9.
+
 ## T6 — GQA-folded attention: one K/V read per KV-head group (new idea, from T3's first measurements)
 
 State: built on the delivery branch `feature/000681-gqa-folded-attention-one` (2026-10-19): the folded
