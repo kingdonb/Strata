@@ -633,6 +633,187 @@ kernel void k_attn_sk_merge(device const float* pacc [[buffer(0)]],
     out[gi] = num / den * sigm(gate[gi]);
 }
 
+// -------------------------------------------------------------------------------------------
+// GQA-folded attention (STRATA_Q36M_ATTN_GQA=1, the parity knob): one K/V read per KV-head group.
+// Every query head of a KV group (HG = H/HKV of them) reads the same K/V cells; unfolded, each
+// head re-reads them (an ~HGx memory-traffic multiplier at depth that L1/L2 are not catching).
+// The folded kernels give one threadgroup the whole group and compute its heads' scores against
+// each K cell once.  Bit-parity contract vs the kernels they replace (safe-math build, no
+// reassociation): per (head, cell) the score is the same fp chain (i ascending, one accumulator,
+// then *scale) with q staged in threadgroup memory - the same values; the max is over the same
+// values (exact, any tree); exp and the per-thread partial sums keep k_attn's thread<->cell map
+// (p = tid (mod 128)) and reduction trees; P.V is one fp chain per (head, output dim) walking p
+// ascending with the e and v operands shared but never re-rounded; the final expression is
+// k_attn's (acc * (1/sum)) * sigm(gate), NOT the split-K merge's num/den division.  No score or
+// exp recompute: exact FLOPs, the only new traffic is the score-scratch round trip (HG x n_pos,
+// ~256x smaller than the KV term it replaces).
+
+// Path A, part 1 of 2 (the k_attn range, n_pos <= SK_TG_CAP): one threadgroup per KV head.
+// Thread tid computes the group's HG scores for cells p = tid (mod 128): the K row is read once
+// and all HG dots chain against it.  Scores land in scratch [head][cell] (row stride n_pos, the
+// GLOBAL head index - all HKV groups' rows live at once); the merge kernel finds the per-head
+// max from them (exact, tree-free).
+kernel void k_attn_gqa_part(device const float* q [[buffer(0)]],
+                            device const float* kc [[buffer(1)]],
+                            device float* scr [[buffer(2)]],
+                            constant int& H [[buffer(3)]],
+                            constant int& HKV [[buffer(4)]],
+                            constant int& D [[buffer(5)]],
+                            constant int& n_pos [[buffer(6)]],
+                            constant int& ctx [[buffer(7)]],
+                            constant float& scale [[buffer(8)]],
+                            threadgroup float* qs [[threadgroup(0)]],
+                            uint kvh [[threadgroup_position_in_grid]],
+                            uint tid [[thread_index_in_threadgroup]]) {
+    const int HG = H / HKV;
+    for (int j = (int) tid; j < HG * D; j += 128)
+        qs[j] = q[(ulong)(kvh * HG) * D + j];   // the group's q rows, contiguous
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int p = (int) tid; p < n_pos; p += 128) {
+        device const float* kp = kc + ((ulong) kvh * ctx + p) * D;
+        for (int hh = 0; hh < HG; ++hh) {
+            threadgroup const float* qh = qs + (ulong) hh * D;
+            float s = 0.0f;
+            for (int i = 0; i < D; ++i) s += qh[i] * kp[i];   // k_attn's exact chain
+            scr[(ulong)(kvh * HG + hh) * n_pos + p] = s * scale;
+        }
+    }
+}
+
+// Path A, part 2 of 2: per KV head, k_attn's own one-pass sequence over the staged scores -
+// max (k_attn's tree), exp into a threadgroup tile + per-thread partial sums (p = tid (mod 128),
+// ascending), block_sum, then the P.V chains per output dim (i = tid (mod 128)) - each thread
+// does its HG heads' dims, the V cells read once per group.  The tile is n_pos floats, the same
+// threadgroup budget k_attn's score buffer takes; a barrier at the loop end orders the previous
+// head's tile reads before the next head's tile writes.
+kernel void k_attn_gqa_merge(device const float* vc [[buffer(0)]],
+                             device const float* gate [[buffer(1)]],
+                             device const float* scr [[buffer(2)]],
+                             device float* out [[buffer(3)]],
+                             constant int& H [[buffer(4)]],
+                             constant int& HKV [[buffer(5)]],
+                             constant int& D [[buffer(6)]],
+                             constant int& n_pos [[buffer(7)]],
+                             constant int& ctx [[buffer(8)]],
+                             threadgroup float* et [[threadgroup(0)]],
+                             uint kvh [[threadgroup_position_in_grid]],
+                             uint tid [[thread_index_in_threadgroup]],
+                             ushort lane [[thread_index_in_simdgroup]],
+                             ushort sgid [[simdgroup_index_in_threadgroup]]) {
+    const int HG = H / HKV;
+    threadgroup float sh_m[4];
+    threadgroup float sh_s[4];
+    const int h0 = kvh * HG;
+
+    for (int hh = 0; hh < HG; ++hh) {
+        const ulong h = (ulong)(h0 + hh);
+        device const float* sr = scr + h * n_pos;
+
+        float mx = -INFINITY;
+        for (int p = (int) tid; p < n_pos; p += 128) mx = max(mx, sr[p]);
+        mx = simd_max(mx);
+        if (lane == 0) sh_m[sgid] = mx;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sgid == 0) {
+            float tot = (lane < 4) ? sh_m[lane] : -INFINITY;
+            tot = simd_max(tot);
+            if (lane == 0) sh_m[0] = tot;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        mx = sh_m[0];
+
+        float sum = 0.0f;
+        for (int p = (int) tid; p < n_pos; p += 128) {
+            float e = exp(sr[p] - mx);
+            et[p] = e;
+            sum += e;
+        }
+        sum = block_sum(sum, sh_s, tid, lane, sgid);
+        const float inv_sum = 1.0f / sum;
+
+        for (int i = (int) tid; i < D; i += 128) {
+            float acc = 0.0f;
+            for (int p = 0; p < n_pos; ++p) acc += et[p] * vc[((ulong) kvh * ctx + p) * D + i];
+            out[h * D + i] = (acc * inv_sum) * sigm(gate[h * D + i]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+// Path B (the split-K range, n_pos > SK_TG_CAP or STRATA_Q36M_ATTN_SK=1): the folded part kernel.
+// One threadgroup per (256-cell chunk, KV head) covers the group's HG query rows - k_attn_sk_part's
+// body per head, the K row and the V cells of the chunk read once per group (the per-head walks of
+// them hit L1).  Per-head reduction slots (sh) so back-to-back heads cannot race the sh[0] reads;
+// a barrier between sk_max and sk_sum closes the same-sh write-vs-read race the unfolded part
+// kernel's back-to-back pair leaves open.  Partials land in the same (row, chunk) scratch slots
+// ((row - row0) * n_chunk + c), so k_attn_sk_merge runs unchanged and sees bit-identical partials.
+// Threadgroup budget: HG * (SK_HD + 8 + SK_CELLS) floats - the host refuses HG past the 32 KB
+// ceiling (HG <= 15 at SK_HD = 256).
+kernel void k_attn_sk_part_gqa(device const float* q [[buffer(0)]],
+                               device const float* kc [[buffer(1)]],
+                               device const float* vc [[buffer(2)]],
+                               constant int& H [[buffer(3)]],
+                               constant int& HKV [[buffer(4)]],
+                               constant int& ctx [[buffer(5)]],
+                               constant float& scale [[buffer(6)]],
+                               constant int& n_chunk [[buffer(7)]],
+                               constant int& pos0 [[buffer(8)]],
+                               constant int& row0 [[buffer(9)]],
+                               device float* pacc [[buffer(10)]],
+                               device float* pm [[buffer(11)]],
+                               device float* pl [[buffer(12)]],
+                               threadgroup float* tgm [[threadgroup(0)]],
+                               uint3 g [[threadgroup_position_in_grid]],
+                               uint tid [[thread_index_in_threadgroup]],
+                               ushort lane [[thread_index_in_simdgroup]],
+                               ushort sgid [[simdgroup_index_in_threadgroup]]) {
+    const int HG = H / HKV;
+    const int c = (int) g.x, kvh = (int) g.y;
+    const int row_base = row0 + kvh * HG;
+    const int t = row_base / H;   // one dispatch never spans tokens: rows row0 + [0, H) share t
+    const int npos = pos0 + t + 1;
+    const int p0 = c * SK_CELLS;
+    // whole threadgroup exits together: p0 and npos are threadgroup-uniform, no barrier is skipped midway
+    if (p0 >= npos) return;
+
+    threadgroup float* qs = tgm;                          // HG * SK_HD: the group's q rows
+    threadgroup float* shs = qs + (ulong) HG * SK_HD;     // HG * 8: per-head reduction slots
+    threadgroup float* scs = shs + (ulong) HG * 8;        // HG * SK_CELLS: per-head exp scores
+
+    const int j = (int) tid;
+    for (int hh = 0; hh < HG; ++hh)
+        qs[(ulong) hh * SK_HD + j] = q[(ulong)(row_base + hh) * SK_HD + j];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const int p = p0 + j;
+    const int n = min(SK_CELLS, npos - p0);
+    device const float* vp = vc + ((ulong) kvh * ctx + p0) * SK_HD + j;
+    for (int hh = 0; hh < HG; ++hh) {
+        const ulong o = (ulong)(kvh * HG + hh) * (ulong) n_chunk + (ulong) c;
+        float s = -INFINITY;
+        if (p < npos) {
+            device const float* kp = kc + ((ulong) kvh * ctx + p) * SK_HD;
+            float a = 0.0f;
+            for (int i = 0; i < SK_HD; ++i) a += qs[(ulong) hh * SK_HD + i] * kp[i];
+            s = a * scale;
+        }
+        const float m = sk_max(s, shs + (ulong) hh * 8, lane, sgid);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const float e = (p < npos) ? exp(s - m) : 0.0f;
+        scs[(ulong) hh * SK_CELLS + j] = e;
+        const float l = sk_sum(e, shs + (ulong) hh * 8, lane, sgid);
+
+        float acc = 0.0f;
+        for (int k = 0; k < n; ++k) acc += scs[(ulong) hh * SK_CELLS + k] * vp[(ulong) k * SK_HD];
+        pacc[o * SK_HD + j] = acc;
+        if (tid == 0) {
+            pm[o] = m;
+            pl[o] = l;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Prompt-chunk kernels: the chunk of T prompt tokens runs as T-wide dispatches instead of T separate
 // single-token graphs, with every weight read once per chunk.  Each (token, output) is accumulated in
