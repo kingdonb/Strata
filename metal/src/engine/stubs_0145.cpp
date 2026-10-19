@@ -149,3 +149,41 @@ namespace strata::kernels { bool native_q8_0_sm60_pack(void const* p0, int p1, i
 namespace strata::kernels { void native_q8_0_sm60_release(void const* p0) { } }
 // only reached with pf_wmma (off on Metal)
 namespace strata::prefill { void swiglu_split_f16(float const* p0, unsigned short* p1, long long p2, int p3, bool p4, void* p5) { } }
+
+namespace strata::kernels {
+void iq_dequant_f16(int, const void*, int64_t, uint16_t*, void*, const float*) { strata::metal_engine::missing("strata::kernels::iq_dequant_f16(scale)"); }
+void iq_dequant_gu_f16(int, const void*, const void*, int64_t, int64_t, uint16_t*, void*, const float*) { strata::metal_engine::missing("strata::kernels::iq_dequant_gu_f16(tail)"); }
+bool gdn_commit_layers(float*, int64_t, int64_t, const float*, int64_t, const float*, int64_t, const float*, const float*, int64_t,
+                       int, int, int, int, int, const int32_t*, void*) { return false; }
+void native_qsa_indexer_append_steps_layers(const float*, int64_t, const int32_t*, int, int, int32_t, float, const QsaIndexerLayers&, int,
+                                            const QsaShapes&, int64_t, const RopeScaling&, void*) {
+    strata::metal_engine::missing("strata::kernels::native_qsa_indexer_append_steps_layers");
+}
+bool qsa_block_scores_slots(const float* const*, const float* const*, const float*, const int32_t*, int64_t, int64_t,
+                            const QsaShapes&, float*, void*) { return false; }
+bool qsa_decode_attn_slots(const float*, const QsaAttnSlotPools&, const int32_t*, const int32_t*, int64_t, const QsaShapes&,
+                           float*, float*, int64_t, void*) { return false; }
+}  // namespace strata::kernels
+
+namespace strata::prefill {
+void moe_combine(const float*, const int32_t*, const float*, const float*, const float*, float*, int64_t, void*, const float*) {
+    strata::metal_engine::missing("strata::prefill::moe_combine(row_sd)");
+}
+}  // namespace strata::prefill
+
+namespace strata::kernels::cpu {
+bool nvfp4_256_fits(int) { return false; }
+bool nvfp4_512_fits(int) { return false; }
+void nvfp4_256_gu_rows(const uint8_t*, size_t, size_t, int, const void* const*, int, float* const*, int, int, float, float) {
+    strata::metal_engine::missing("strata::kernels::cpu::nvfp4_256_gu_rows");
+}
+void nvfp4_256_rows(const uint8_t*, size_t, int, const void* const*, int, float* const*, int, int, float) {
+    strata::metal_engine::missing("strata::kernels::cpu::nvfp4_256_rows");
+}
+void nvfp4_512_gu_rows(const uint8_t*, size_t, size_t, int, const void* const*, int, float* const*, int, int, float, float) {
+    strata::metal_engine::missing("strata::kernels::cpu::nvfp4_512_gu_rows");
+}
+void nvfp4_512_rows(const uint8_t*, size_t, int, const void* const*, int, float* const*, int, int, float) {
+    strata::metal_engine::missing("strata::kernels::cpu::nvfp4_512_rows");
+}
+}  // namespace strata::kernels::cpu
