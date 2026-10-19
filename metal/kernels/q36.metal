@@ -1362,10 +1362,12 @@ kernel void k_gdn_prep_c(device const float* conv [[buffer(0)]],
                          constant float& eps [[buffer(12)]],
                          constant int& T [[buffer(13)]],
                          uint3 g [[threadgroup_position_in_grid]],
+                         uint3 tg_dim [[threadgroups_per_grid]],
                          uint tid [[thread_index_in_threadgroup]],
                          ushort lane [[thread_index_in_simdgroup]],
                          ushort sgid [[simdgroup_index_in_threadgroup]]) {
     threadgroup float sh_red[4];
+    const int HV = (int) tg_dim.x;
     const int h = (int) g.x, t = (int) g.y;
     if (t >= T) return;
     const int kh = h % HK;
