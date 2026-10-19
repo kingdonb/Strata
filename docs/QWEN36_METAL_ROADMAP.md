@@ -175,3 +175,34 @@ builds (the one shared-header accessor); assemble the batch upstream PR from the
 to maintain the new sections (`metal/kernels/`, `metal/src/engine/q36_metal.cpp`, the qwen35 q36 gates)
 following the contributing conventions — docs/TEST_REQUESTS.md and docs/COMMUNITY_BENCHMARKS.md are the
 follow-through paths for hardware the maintainers do not have.
+
+---
+
+## Phase 2: Post-0.2.0 Milestones — Benchmarking Against Unsloth & Uncapped Context
+
+On 2026-10-19, empirical benchmarks were conducted on an Apple M2 comparing Strata's custom Metal Qwen3.6 engine against Unsloth's `Qwen3.6-35B-A3B-MTP-GGUF` (`UD-Q2_K_XL`):
+- **Unsloth Highlights**: Achieved ~236.7 tok/s prefill on fresh prompt deltas via batched SIMD-group matrix multiply and prompt prefix caching (5,858 cache hits). Reached 31.2 tok/s generation via Multi-Token Prediction (MTP).
+- **Unsloth Limitation**: Hard ceiling at 8,192 tokens (`8.2k / 8.2k`). When prefilling a ~5.8k-cached conversation with a 2.3k document (`AI_SETUP.md`), Unsloth generated exactly 2 tokens before halting with *"Response hit the Max Tokens limit."*
+- **Strata Advantage**: Strata's custom Split-K attention and dynamic memory budgeting already sustain continuous generation at 6,000+ context depth (7.2 tok/s decode) up to 16k+ without hitting a hard 8.2k wall. However, Strata's prefill currently runs at ~25 tok/s due to parity-first row-by-row dispatch in `forward_prompt_chunk`.
+
+The following candidate initiatives form the Phase 2 roadmap to achieve prefill throughput parity with Unsloth while maintaining Strata's deep-context edge:
+
+### T8 — KV Cache Prefix Matching (Prompt Caching / Session Reuse)
+- **Observation**: Unsloth reused 5,858 cached tokens with zero compute latency, evaluating only the fresh document delta.
+- **Scope**: Implement token-prefix hashing and state reuse in `q36_metal.cpp` so multi-turn sessions and repeated prompts skip evaluating already-computed prefix tokens.
+- **Gate**: 100% bit-parity against clean prefill; zero time spent on cached token prefix.
+
+### T9 — Batched 2D FlashAttention for QSA Chunk Prefill
+- **Observation**: `push_qsa_attention` currently dispatches single-row decode attention kernels `nt` times per chunk per layer (thousands of Metal command encoder dispatches per chunk) to preserve bit-for-bit equivalence.
+- **Scope**: Implement a fused 2D causal FlashAttention kernel on Metal that computes attention over the entire chunk $N \times N$ in a single dispatch while preserving numerical stability.
+- **Target**: Scale prompt prefill from ~25 tok/s toward ~150–200+ tok/s on Apple Silicon.
+
+### T10 — Batched MoE GEMM for Routed Experts in Prefill
+- **Observation**: Strata routes tokens per-entry via gathered GEMV (`push_c_gemv` / `push_c_lpr8`).
+- **Scope**: Group tokens in each chunk by routed expert ID and execute true batched GEMM matrix multiplications across active experts, replacing per-token dispatches with high-occupancy SIMD-group operations.
+
+### T11 — Paged & Dynamic Context Architecture (Sustained Context > 8.2k)
+- **Observation**: Unsloth hard-caps context at 8,192 tokens due to static KV cache allocations, failing to complete answers when prompts approach the ceiling.
+- **Scope**: Formalize Strata's split-K attention, dynamic KV chunking, and memory budgeting into an official paged context architecture that guarantees sustained generation across 16k–32k context on 24GB Unified Memory.
+- **Gate**: Zero truncation errors on prompts exceeding 8k tokens; sustained decode > 6 tok/s at 16k context depth.
+
