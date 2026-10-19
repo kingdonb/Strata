@@ -6,6 +6,8 @@
 > 2. `docs/kb/how-to-strata-vs-unsloth-qwen36-metal-benchmarks.md` in **urmanac/nocknock** — the "Standing on the Shoulders of Open-Source Giants" article
 >
 > **Method.** Every technical claim in both documents was checked against the measured record in this repository (`docs/QWEN36_METAL.md` §6–§10 and the recorded gate numbers, `bench/results/2026-10-18-m2-q36-prefill`), the code (`metal/`), the model card (`unsloth/Qwen3.6-35B-A3B-MTP-GGUF` on Hugging Face), the engine build's release notes (`unslothai/llama.cpp` release `b11724-mix-c208e5f`, published 2026-10-19 16:12 UTC), the fork's pull requests, and the benchmark-session screenshots the maintainer supplied on 2026-10-19. Where a claim could not be checked, this review says so and labels it an assumption. Nothing here is asserted without a measurement or a source; inferences from reading code are marked "static analysis".
+>
+> **Revision (2026-10-19, second pass).** The article's two revision rounds are applied and verified — §9.1 records them item by item (PR #69 `c179a7e`: instructions 1–11; PR #70 `039269b`: five polish nits). Added in this pass: §7 now states what each measurement decides and gains the hours-class ablation matrix (block 6); §11 the scoreboard (every comparative number with its status); §12 falsifiability (what would change our mind, with thresholds); §13 the risk register for the kernel tickets; §14 the notation table.
 
 ## 0. Summary
 
@@ -130,13 +132,16 @@ The roadmap's Phase 2 header presents T8–T11 as draft candidates for review. V
 
 ## 7. M2 measurement plan (ready to run)
 
-Every recorded number carries: what, hardware (Apple M2 24 GB), build, date, and machine state (Chrome open/closed, swap in use). Anything not run ships labeled "pending M2 run".
+Every recorded number carries: what, hardware (Apple M2 24 GB), build, date, and machine state (Chrome open/closed, swap in use). Anything not run ships labeled "pending M2 run". Each block states what it decides — a measurement that changes nothing is not on the list.
 
-1. **Re-baseline prefill** — `tools/qwen35/q36_prefill_bench.py`, sizes 2048/4098, chunks 0/512, all levers on (`--prefill auto --kv-f16`, `STRATA_Q36M_GDN_WY=1 STRATA_Q36M_DENSE_MMA=1 STRATA_Q36M_ATTN_GQA=1`), fresh model load per cell. Expected metric: the honest current Strata prefill tok/s, to set against Unsloth's ~260 (batch-size-matched per §3).
-2. **T6 GQA-fold A/B** — the `docs/QWEN36_METAL.md` §8 commands (decode tok/s at pos ≈4,100 and the 4,098-token read at `--ctx 16384`, fold on/off). Expected: the actual KV-traffic cut and deep-decode delta; decides the default-flip question.
-3. **T8 prefix-cache reuse measurement** — a two-request same-prefix session through the serve protocol; record tokens re-evaluated vs reused (expected: delta-only), plus the divergence-reset behavior.
-4. **Controlled 32k decode comparison** — cool machine, Chrome closed, both engines, decode tok/s sampled at matched ~2k/~6k/~11k positions, temperature noted. Separates the 14.4-tok/s confound from any depth effect; Strata's side gives the all-levers deep-decode number against their 21.2.
-5. **MTP calibration experiment (optional, the reopen path)** — in-engine `--mtp 2 --draft-vocab N` with a `--spec-draft-n-max`-style window sweep and acceptance telemetry, np=1, to bound the verify-window cost against the card's recipe; decides whether a calibrated 1.2–2× is reachable on the M2 or the verdict stands.
+1. **Re-baseline prefill** — `tools/qwen35/q36_prefill_bench.py`, sizes 2048/4098, chunks 0/512, all levers on (`--prefill auto --kv-f16`, `STRATA_Q36M_GDN_WY=1 STRATA_Q36M_DENSE_MMA=1 STRATA_Q36M_ATTN_GQA=1`), fresh model load per cell. **Decides:** the base every Phase 2 target is set against. If all-levers prefill at 2K chunk-512 lands under ~2× the pre-lever 22.3 tok/s, investigate lever interaction (occupancy) before building kernels; the ≥5x bar re-anchors to the measured base either way.
+2. **T6 GQA-fold A/B** — the `docs/QWEN36_METAL.md` §8 commands (decode tok/s at pos ≈4,100 and the 4,098-token read at `--ctx 16384`, fold on/off). **Decides:** the fold's default and the `--kv-f16` flip. A ≥1.5× deep-decode gain with all gates green schedules the flip behind the roadmap's soak; 1.2–1.5× keeps it opt-in with numbers recorded; <1.2× kills the KV-traffic hypothesis at these depths (§12, item 2) and the projection in §4.1 dies with it.
+3. **T8 prefix-cache reuse measurement** — a two-request same-prefix session through the serve protocol; record tokens re-evaluated vs reused (expected: delta-only), plus the divergence-reset behavior. **Decides:** what the narrative may claim about caching (delta-only, measured rather than asserted), and whether the divergence-prefix change proceeds — it does if the 10-prompt parity holds twice (a behavior change on the existing prefix path).
+4. **Controlled 32k decode comparison** — cool machine, Chrome closed, both engines, decode tok/s sampled at matched ~2k/~6k/~11k positions, temperature noted. **Decides:** the decode-at-depth table both documents publish (their side pending the cool rerun, §8 E2; ours the matched-position record); retires the 14.4-tok/s confound from the record for good.
+5. **MTP calibration experiment (optional, the reopen path)** — in-engine `--mtp 2 --draft-vocab N` with a `--spec-draft-n-max`-style window sweep and acceptance telemetry, np=1, to bound the verify-window cost against the card's recipe. **Decides:** reopen or close. A calibrated ≥1.2× at np=1 on the M2 reopens a window-calibration ticket; otherwise the net-negative verdict stands recorded as final, with the sweep as its evidence.
+6. **The hours-class ablation matrix (the stretch)** — `q36_prefill_bench.py` with the levers added one at a time (none → +WY → +MMA → +GQA fold → +f16 KV → all), sizes 2K/4K/8K, chunk 512, fresh load per cell. Purpose: one clean table attributing which lever bought what — today that history lives in separate builds and sessions (the §6 pre-lever matrix, §8's fold commands, §9's f16 numbers, §10's component micro-benches). Run once, cite forever; T7's docs and the response's claims cite this table. **Decides:** the attribution story, and T9's honest starting point at every size.
+
+## 8. Evidence needed from the Unsloth side (for Gemini)
 
 ## 8. Evidence needed from the Unsloth side (for Gemini)
 
@@ -163,6 +168,70 @@ For the author of `urmanac/nocknock` → `docs/kb/how-to-strata-vs-unsloth-qwen3
 10. **Fix the "~10×" frame** in the executive summary: compare prefill to prefill and decode to decode, each against the re-baselined numbers with matched batch sizes (rows 7, 16, 18).
 11. **Sync the homework list** when our roadmap lands: the article's Phase 2 summary includes T8 as new work; after the correction it is a measurement of a shipped feature, and T11's premise changes (§5).
 
+**Application status (2026-10-19, verified against the merged article).** The author applied all eleven instructions and merged them into `urmanac/nocknock` main via PR #69 (commit `c179a7e`). Verified in the fetched post-merge text, item by item: the §10-exact speedup numbers with sources; the engine identity (upstream Metal backend, no Metal pins); the two-branch MTP paragraph with the E1 pointer; Test 3 (the 32k experiment) with the contention confound separated from the 21.2 recovery; batch sizes attached to every prefill number; the baselines footnoted as bringup/pending T12; "40 main + 1 draft" and macOS 26 (Tahoe) 26.6.2; 38 kernels; the dispatch estimate labeled "unconfirmed static analysis estimate pending ticket T13 instrumentation"; prefill and decode compared category by category; and the roadmap section rewritten to the measurement-first order with T8's "shipped in T0" clarification. A second round applied five polish nits via PR #70 (commit `039269b`): §4's opening question now states all three batch sizes; Test 2's 7.2 tok/s is footnoted as bringup-era with the recorded equivalents (8 tok/s at pos ~4,100 pre-fold; 12.2–16.3 all-levers at ≤4k depth); T9's envelope reads "measured; the §10 MMA precedent was 1e-3"; the KV footprint reads "a measured 0.34 GB (0.17 at 8k, 0.67 at 32k; §9)"; the summary's baseline range separates the two mechanisms. The article also now carries the bandwidth-efficiency ledger with the same projection and the same labeled assumption as §4.1. **Outstanding on both sides: the two captures in §8 (E1, E2) and the run blocks in §7 — everything else asked has been applied.**
+
 ## 10. Working with the author
 
 This review is written to be iterated on, not applied by force. The plan agreed with the maintainer: we forward this first draft to Gemini; he works through §9's instructions on his side (the evidence items in §8 are all captures he can make in minutes); we fill the "pending M2 run" numbers here as the blocks execute; and both documents converge before either side publishes the next revision. The MTP question is explicitly kept open with a calibration path (§4.2 item 4, §7 block 5) — the maintainer's prior is that the card's 1.5–2× claim holds or is beatable within a calibrated range, and the measurement plan is built to test exactly that. The response article in this repo (`docs/QWEN36_METAL_RESPONSE.md`) is our public-voice version; it links here for the receipts.
+
+The loop has since run once, end to end: both article revisions are applied and verified (§9.1). What remains on both sides is measurements, not words — tracked cell by cell in §11's scoreboard, with the decision rules in §7 and the kernel risks in §13.
+
+## 11. The scoreboard (the state of every comparative number)
+
+One table for everything in play. The pending cells are the work; every filled cell is traceable to a section above or a recorded doc §. Re-check this table when the runs land — it is the agreement both documents describe.
+
+| Metric | Unsloth (measured) | Strata (recorded) | Strata (projected) | Status |
+|---|---|---|---|---|
+| Prefill, bulk 5.8k tokens | 263.6 tok/s (N=5,862) | bringup ~25 token-by-token; 22.3 tok/s @2K chunk-512 pre-lever | — | theirs screenshot-derived; ours pending T12 |
+| Prefill, small batch (~450) | 136.0 tok/s | — | — | pending T12; batch-size rule (§3) |
+| Prefill vs context depth | ~260 at 8k and 32k windows alike | — | n/a (structure-bound, §3) | verified twice on their side |
+| Decode, shallow (~0.4k) | 31.2 tok/s | 16.6 (article Test 1); 17.5–21.4 (T4/T4.5 gate bases) | — | both sides measured |
+| Decode, 8k window | 23.8 tok/s (2,328 tokens) | — | — | pending T12/T6 matrix |
+| Decode, 11.3k depth | 21.2 tok/s (5,020 tokens; contention-recovered) | 12.2–16.3 all-levers at ≤4k depth only | ~19–31 with fold+f16 at the 25–35% class (assumption labeled, §4.1) | the headline cell — E2 + T6 A/B |
+| Decode, 16k depth | — | 7.2 @ >6k (bringup-era); 8 @ ~4.1k (pre-fold) | T11's gate: >6 sustained, measured | T6 A/B feeds it |
+| QSA KV bytes per context token | n/a (f16 default, batched) | fp32 default 41 KB; `--kv-f16` 20.5 KB | fold+f16 2.6 KB — 16× vs today's default | arithmetic from the card's geometry; A/B pending |
+| Memory, 32k working set | loads and runs on 24 GB (one yellow warning) | same by math (~12.5–13 GB, §4.3) + the refusal gate | — | their side proven; ours gate-tested at 16k |
+| Bus efficiency class | 26–37% across two depths | 14–22% at ≤4k depth (all-levers, fp32 KV) | 25–35% (target) | the carry-over is the A/B question |
+| Dispatches per 512-token chunk | n/a (whole-ubatch kernels) | ~20,480 (static analysis, labeled) | measured by T13 | pending |
+| MTP in the benchmark session | on/off unresolved — one log line (§8 E1) | net-negative as shipped (5.0–11.1 vs 17.5–21.4 base) | the calibration sweep is optional (§7 block 5) | open by one capture |
+
+## 12. What would change our mind (falsifiability)
+
+The projections above are testable. What would kill each, so nobody has to guess where the argument stands after a run:
+
+1. **"The prefill gap is dispatch structure" (§4.1).** Killed if T13's counts come back small (attention + MoE together under ~5k dispatches per 512-chunk) or if the T9 A/B cuts the count by >10× yet buys <1.5× at every size — then the binding term is not dispatch overhead, and the effort re-points at dequant or bandwidth behavior.
+2. **"The ~25–35% efficiency class carries over to the folded path" (§4.1).** Killed if the T6 A/B shows <1.2× deep-decode gain from the fold — KV traffic is then not the binding term at these depths; the GDN state reads and the weight stream get re-examined before more kernel work.
+3. **"8.2k was a conservative guess, not a ceiling" (§3).** Survived its test (32k loads on 24 GB on their engine; ours gate-tested at 16k). The residual risk is thermal, and it belongs to the tokens-per-joule run and E2 — not to a paging redesign.
+4. **"A calibrated MTP ≥1.2× at np=1 is plausible" (§4.2, the maintainer's stated prior).** Killed if §7 block 5's window sweep cannot clear 1.2× on the M2 — the net-negative verdict then stands recorded as final.
+5. **"Fewer KV bytes → measurably cooler sustained sessions" (the response's proposed experiment).** Killed if `powermetrics` shows under ~5% difference in sustained clocks or watts between the folded and unfolded paths at matched tok/s — the energy pitch then comes out of the response.
+
+## 13. Risk register for the kernel tickets (T9/T10)
+
+What could stop the two kernel tickets, and the fallback rungs — written down before anyone starts, so a stall has a documented next move instead of a silence:
+
+| Risk | Why it is real | Mitigation / fallback |
+|---|---|---|
+| T9: threadgroup memory at head dim 256 | A 512-key tile of K or V at D=256 does not fit where the T1 8k-cell ceiling already bit | Tile rows × keys with a two-pass score stage through scratch (the SK pair's own pattern) |
+| T9: the ≥5× bar may only clear at large chunks | Fixed overheads amortize (the 136-vs-260 rule) — a small chunk may never clear 5× | Auto-engage per chunk size (the SK precedent); the bar is per-size, and small chunks keep the current path |
+| T9: the rel-bound envelope drifts with chunk length | Softmax reassociation error grows with the summed range | Measure the bound per size in the ablation matrix (§7 block 6); the ladder identity arbitrates; fp32 accumulation keeps it in the MMA's ~1e-3 class (expected, to be measured) |
+| T9: full fusion stalls entirely | A 2D flash kernel is the biggest kernel in the queue | Fallback rung: multi-row blocks through the existing row-blocked SK pair — dispatches ÷ B at the same envelope class, no new kernel family; a lower-risk first step on the way to full fusion either way |
+| T10: expert imbalance | ~64 rows/expert at a 2k chunk, ~16 at 512 — tail experts get 1–2 rows and a GEMM degenerates to a GEMV | Hybrid dispatch: batched GEMM above a measured row threshold, the existing GEMV below it; the threshold comes from T13's rows-per-expert histogram |
+| T10: dequant amortization | The batched win exists only if the per-expert dequant is reused across enough rows | The same histogram decides; below the threshold the GEMV path is already at its floor |
+| Both: the parity contract | Any ladder miss on the 10 prompts (twice) | The knob stays off and the default stays byte-identical — the contract is not negotiable; the timeline is |
+
+## 14. Notation
+
+| Term | Meaning |
+|---|---|
+| QSA | The gated-attention layers (10 of 40; 16 query / 2 KV heads, head dim 256) |
+| GDN | Gated Delta Net recurrent layers (30 of 40; recurrent state ~31 MB/token total) |
+| WY | The parallel prefix-scan form of the GDN recurrence (§10: 14.6–14.9×) |
+| SK | Split-K attention (T1; auto-engages past the 8k threadgroup-memory ceiling) |
+| MMA | The MPP matrix-unit dense GEMM donor (§10: 15.3×) |
+| H / HKV | Query heads / KV heads (16 / 2 on the attention layers — the 8× fold factor) |
+| ubatch | llama.cpp's physical batch unit; whole-ubatch kernels are their prefill advantage |
+| pp / tg | Prompt processing / text generation (llama.cpp benchmark terms) |
+| `--kv-f16` | 16-bit KV cache (§9: 0.34 → 0.17 GB at 8k, 1.34 → 0.67 GB at 32k) |
+| TTFT | Time to first token |
+| np | llama.cpp parallel slots (the benchmark session's API page showed 4; MTP needs np=1) |
+| E1 / E2 | The two evidence captures (§8) |

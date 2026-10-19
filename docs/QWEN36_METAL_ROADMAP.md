@@ -193,14 +193,14 @@ On 2026-10-19, empirical benchmarks were conducted on an Apple M2 (24 GB) compar
 
 ### Execution order (measurement-first; the review doc's §6)
 
-**T12 → T13 → T6's pending A/B → T8 → T9 → T10 → T11.** The kernel tickets' targets are set against T12's numbers, not against prose.
+**T12 → T13 → T6's pending A/B → T8 → T9 → T10 → T11.** The kernel tickets' targets are set against T12's numbers, not against prose. Every measurement block in the review doc's §7 carries a **Decides** line — what each outcome changes. The kernel tickets' risk register and fallback rungs are the review's §13; the scoreboard that tracks every comparative number (measured, recorded, projected, pending) is its §11.
 
 ### T12 — The honest re-baseline (new, first)
-- **Scope**: run the §6 matrix with every lever on (`tools/qwen35/q36_prefill_bench.py`, sizes 2048/4098, chunks 0/512, `--prefill auto --kv-f16`, `STRATA_Q36M_GDN_WY=1 STRATA_Q36M_DENSE_MMA=1 STRATA_Q36M_ATTN_GQA=1`), fresh model load per cell; record prefill and decode with hardware, build, date, and machine state.
+- **Scope**: run the §6 matrix with every lever on (`tools/qwen35/q36_prefill_bench.py`, sizes 2048/4098, chunks 0/512, `--prefill auto --kv-f16`, `STRATA_Q36M_GDN_WY=1 STRATA_Q36M_DENSE_MMA=1 STRATA_Q36M_ATTN_GQA=1`), fresh model load per cell; record prefill and decode with hardware, build, date, and machine state. The full hours-class ablation matrix — levers added one at a time — is the review's §7 block 6, the stretch that ends the which-lever-bought-what question.
 - **Gate**: the numbers land in docs/QWEN36_METAL.md; the targets below are restated against them. No default flips in this ticket.
 
 ### T13 — Dispatch-count instrumentation (new, second)
-- **Scope**: a one-off counter for Metal dispatches per chunk, per path (per-row attention, MoE GEMV, chunked) — a stderr counter, no behavior change.
+- **Scope**: a one-off counter for Metal dispatches per chunk, per path (per-row attention, MoE GEMV, chunked) — counted at the single dispatch choke point (the command-encoder wrapper), one stderr line per chunk, no behavior change. The static ~20,480 estimate it replaces sits labeled in the review's §11 scoreboard.
 - **Gate**: the measured per-chunk dispatch counts recorded per path; replaces the unverified "20,000+ dispatches" estimate in the comparison narrative; T9/T10 cite before/after counts as their evidence.
 
 ### T8 — Prefix cache: measure the shipped feature, keep the common prefix on divergence (revised)
@@ -212,12 +212,12 @@ On 2026-10-19, empirical benchmarks were conducted on an Apple M2 (24 GB) compar
 - **Observation (kept)**: `push_qsa_attention` dispatches the decode path's per-row attention sequence `nt` times per chunk per layer (`q36_metal.cpp` L1274–1278) — the dispatch storm T13 counts.
 - **Scope**: a fused causal 2D attention kernel for the chunk path behind an opt-in knob (`STRATA_Q36M_ATTN_FLASH=1`, the env pattern read once per process so the MTP verify window never mixes paths), with a measured rel-bound envelope.
 - **Parity contract (the honest version)**: fused online-softmax attention cannot preserve the T2 bit-identity contract — the accumulation order differs by design. The gate set follows the §10 MMA precedent: rel-bound envelope, 10-prompt ladder token-identity (greedy, 128 tokens), byte-identical no-flag default, and the **measured ≥5x-on-every-size bar** (§6) before any default flip.
-- **Target**: set by T12's re-baseline and the ≥5x bar — not prose. The mechanism direction is confirmed from both sides: batch structure is where prefill lives (our T3 numbers; their pinned #264 on CUDA).
+- **Target**: set by T12's re-baseline and the ≥5x bar — not prose. The mechanism direction is confirmed from both sides: batch structure is where prefill lives (our T3 numbers; their pinned #264 on CUDA). The risk register and the fallback rung (multi-row blocks through the row-blocked SK pair — dispatches ÷ B at the same envelope class) are the review's §13.
 
 ### T10 — Batched MoE GEMM for routed experts (donor-reuse)
 - **Observation (kept)**: routed experts run gathered GEMV (`push_c_gemv` / `push_c_lpr8`).
 - **Scope**: group the chunk's tokens by routed expert ID and run a batched GEMM per active expert, reusing the `q36_dense.metal` donor (`push_c_dense`'s dequant-once, matrix-unit path). Same knob + rel-bound envelope + ladder gates as T9; strictly opt-in until the measured bar clears.
-- **Context**: the fork's pinned #264 (+16.4–17.8% pp on Qwen3.6, decode tie) is CUDA-only — Metal takes the existing path, so this is a differentiator opportunity, not catch-up.
+- **Context**: the fork's pinned #264 (+16.4–17.8% pp on Qwen3.6, decode tie) is CUDA-only — Metal takes the existing path, so this is a differentiator opportunity, not catch-up. The imbalance case (tail experts at 1–2 rows, ~64 rows/expert at a 2k chunk but ~16 at 512) keeps the existing GEMV below a measured row threshold — the threshold comes from T13's rows-per-expert histogram (review §13).
 
 ### T11 — Predictable context budgets (reframed)
 - **Observation (corrected)**: there is no measured 8.2k wall — the 32k load succeeded on 24 GB on both engines. The original "paged & dynamic context" premise is refuted; vLLM-style paging is speculative infrastructure at these sizes.
