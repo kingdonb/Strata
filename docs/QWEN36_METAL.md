@@ -303,3 +303,83 @@ Measured on the M2 (Apple M2, 2026-10-18, UD-Q2_K_XL):
 - **Parity**: 10/10 token-identical twice (`q36_cmp_gate.py` pass 1 and pass 2 vs `/tmp/q36-default.json`: `identical: 10 of 10`). `q36_chunk_parity` remains all-OK (38/38 bit-identical).
 - **Speed**: decode tok/s across the 10 prompts measured at 5.6–11.7 tok/s (base without MTP: ~17.5–21.4 tok/s); draft accept rate measured at ~15–25%.
 - **Verdict**: The target $\ge 1.2\times$ speedup is not met on Apple Silicon unified memory without a draft-vocab subset head (CUDA's `STRATA_Q36_DRAFT_VOCAB`). Per the ticket scope, the flag remains strictly opt-in (`--mtp 0` / flag-absent default); no default flip is taken.
+
+## 8. GQA-folded attention (`STRATA_Q36M_ATTN_GQA=1`)
+
+The model is grouped-query: 16 query heads share 2 KV heads (H/HKV = 8, read from the geometry,
+never assumed), and every query head of a group reads the same K/V cells — an ~8x KV-traffic
+multiplier at depth that L1/L2 are not catching (§6's chunk table shows the term growing with
+position; it is why chunked prefill cannot win at depth). The folded kernels give one threadgroup
+the whole KV-head group and compute its heads' scores against each K/V cell once. Opt-in behind
+the parity knob `STRATA_Q36M_ATTN_GQA=1` (the `STRATA_Q36M_ATTN_SK` pattern); the default path is
+unchanged until a measurement says otherwise.
+
+- **Path A — the `k_attn` range (n_pos <= 8,192 cells)**: `k_attn_gqa_part` (one threadgroup per
+  KV head; the group's q rows staged in threadgroup memory; thread tid computes the group's HG
+  scores for cells p = tid (mod 128), the K row read once, all HG dots chaining against it) and
+  `k_attn_gqa_merge` (per head, k_attn's own one-pass sequence over the staged scores: max, exp
+  into the tile, `block_sum`, the P·V chains per output dim — the V cells read once per group).
+  Scores travel through a device scratch (`[head][cell]`, H x ctx floats, allocated only when the
+  knob is on) because HG x n_pos scores cannot fit the 32 KB threadgroup ceiling.
+- **Path B — the split-K range (n_pos > 8,192, or `STRATA_Q36M_ATTN_SK=1`)**:
+  `k_attn_sk_part_gqa` (one threadgroup per (256-cell chunk, KV head) covers the group's HG rows —
+  `k_attn_sk_part`'s body per head) writes the same (row, chunk) partial slots, so
+  **`k_attn_sk_merge` runs unchanged**.
+- **Bit-parity contract** (the design target, not a tolerated approximation): per (head, cell) the
+  score is the same fp chain (i ascending, one accumulator, then *scale); the max is over the same
+  values (exact, any tree); exp and the per-thread partial sums keep `k_attn`'s thread<->cell map
+  and reduction trees; P·V is one fp chain per (head, output dim) walking p ascending, the e and v
+  operands shared but never re-rounded; path A keeps `k_attn`'s `(acc * (1/sum)) * sigm(gate)`
+  ending, path B keeps the merge's. Exact FLOPs: no score or exp recompute — the only new traffic
+  is the score-scratch round trip (~256x smaller than the KV term it replaces). The safe-math
+  build (no reassociation) is what makes the chain-by-chain argument hold. A host-side simulation
+  of both kernel structures (transcribed loop for loop, sharing only the reduction primitives)
+  shows every partial and output bit-identical to the unfolded kernels across decode and
+  chunk-row shapes, n_pos 1..8,192 and the split-K range (spec task 000681's
+  `gqa_parity_sim.cpp`; 17 shapes, all bit-identical).
+- **Engagement**: the fold replaces whichever kernels the row's length selects — the `k_attn` pair
+  below the cap, the split-K part above it (the merge is common). `push_qsa_attention` reads the
+  knob at the point of use (the `STRATA_Q36M_TRACE` pattern), so the decode step, the chunk path's
+  rows and the MTP draft rows/verify windows (§7) all fold through the one shared helper; with
+  `STRATA_Q36M_ATTN_SK=1` too, path B runs at every length.
+- **Guards at startup (knob-gated, refused with the numbers, no fallback)**: H/HKV < 2 (the fold
+  is a no-op) or threadgroup staging past the 32 KB ceiling — the folded split-K part takes
+  HG x (256 + 8 + 256) floats (16,640 B at HG = 8; HG <= 15 at head_dim 256), the folded `k_attn`
+  part HG x head_dim floats.
+
+Gates (same Mac, same day, same build):
+
+```bash
+# gate 1: the compile test creates all pipelines, the three folded ones included
+cmake --build build-metal && ./build-metal/q36_compile_test
+# gate 2: the fold forced at 4K is 10/10 token-identical to the default path
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096" --out /tmp/q36-base.json
+STRATA_Q36M_ATTN_GQA=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096" --out /tmp/q36-gqa.json
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-base.json /tmp/q36-gqa.json
+# cross-checks, each 10/10: split-K forced, with and without the fold; --mtp 2, with and without it
+STRATA_Q36M_ATTN_SK=1 STRATA_Q36M_ATTN_GQA=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096" --out /tmp/q36-sk-gqa.json
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-sk.json /tmp/q36-sk-gqa.json
+STRATA_Q36M_ATTN_GQA=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096 --mtp 2" --out /tmp/q36-mtp-gqa.json
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-mtp.json /tmp/q36-mtp-gqa.json
+# gate 3: the chunk ladder with the fold on (twice), and q36_chunk_parity
+STRATA_Q36M_ATTN_GQA=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096 --prefill 512" --out /tmp/q36-gqa-chunk.json
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-gqa.json /tmp/q36-gqa-chunk.json
+# gate 4: the deep-context delta - 4,098-token read at 16K and decode tok/s at pos ~4,100,
+# fold off vs on (the tool appends --prefill itself; the knob travels through the environment)
+python3 tools/qwen35/q36_prefill_bench.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 16384" --sizes 2048,4098 --chunks 0,512 --rounds 3 --gen 128 \
+  --out bench/results/<date>-m2-q36-gqa/bench-off.json
+STRATA_Q36M_ATTN_GQA=1 python3 tools/qwen35/q36_prefill_bench.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 16384" --sizes 2048,4098 --chunks 0,512 --rounds 3 --gen 128 \
+  --out bench/results/<date>-m2-q36-gqa/bench-on.json
+```
+
+Measured on the M2: **pending** — the numbers (the 4,098-token read at 16K, fold off vs on; decode
+tok/s at pos ~4,100; the same-day gate 2/3 results) land here when the gates run on the M2, in this
+section's format: what, hardware, date. Until then the knob stays opt-in and the default path is
+byte-identical (the fold-off base json vs the pre-change build's base json, 10/10, is part of gate 2).
