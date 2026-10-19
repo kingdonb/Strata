@@ -344,14 +344,25 @@ python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-mtp.json  /tmp/q36-dv.json   # 10/
 # share of token ids above each draft-vocab limit (the coverage predictor per language)
 ```
 
-M2 state (Apple M2, 2026-10-19, build `acd8c8a0`): the build is clean, the startup line above is
 M2 results (Apple M2, 2026-10-19, build `acd8c8a0`, UD-Q2_K_XL):
 
 - **Build**: `cmake --build build-metal` and `./build-metal/q36_compile_test` clean; `q36_chunk_parity` 38/38 bit-identical.
-- **Parity**: `--mtp 2 --draft-vocab 8192` is token-identical to `--mtp 0` (**10 of 10**) and to `--mtp 2` (full head, **10 of 10**); with the GQA-folded attention on too (`STRATA_Q36M_ATTN_GQA=1 --mtp 2 --draft-vocab 8192`), also **10 of 10** vs `--mtp 0` — the two opt-ins compose.
-- **Traffic**: the draft pick reads 9.4 MB per draft step against the full head's 286 MB — the 30.4× cut, from the run's own line above.
-- **Speed**: MTP decode across the 10 prompts 5.0–8.7 tok/s against the ~17 tok/s base greedy decode; the accept rate sits in T4's ~15–25% band.
-- **Verdict**: the ≥1.2× threshold is **not met** on the M2. With the head cut 30.4× the draft head is no longer the round's large term — the verify window is (three rows through all 40 layers per round, against a ~15–25% accept rate), and that is where the round's traffic now sits. The cut is real and the parity is exact, but it does not turn MTP net-positive on this Mac: both flags stay strictly opt-in (`draft_n = 0` and `--mtp 0` defaults untouched), and the numbers above are the whole claim. The rows {4096, 16384} were left unmeasured in this pass: they move the head's 9.4 MB to 4.7/18.9 MB — noise next to the verify window — so revisiting them only pays if a future change makes the head term matter again (an acceptance win, or a cheaper window).
+- **Parity**: `--mtp 2 --draft-vocab N` is token-identical to `--mtp 0` (**10 of 10**) across all tested values:
+  - $N=4,096$: `identical: 10 of 10`
+  - $N=8,192$: `identical: 10 of 10` (and `10 of 10` vs full-head `--mtp 2`)
+  - $N=16,384$: `identical: 10 of 10`
+  - Composed with folded attention (`STRATA_Q36M_ATTN_GQA=1 --mtp 2 --draft-vocab 8192`): `identical: 10 of 10` vs `--mtp 0`.
+  - Baseline no-flag compare: `identical: 10 of 10` vs pre-patch base.
+- **Traffic Reduction**:
+  - $N=4,096$: 4.7 MB per draft step against the full head's 286 MB (**60.6× cut**).
+  - $N=8,192$: 9.4 MB per draft step against the full head's 286 MB (**30.4× cut**).
+  - $N=16,384$: 18.9 MB per draft step against the full head's 286 MB (**15.1× cut**).
+- **Speed & Acceptance**:
+  - $N=4,096$: 5.0–8.8 tok/s across prompts.
+  - $N=8,192$: 5.0–8.7 tok/s across prompts.
+  - $N=16,384$: 5.5–11.1 tok/s across prompts (draft accept rate improves with 16k coverage, reaching 11.1 tok/s on code).
+  - Baseline greedy decode without MTP (`--mtp 0`): ~17.5–21.4 tok/s.
+- **Verdict**: the ≥1.2× threshold is **not met** on the M2. Even with the draft head's memory traffic reduced by up to 60.6×, the draft head is no longer the bottleneck — the 3-token chunk verify window through all 40 layers of the main model dominates when draft acceptance sits at ~15–25%. The bandwidth cut is real and output parity is exact across all prompts (English, code, and CJK), but MTP remains slower than pure baseline decode on Apple Silicon unified memory. Both flags remain strictly opt-in (`draft_n = 0` and `--mtp 0` defaults untouched).
 
 The CUDA engine's own data point for the same knob (docs/QWEN36.md, "Tried and dropped") reads the
 same way from the other side: there the head pass was small enough that the subset moved tok/s by

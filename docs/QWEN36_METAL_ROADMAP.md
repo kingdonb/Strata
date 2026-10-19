@@ -83,10 +83,10 @@ on the same Mac and day; it stays opt-in unless ≥1.2x is measured. Depends on 
 
 State: done — all gates green on the M2 (Apple M2, 2026-10-19, build `acd8c8a0`, UD-Q2_K_XL):
 build + `q36_compile_test` clean; `q36_chunk_parity` 38/38; the subset's parity 10/10 vs `--mtp 0`
-and vs `--mtp 2` (full head), and 10/10 with the GQA fold on (`STRATA_Q36M_ATTN_GQA=1`); the
-traffic line verified (9.4 MB of the full head's 286 MB per draft step, 30.4×). Measured 5.0–8.7
-tok/s against the ~17 base: the ≥1.2x rule is **not met** — with the head cut, the verify window
-(three rows through 40 layers at a ~15–25% accept rate) is the round's dominant term — so
+and vs `--mtp 2` (full head) across {4096, 8192, 16384}, and 10/10 with the GQA fold on
+(`STRATA_Q36M_ATTN_GQA=1`); the traffic line verified (4.7–18.9 MB vs 286 MB full head, up to 60.6× cut).
+Measured 5.0–11.1 tok/s against the ~17.5–21.4 base: the ≥1.2x rule is **not met** — with the head cut,
+the verify window (three rows through 40 layers at a ~15–25% accept rate) is the round's dominant term — so
 `--draft-vocab` ships strictly opt-in with the numbers recorded (docs/QWEN36_METAL.md §7). T4's
 verdict named this as the missing piece; the piece is now in, and the M2's verdict is that the
 window, not the head, is what keeps MTP net-negative there.
