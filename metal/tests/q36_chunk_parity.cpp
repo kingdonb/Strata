@@ -9,6 +9,7 @@
 #include "mtl_rt.h"
 #include "ref_quant.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -124,6 +125,27 @@ void check_bytes(const char* stage, const void* a, const void* b, size_t bytes) 
     std::printf("  %-14s OK\n", stage);
 }
 
+// the WY form reassociates the scan, so its stages compare to rounding, not bits: the relative error of
+// a against b (gdn_prompt_parity's scheme)
+void check_rel(const char* stage, const void* av, const void* bv, size_t bytes, double tol) {
+    const float* a = (const float*) av;
+    const float* b = (const float*) bv;
+    const size_t n = bytes / 4;
+    double se = 0, sr = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const double e = (double) a[i] - (double) b[i];
+        se += e * e;
+        sr += (double) b[i] * (double) b[i];
+    }
+    const double r = std::sqrt(se / std::max(sr, 1e-30));
+    if (r < tol) {
+        std::printf("  %-14s OK (rel %.2e)\n", stage, r);
+        return;
+    }
+    std::printf("  %-14s FAIL: rel %.3e >= %.0e\n", stage, r, tol);
+    ++g_fails;
+}
+
 // k_tables' placement invariant: pos is a permutation of the entry rows, each row -> its entry index and
 // token, each entry inside its expert's [off, off + cnt) run (the rank order itself varies run to run)
 void check_placement(const char* stage, const int* ids, const int* cnt_off, const int* srt_gu, const int* srt_d,
@@ -145,7 +167,155 @@ void check_placement(const char* stage, const int* ids, const int* cnt_off, cons
 
 }  // namespace
 
-int main() {
+// --bench: the WY chain's per-part timings against k_gdn_chunk at the real geometry (HK 16, HV 48,
+// S 128, C 10240), T = 512 and 2048, median of 5 after a 0.3 s warm-up - the numbers the engine swap
+// decision is checked against (docs/QWEN36_METAL.md's chunk section)
+static void run_bench() {
+    mtl::Context cx;
+    const int lib = cx.compile({"quant.metal", "q36.metal"});
+    const int HK = 16, HV = 48, S = 128, C = (2 * HK + HV) * S, ZV = HV * S;
+    const float eps = 1e-6f;
+    mtl::Pipeline p_gdnc = cx.pipeline(lib, "k_gdn_chunk"), p_prep = cx.pipeline(lib, "k_gdn_prep_c"),
+                  p_cp = cx.pipeline(lib, "k_gdn_cprep_c"), p_cs = cx.pipeline(lib, "k_gdn_cstate_c"),
+                  p_co = cx.pipeline(lib, "k_gdn_cout_c");
+    ref::Rng r(7);
+    auto timeit = [&](const std::vector<mtl::Dispatch>& ds) {
+        cx.warm(ds, 0.3);
+        std::vector<double> t;
+        for (int i = 0; i < 5; ++i) t.push_back(cx.run(ds));
+        std::sort(t.begin(), t.end());
+        return t[t.size() / 2];
+    };
+    for (int T : {512, 2048}) {
+        const int NC = (T + 31) / 32;
+        auto F = [&](size_t n) { return cx.alloc(4 * n); };
+        mtl::Buffer conv = F((size_t) T * C), alpha = F(T * HV), beta = F(T * HV), dtb = F(HV), ssa = F(HV);
+        mtl::Buffer S1 = F(HV * S * S), S2 = F(HV * S * S), out1 = F((size_t) T * ZV);
+        mtl::Buffer qn = F((size_t) T * HK * S), kn = F((size_t) T * HK * S), vc = F((size_t) T * HV * S),
+                    gb = cx.alloc(8 * (size_t) T * HV), U = F((size_t) HV * NC * 32 * S), W = F((size_t) HV * NC * 32 * S),
+                    lgo = F((size_t) HV * NC * 32), delta = F((size_t) HV * NC * 32 * S);
+        for (size_t i = 0; i < (size_t) T * C; ++i) conv.as<float>()[i] = r.sym() * 2.0f;
+        for (int i = 0; i < T * HV; ++i) {
+            alpha.as<float>()[i] = r.sym() * 2.0f;
+            beta.as<float>()[i] = r.sym() * 2.0f;
+        }
+        for (int i = 0; i < HV; ++i) {
+            dtb.as<float>()[i] = r.sym();
+            ssa.as<float>()[i] = -std::exp(r.sym());
+        }
+        for (int i = 0; i < HV * S * S; ++i) S1.as<float>()[i] = r.sym() * 0.1f;
+        std::memcpy(S2.ptr, S1.ptr, 4 * HV * S * S);
+        mtl::Dispatch dq;
+        dq.p = &p_gdnc;
+        dq.args = {mtl::Arg::B(conv), mtl::Arg::B(alpha), mtl::Arg::B(dtb), mtl::Arg::B(ssa), mtl::Arg::B(beta),
+                   mtl::Arg::B(S1), mtl::Arg::B(out1), mtl::Arg::V(HK), mtl::Arg::V(S), mtl::Arg::V(HV),
+                   mtl::Arg::V(C), mtl::Arg::V(eps), mtl::Arg::V(T)};
+        dq.grid[0] = HV;
+        dq.tg[0] = 128;
+        mtl::Dispatch d1;
+        d1.p = &p_prep;
+        d1.args = {mtl::Arg::B(conv), mtl::Arg::B(alpha), mtl::Arg::B(dtb), mtl::Arg::B(ssa), mtl::Arg::B(beta),
+                   mtl::Arg::B(qn), mtl::Arg::B(kn), mtl::Arg::B(vc), mtl::Arg::B(gb), mtl::Arg::V(HK),
+                   mtl::Arg::V(S), mtl::Arg::V(C), mtl::Arg::V(eps), mtl::Arg::V(T)};
+        d1.grid[0] = HV;
+        d1.grid[1] = T;
+        d1.tg[0] = 128;
+        d1.barrier = true;
+        mtl::Dispatch d2;
+        d2.p = &p_cp;
+        d2.args = {mtl::Arg::B(qn), mtl::Arg::B(kn), mtl::Arg::B(vc), mtl::Arg::B(gb), mtl::Arg::B(U), mtl::Arg::B(W),
+                   mtl::Arg::B(lgo), mtl::Arg::V(HK), mtl::Arg::V(HV), mtl::Arg::V(T)};
+        d2.grid[0] = HV;
+        d2.grid[1] = NC;
+        d2.tg[0] = 256;
+        d2.barrier = true;
+        mtl::Dispatch d3;
+        d3.p = &p_cs;
+        d3.args = {mtl::Arg::B(S2), mtl::Arg::B(qn), mtl::Arg::B(kn), mtl::Arg::B(U), mtl::Arg::B(W), mtl::Arg::B(lgo),
+                   mtl::Arg::B(delta), mtl::Arg::B(out1), mtl::Arg::V(HK), mtl::Arg::V(HV), mtl::Arg::V(T)};
+        d3.grid[0] = HV * 4;
+        d3.tg[0] = 256;
+        d3.barrier = true;
+        mtl::Dispatch d4;
+        d4.p = &p_co;
+        d4.args = {mtl::Arg::B(qn), mtl::Arg::B(kn), mtl::Arg::B(delta), mtl::Arg::B(lgo), mtl::Arg::B(out1),
+                   mtl::Arg::V(HK), mtl::Arg::V(HV), mtl::Arg::V(T)};
+        d4.grid[0] = HV;
+        d4.grid[1] = NC;
+        d4.tg[0] = 128;
+        d4.barrier = true;
+        const double seq = timeit({dq}), prep = timeit({d1}), cp = timeit({d2}), cs = timeit({d3}), co = timeit({d4});
+        std::printf("T %4d: k_gdn_chunk %8.3f ms | WY: prep %7.3f + cprep %7.3f + cstate %7.3f + cout %7.3f = %8.3f ms\n",
+                    T, seq * 1e3, prep * 1e3, cp * 1e3, cs * 1e3, co * 1e3, (prep + cp + cs + co) * 1e3);
+    }
+
+    // the dense projections at the attn_qkv shape (n_out 10240 x n_in 2048): the released chunk GEMV vs
+    // act + dq + gemm on the matrix units, Q4_K and Q2_K (UD-Q2_K_XL's dominant dense types)
+    {
+        const int NIN = 2048, NOUT = 10240;
+        const int lib_mma = cx.compile({"quant.metal", "units.metal", "mma.metal", "q36_dense.metal"});
+        mtl::Pipeline p_act16 = cx.pipeline(lib_mma, "act_f16"), p_g64 = cx.pipeline(lib_mma, "gemm_f16_64_64_4");
+        mtl::Pipeline p_gq4 = cx.pipeline(lib, "k_gemv_c_T_Q4_K"), p_gq2 = cx.pipeline(lib, "k_gemv_c_T_Q2_K");
+        struct DqArgsA {
+            uint32_t n_in, n_out, row_bytes, perm;
+        };
+        struct GemmArgsA {
+            int M, N, K, pad;
+        };
+        const int types[] = {12, 10};      // Q4_K, Q2_K
+        const int rbs[] = {144, 84};       // bytes per 256-wide block
+        for (int T : {512, 2048})
+            for (int ti = 0; ti < 2; ++ti) {
+                auto F = [&](size_t n) { return cx.alloc(4 * n); };
+                mtl::Buffer W = cx.alloc((size_t) rbs[ti] * (NIN / 256) * NOUT);
+                for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym();
+                sanitize(W);
+                mtl::Buffer x = F((size_t) T * NIN), y1 = F((size_t) T * NOUT), y2 = F((size_t) T * NOUT);
+                mtl::Buffer xh = cx.alloc(2 * (size_t) T * NIN), wh = cx.alloc(2 * (size_t) NOUT * NIN);
+                GemvParam p{(unsigned long) rbs[ti] * (NIN / 256), 0, NIN, NOUT, (unsigned long) NIN};
+                mtl::Dispatch dg;
+                dg.p = ti == 0 ? &p_gq4 : &p_gq2;
+                dg.args = {mtl::Arg::B(W), mtl::Arg::B(x), mtl::Arg::B(y1), mtl::Arg::V(p), mtl::Arg::V(T),
+                           mtl::Arg::V(0), mtl::Arg::V(T)};
+                dg.grid[0] = (NOUT + 7) / 8;
+                dg.grid[1] = 1;
+                dg.tg[0] = 256;
+                mtl::Dispatch d0;
+                d0.p = &p_act16;
+                d0.args = {mtl::Arg::B(x), mtl::Arg::B(xh), mtl::Arg::V((uint32_t) (T * NIN))};
+                d0.grid[0] = ((size_t) T * NIN + 255) / 256;
+                d0.tg[0] = 256;
+                d0.barrier = true;
+                DqArgsA da{(uint32_t) NIN, (uint32_t) NOUT, (uint32_t) (rbs[ti] * (NIN / 256)), 0};
+                mtl::Pipeline p_dq_t = cx.pipeline(lib_mma, ("dq_f16_" + std::to_string(types[ti])).c_str());
+                mtl::Dispatch d1;
+                d1.p = &p_dq_t;
+                d1.args = {mtl::Arg::B(W), mtl::Arg::B(wh), mtl::Arg::V(da)};
+                d1.grid[0] = (NIN / 32 + 63) / 64;
+                d1.grid[1] = NOUT;
+                d1.tg[0] = 64;
+                d1.barrier = true;
+                GemmArgsA ga{T, NOUT, NIN, 0};
+                mtl::Dispatch d2;
+                d2.p = &p_g64;
+                d2.args = {mtl::Arg::B(xh), mtl::Arg::B(wh), mtl::Arg::B(y2), mtl::Arg::V(ga)};
+                d2.grid[0] = (NOUT + 63) / 64;
+                d2.grid[1] = (T + 63) / 64;
+                d2.tg[0] = 128;
+                d2.barrier = true;
+                const double seq = timeit({dg}), act = timeit({d0}), dqt = timeit({d1}), gmt = timeit({d2});
+                std::printf("T %4d dense %s: k_gemv_c %8.3f ms | MMA: act %6.3f + dq %6.3f + gemm %7.3f = %8.3f ms\n", T,
+                            ti == 0 ? "q4_K" : "q2_K", seq * 1e3, act * 1e3, dqt * 1e3, gmt * 1e3,
+                            (act + dqt + gmt) * 1e3);
+            }
+    }
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--bench") {
+        run_bench();
+        return 0;
+    }
     mtl::Context cx;
     const int lib = cx.compile({"quant.metal", "q36.metal"});
     std::printf("device %s\n", cx.device_name().c_str());
@@ -171,6 +341,8 @@ int main() {
     mtl::Pipeline p_g_q5k = pipe("k_gemv_T_Q5_K"), p_g_q6k = pipe("k_gemv_T_Q6_K");
     mtl::Pipeline p_gc_f32 = pipe("k_gemv_c_T_F32"), p_gc_q8 = pipe("k_gemv_c_T_Q8_0"), p_gc_q4k = pipe("k_gemv_c_T_Q4_K");
     mtl::Pipeline p_gc_q5k = pipe("k_gemv_c_T_Q5_K"), p_gc_q6k = pipe("k_gemv_c_T_Q6_K");
+    mtl::Pipeline p_gc_q2k = pipe("k_gemv_c_T_Q2_K"), p_gc_iq2 = pipe("k_gemv_c_T_IQ2_XS"),
+                  p_gc_iq3 = pipe("k_gemv_c_T_IQ3_XXS");
     mtl::Pipeline p_lpr8 = pipe("k_gemv_lpr8_T_Q4_K");
     mtl::Pipeline p_topk = pipe("k_topk_router"), p_route = pipe("k_route_chunk");
     mtl::Pipeline p_zero = pipe("k_zero"), p_hist = pipe("k_hist"), p_off = pipe("k_exp_off"), p_place = pipe("k_place");
@@ -183,6 +355,9 @@ int main() {
     mtl::Pipeline p_tables = pipe("k_tables");
     mtl::Pipeline p_conv = pipe("k_conv"), p_convc = pipe("k_conv_chunk");
     mtl::Pipeline p_gdn = pipe("k_gdn"), p_gdnc = pipe("k_gdn_chunk");
+    mtl::Pipeline p_gdngb = pipe("k_gdn_gb");
+    mtl::Pipeline p_prep_wy = pipe("k_gdn_prep_c"), p_cprep = pipe("k_gdn_cprep_c"), p_cstate = pipe("k_gdn_cstate_c"),
+                  p_cout = pipe("k_gdn_cout_c");
     mtl::Pipeline p_gn = pipe("k_gated_norm"), p_gnc = pipe("k_gated_norm_chunk");
     mtl::Pipeline p_sum = pipe("k_moe_sum"), p_sumc = pipe("k_moe_sum_chunk");
     mtl::Pipeline p_prep = pipe_kv("k_attn_prep"), p_prep_c = pipe_kv("k_attn_prep_chunk");
@@ -619,6 +794,8 @@ int main() {
     }
     for (int i = 0; i < HV * S * S; ++i) S1.as<float>()[i] = r.sym() * 0.1f;
     std::memcpy(S2.ptr, S1.ptr, 4 * HV * S * S);
+    mtl::Buffer S0 = cx.alloc(4 * HV * S * S);   // the pristine initial state, for the WY stage below
+    std::memcpy(S0.ptr, S1.ptr, 4 * HV * S * S);
     {
         std::vector<mtl::Dispatch> ds;
         for (int t = 0; t < T; ++t) {
@@ -644,6 +821,230 @@ int main() {
         cx.run_graph({d});
         check("gdn out", gout1.ptr, gout2.ptr, 4 * T * ZV);
         check("gdn S", S1.ptr, S2.ptr, 4 * HV * S * S);
+    }
+
+    // ---- 9b. the WY form (k_gdn_prep_c + k_gdn_cprep_c/cstate_c/cout_c, STRATA_Q36M_GDN_WY=1's kernels)
+    // vs k_gdn_chunk on the same chunk inputs and initial state: the reassociated scan matches to
+    // rounding, not bits (y and the final state rel < 1e-5, gdn_prompt_parity's scheme).  The prep's v
+    // copy and beta gate are bit-exact; the q/k norms share k_gdn_chunk's block_sum and formulas by
+    // construction (the same 128-thread reduction per (token, head)) - the composite bound guards them.
+    {
+        const int NC = (T + 31) / 32;
+        mtl::Buffer wy_qn = cx.alloc(4 * T * HK * S), wy_kn = cx.alloc(4 * T * HK * S),
+                    wy_vc = cx.alloc(4 * T * HV * S), wy_gb = cx.alloc(8 * T * HV),
+                    wy_U = cx.alloc(4 * HV * NC * 32 * S), wy_W = cx.alloc(4 * HV * NC * 32 * S),
+                    wy_lgo = cx.alloc(4 * HV * NC * 32), wy_delta = cx.alloc(4 * HV * NC * 32 * S);
+        mtl::Buffer S3 = cx.alloc(4 * HV * S * S), gout3 = cx.alloc(4 * T * ZV);
+        std::memcpy(S3.ptr, S0.ptr, 4 * HV * S * S);   // the same initial state stage 9's two runs started from
+        mtl::Dispatch d1;
+        d1.p = &p_prep_wy;
+        d1.args = {mtl::Arg::B(cout2), mtl::Arg::B(alpha_all), mtl::Arg::B(dtb), mtl::Arg::B(ssa),
+                   mtl::Arg::B(beta_all), mtl::Arg::B(wy_qn), mtl::Arg::B(wy_kn), mtl::Arg::B(wy_vc),
+                   mtl::Arg::B(wy_gb), mtl::Arg::V(HK), mtl::Arg::V(S), mtl::Arg::V(C), mtl::Arg::V(eps),
+                   mtl::Arg::V(T)};
+        d1.grid[0] = HV;
+        d1.grid[1] = T;
+        d1.tg[0] = 128;
+        d1.barrier = true;
+        mtl::Dispatch d2;
+        d2.p = &p_cprep;
+        d2.args = {mtl::Arg::B(wy_qn), mtl::Arg::B(wy_kn), mtl::Arg::B(wy_vc), mtl::Arg::B(wy_gb),
+                   mtl::Arg::B(wy_U), mtl::Arg::B(wy_W), mtl::Arg::B(wy_lgo), mtl::Arg::V(HK), mtl::Arg::V(HV),
+                   mtl::Arg::V(T)};
+        d2.grid[0] = HV;
+        d2.grid[1] = NC;
+        d2.tg[0] = 256;
+        d2.barrier = true;
+        mtl::Dispatch d3;
+        d3.p = &p_cstate;
+        d3.args = {mtl::Arg::B(S3), mtl::Arg::B(wy_qn), mtl::Arg::B(wy_kn), mtl::Arg::B(wy_U), mtl::Arg::B(wy_W),
+                   mtl::Arg::B(wy_lgo), mtl::Arg::B(wy_delta), mtl::Arg::B(gout3), mtl::Arg::V(HK), mtl::Arg::V(HV),
+                   mtl::Arg::V(T)};
+        d3.grid[0] = HV * 4;
+        d3.tg[0] = 256;
+        d3.barrier = true;
+        mtl::Dispatch d4;
+        d4.p = &p_cout;
+        d4.args = {mtl::Arg::B(wy_qn), mtl::Arg::B(wy_kn), mtl::Arg::B(wy_delta), mtl::Arg::B(wy_lgo),
+                   mtl::Arg::B(gout3), mtl::Arg::V(HK), mtl::Arg::V(HV), mtl::Arg::V(T)};
+        d4.grid[0] = HV;
+        d4.grid[1] = NC;
+        d4.tg[0] = 128;
+        d4.barrier = true;
+        cx.run_graph({d1, d2, d3, d4});
+        bool v_ok = true;
+        for (int t = 0; t < T && v_ok; ++t)
+            for (int i = 0; i < HV * S && v_ok; ++i)
+                v_ok = feq(cout2.as<float>()[(size_t) t * C + 2 * HK * S + i],
+                           wy_vc.as<float>()[(size_t) t * HV * S + i]);
+        if (!v_ok) {
+            std::printf("  %-14s FAIL: the v copy differs\n", "wy prep v");
+            ++g_fails;
+        } else
+            std::printf("  %-14s OK\n", "wy prep v");
+        {   // the beta half of gb vs k_gdn_gb's transform: the same sigm on the same input, bit for bit
+            mtl::Buffer ab = cx.alloc(4 * T * HV), bb = cx.alloc(4 * T * HV);
+            std::memcpy(ab.ptr, alpha_all.ptr, 4 * T * HV);
+            std::memcpy(bb.ptr, beta_all.ptr, 4 * T * HV);
+            std::vector<mtl::Dispatch> ds;
+            for (int t = 0; t < T; ++t) {
+                mtl::Dispatch d;
+                d.p = &p_gdngb;
+                d.args = {mtl::Arg::B(ab, 4 * (size_t) t * HV), mtl::Arg::B(dtb), mtl::Arg::B(ssa),
+                          mtl::Arg::B(bb, 4 * (size_t) t * HV), mtl::Arg::V(HV)};
+                d.grid[0] = HV;
+                d.barrier = true;
+                ds.push_back(d);
+            }
+            cx.run_graph(ds);
+            bool b_ok = true;
+            for (int i = 0; i < T * HV && b_ok; ++i) b_ok = feq(wy_gb.as<float>()[2 * i + 1], bb.as<float>()[i]);
+            if (!b_ok) {
+                std::printf("  %-14s FAIL: the beta gate differs from k_gdn_gb's\n", "wy prep beta");
+                ++g_fails;
+            } else
+                std::printf("  %-14s OK\n", "wy prep beta");
+        }
+        check_rel("wy out", gout3.ptr, gout2.ptr, 4 * T * ZV, 1e-5);
+        check_rel("wy S", S3.ptr, S2.ptr, 4 * HV * S * S, 1e-5);
+    }
+
+    // ---- 9c. the WY form over several chunks (TW = 40: one full 32-token chunk + one ragged) vs
+    // k_gdn_chunk on the same inputs - the multi-chunk walk and the ragged tail the engine's last
+    // chunk of a prompt hits whenever nt is not a multiple of 32
+    {
+        const int TW = 40, NC = (TW + 31) / 32;
+        mtl::Buffer conv_w = cx.alloc(4 * TW * C), al_w = cx.alloc(4 * TW * HV), be_w = cx.alloc(4 * TW * HV);
+        mtl::Buffer S4 = cx.alloc(4 * HV * S * S), S5 = cx.alloc(4 * HV * S * S);
+        mtl::Buffer go4 = cx.alloc(4 * TW * ZV), go5 = cx.alloc(4 * TW * ZV);
+        mtl::Buffer wy_qn = cx.alloc(4 * TW * HK * S), wy_kn = cx.alloc(4 * TW * HK * S),
+                    wy_vc = cx.alloc(4 * TW * HV * S), wy_gb = cx.alloc(8 * TW * HV),
+                    wy_U = cx.alloc(4 * HV * NC * 32 * S), wy_W = cx.alloc(4 * HV * NC * 32 * S),
+                    wy_lgo = cx.alloc(4 * HV * NC * 32), wy_delta = cx.alloc(4 * HV * NC * 32 * S);
+        for (int i = 0; i < TW * C; ++i) conv_w.as<float>()[i] = r.sym() * 2.0f;
+        for (int i = 0; i < TW * HV; ++i) {
+            al_w.as<float>()[i] = r.sym() * 2.0f;
+            be_w.as<float>()[i] = r.sym() * 2.0f;
+        }
+        for (int i = 0; i < HV * S * S; ++i) S4.as<float>()[i] = r.sym() * 0.1f;
+        std::memcpy(S5.ptr, S4.ptr, 4 * HV * S * S);
+        mtl::Dispatch dref;
+        dref.p = &p_gdnc;
+        dref.args = {mtl::Arg::B(conv_w), mtl::Arg::B(al_w), mtl::Arg::B(dtb), mtl::Arg::B(ssa), mtl::Arg::B(be_w),
+                     mtl::Arg::B(S5), mtl::Arg::B(go5), mtl::Arg::V(HK), mtl::Arg::V(S), mtl::Arg::V(HV),
+                     mtl::Arg::V(C), mtl::Arg::V(eps), mtl::Arg::V(TW)};
+        dref.grid[0] = HV;
+        dref.tg[0] = 128;
+        cx.run_graph({dref});
+        mtl::Dispatch d1;
+        d1.p = &p_prep_wy;
+        d1.args = {mtl::Arg::B(conv_w), mtl::Arg::B(al_w), mtl::Arg::B(dtb), mtl::Arg::B(ssa), mtl::Arg::B(be_w),
+                   mtl::Arg::B(wy_qn), mtl::Arg::B(wy_kn), mtl::Arg::B(wy_vc), mtl::Arg::B(wy_gb), mtl::Arg::V(HK),
+                   mtl::Arg::V(S), mtl::Arg::V(C), mtl::Arg::V(eps), mtl::Arg::V(TW)};
+        d1.grid[0] = HV;
+        d1.grid[1] = TW;
+        d1.tg[0] = 128;
+        d1.barrier = true;
+        mtl::Dispatch d2;
+        d2.p = &p_cprep;
+        d2.args = {mtl::Arg::B(wy_qn), mtl::Arg::B(wy_kn), mtl::Arg::B(wy_vc), mtl::Arg::B(wy_gb),
+                   mtl::Arg::B(wy_U), mtl::Arg::B(wy_W), mtl::Arg::B(wy_lgo), mtl::Arg::V(HK), mtl::Arg::V(HV),
+                   mtl::Arg::V(TW)};
+        d2.grid[0] = HV;
+        d2.grid[1] = NC;
+        d2.tg[0] = 256;
+        d2.barrier = true;
+        mtl::Dispatch d3;
+        d3.p = &p_cstate;
+        d3.args = {mtl::Arg::B(S4), mtl::Arg::B(wy_qn), mtl::Arg::B(wy_kn), mtl::Arg::B(wy_U), mtl::Arg::B(wy_W),
+                   mtl::Arg::B(wy_lgo), mtl::Arg::B(wy_delta), mtl::Arg::B(go4), mtl::Arg::V(HK), mtl::Arg::V(HV),
+                   mtl::Arg::V(TW)};
+        d3.grid[0] = HV * 4;
+        d3.tg[0] = 256;
+        d3.barrier = true;
+        mtl::Dispatch d4;
+        d4.p = &p_cout;
+        d4.args = {mtl::Arg::B(wy_qn), mtl::Arg::B(wy_kn), mtl::Arg::B(wy_delta), mtl::Arg::B(wy_lgo),
+                   mtl::Arg::B(go4), mtl::Arg::V(HK), mtl::Arg::V(HV), mtl::Arg::V(TW)};
+        d4.grid[0] = HV;
+        d4.grid[1] = NC;
+        d4.tg[0] = 128;
+        d4.barrier = true;
+        cx.run_graph({d1, d2, d3, d4});
+        check_rel("wy out 2c", go4.ptr, go5.ptr, 4 * TW * ZV, 1e-5);
+        check_rel("wy S 2c", S4.ptr, S5.ptr, 4 * HV * S * S, 1e-5);
+    }
+
+    // ---- 9d. the MMA dense (q36_dense.metal, STRATA_Q36M_DENSE_MMA=1's kernels) vs k_gemv_c per type:
+    // act_f16 + dq_f16 + gemm_f16 against the released chunk GEMV on the same weight and rows.  The
+    // fp16 operands re-round (~5e-4 relative per element), so this compares to rounding (rel < 1e-3);
+    // M = 8 rows inside a 64-row tile and NOUT = 96 inside two 64-wide tiles exercise the matmul2d
+    // boundary clamp the donor's tensors carry (the reviewer's ragged-boundary note).  BF16 is not in
+    // the list: its values round-trip exactly through fp16, so the F32 case covers that path.
+    {
+        const int lib_mma = cx.compile({"quant.metal", "units.metal", "mma.metal", "q36_dense.metal"});
+        mtl::Pipeline p_act16 = cx.pipeline(lib_mma, "act_f16"), p_g64 = cx.pipeline(lib_mma, "gemm_f16_64_64_4");
+        const int NOUT = 96;
+        struct DqArgsA {
+            uint32_t n_in, n_out, row_bytes, perm;
+        };
+        struct GemmArgsA {
+            int M, N, K, pad;
+        };
+        const int types[] = {0, 12, 10, 17, 18, 14};   // F32, Q4_K, Q2_K, IQ2_XS, IQ3_XXS, Q6_K
+        const int units[] = {16, 32, 32, 16, 16, 32};  // fmt<F>::UNIT (quant.metal)
+        const int rbs[] = {4 * N, 144, 84, 74, 98, 210};   // one 256-wide block's bytes (N = 256)
+        for (int ti = 0; ti < 6; ++ti) {
+            const int ty = types[ti];
+            mtl::Buffer W = cx.alloc((size_t) rbs[ti] * NOUT);
+            if (ty == 0) {   // fp32 weights filled as floats: the byte-sanitize would denormal them past fp16
+                for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym() * 0.5f;
+            } else {
+                for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym();
+                sanitize(W);
+            }
+            mtl::Buffer y_ref = cx.alloc(4 * T * NOUT), y_mma = cx.alloc(4 * T * NOUT);
+            mtl::Buffer xh = cx.alloc(2 * T * N), wh = cx.alloc(2 * NOUT * N);
+            mtl::Pipeline& ref_p = ty == 0 ? p_gc_f32 : ty == 12 ? p_gc_q4k : ty == 10 ? p_gc_q2k
+                                                                                 : ty == 17 ? p_gc_iq2
+                                                                                 : ty == 18 ? p_gc_iq3 : p_gc_q6k;
+            GemvParam p{(unsigned long) rbs[ti], 0, N, NOUT, (unsigned long) N};
+            mtl::Dispatch dr;
+            dr.p = &ref_p;
+            dr.args = {mtl::Arg::B(W), mtl::Arg::B(h_all), mtl::Arg::B(y_ref), mtl::Arg::V(p), mtl::Arg::V(T),
+                       mtl::Arg::V(0), mtl::Arg::V(T)};
+            dr.grid[0] = (NOUT + 7) / 8;
+            dr.grid[1] = 1;
+            dr.tg[0] = 256;
+            cx.run_graph({dr});
+            mtl::Dispatch d0;
+            d0.p = &p_act16;
+            d0.args = {mtl::Arg::B(h_all), mtl::Arg::B(xh), mtl::Arg::V((uint32_t) (T * N))};
+            d0.grid[0] = (T * N + 255) / 256;
+            d0.tg[0] = 256;
+            d0.barrier = true;
+            DqArgsA da{(uint32_t) N, (uint32_t) NOUT, (uint32_t) rbs[ti], 0};
+            mtl::Pipeline p_dq_t = cx.pipeline(lib_mma, ("dq_f16_" + std::to_string(ty)).c_str());
+            mtl::Dispatch d1m;
+            d1m.p = &p_dq_t;
+            d1m.args = {mtl::Arg::B(W), mtl::Arg::B(wh), mtl::Arg::V(da)};
+            d1m.grid[0] = (N / units[ti] + 63) / 64;
+            d1m.grid[1] = NOUT;
+            d1m.tg[0] = 64;
+            d1m.barrier = true;
+            GemmArgsA ga{T, NOUT, N, 0};
+            mtl::Dispatch d2m;
+            d2m.p = &p_g64;
+            d2m.args = {mtl::Arg::B(xh), mtl::Arg::B(wh), mtl::Arg::B(y_mma), mtl::Arg::V(ga)};
+            d2m.grid[0] = (NOUT + 63) / 64;
+            d2m.grid[1] = (T + 63) / 64;
+            d2m.tg[0] = 128;
+            d2m.barrier = true;
+            cx.run_graph({d0, d1m, d2m});
+            char name[24];
+            std::snprintf(name, sizeof(name), "mma %d", ty);
+            check_rel(name, y_mma.ptr, y_ref.ptr, 4 * T * NOUT, 1e-3);
+        }
     }
 
     // ---- 10. gated norm over the chunk vs per token ---------------------------------------------------------

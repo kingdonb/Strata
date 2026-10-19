@@ -609,3 +609,89 @@ python3 tools/qwen35/q36_prefill_bench.py --exe ./build-metal/strata \
   --args "--native $Q36_MODEL --ctx 16384 --kv-f16" --sizes 2048,4098 --chunks 0,512 --rounds 3 --gen 128 \
   --out bench/results/<date>-m2-q36-kvf16/bench-on.json
 ```
+
+## 10. The chunk's parallel GDN scan and matrix-unit GEMMs (`STRATA_Q36M_GDN_WY=1`, `STRATA_Q36M_DENSE_MMA=1`)
+
+§6's chunk path batches everything except two components, both kept token-sequential on purpose by
+the T2 bit-parity contract: the GDN recurrence (`k_gdn_chunk`: one dispatch, 48 × 128 threads, each
+thread owning one state row and walking all T tokens serially — two threadgroup barriers and ~384
+MACs per thread per token) and the dense chunk GEMVs (`k_gemv_c`: every weight row re-dequantized
+once per token row, so the dequant arithmetic — not the MACs — scales with T). §4's Priority 2 asked
+for exactly these two levers ("tiled GEMM kernels for prompt batches" and a "parallel associative
+scan" for the delta-rule recurrence). Both now exist as opt-in env knobs on top of the chunk path,
+ported from the mac-kern chain's proven donors (`gdn_prompt.metal`'s chunked form, `dense_mm.metal`'s
+fp16-then-matmul2d pattern) — with the parity contract deliberately relaxed from bit-identity to
+measured error bounds, the same trade the CUDA engine already ships for its chunked prefill
+(docs/QWEN36.md's KL/top-1 methodology). The knobs are read once per process, so the MTP verify
+window and its commit re-run can never take different paths.
+
+**`STRATA_Q36M_GDN_WY=1` — the WY/UT chunked scan.** Four kernels in `q36.metal`. `k_gdn_prep_c`
+computes the q/k RMS norms and gates per (token, head) in parallel — the same `block_sum` over the
+same 128 threads and the same formulas as `k_gdn_chunk`'s inline arithmetic, bit-identical by
+construction, with the 1/√D query scale folded into `qn` (the decode kernel's `sh_q` convention).
+Then the WY form over 32-token chunks (`GDN_GC`): with G_t the chunk's gate prefix product (log
+space), (I + A)·D = B with A_ts = β_t (k_t·k_s)·G_t/G_s (s < t) solved by forward substitution per
+column gives U (drives the state) and W (state coefficients); the inter-chunk walk applies
+delta = U − W·S0 per chunk and updates S_L = G_L·S0 + Σ_s (G_L/G_s)·δ_s k_sᵀ; the intra-chunk output
+adds Σ_{s≤t} (q_t·k_s)·(G_t/G_s)·δ_s. This is the standard parallel-scan decomposition for gated
+linear attention: everything inside a 32-token block is parallel, and the sequential part is the
+inter-chunk walk — T/32 chunk-steps instead of T token-steps, three dispatches instead of one. The
+sequential `k_gdn_chunk` stays in the tree and runs whenever the knob is off — the permanent fallback.
+
+**`STRATA_Q36M_DENSE_MMA=1` — dequant-once, matrix-unit GEMMs.** `metal/kernels/q36_dense.metal`
+(copied from the mac-kern chain's `dense_mm.metal`; three more `dq_f16` types — Q2_K, IQ2_XS,
+IQ3_XXS — through the generic `DW<F>` path): per chunk, each eligible dense matrix dequantizes to
+fp16 once (`dq_f16_<type>`), the chunk's X rows stage to half (`act_f16`), and the T × n_out × n_in
+product runs on MPP `matmul2d` 64 × 64 tiles with fp32 output (`gemm_f16_64_64_4`). Eligible: the
+large per-layer matrices (attn_qkv, attn_gate, ssm_out, the QSA q/k/v/attn_output, the shared
+expert's gate/up/down); the router, alpha, beta and the routed experts keep the parity GEMVs (tiny or
+parity-owned; the experts are the next lever if the numbers ask for it). Matrices whose type has no
+dq pipeline fall back to `k_gemv_c` per matrix, so a mixed-quant model engages where it can. The
+fp16 operand rounding costs ~5e-4 relative — hence this knob's 1e-3 envelope against the 1e-5-class
+bounds the reassociation-only GDN stages get. One fp16 weight arena (40 MB at the qkv shape) plus
+the WY scratch (~59 MB at chunk 512, ~236 MB at 2048) allocate inside the chunk-buffer block, before
+the §6 working-set refusal counts them.
+
+Gates (Apple M2, macOS 26.6.2, UD-Q2_K_XL, 2026-10-18/19):
+
+```bash
+cmake --build build-metal && ./build-metal/q36_compile_test     # the WY + MMA lib pipelines in the list
+./build-metal/q36_chunk_parity                                   # all stages OK incl. wy * and mma * (rel bounds)
+./build-metal/q36_chunk_parity --bench                           # the per-part kernel table
+# byte-identity: the no-flag base json vs the pre-change build (10/10), then per-knob ladders:
+STRATA_Q36M_GDN_WY=1 python3 tools/qwen35/q36_solo_gate.py ...   # twice, 10/10 vs the sequential path
+STRATA_Q36M_DENSE_MMA=1 python3 tools/qwen35/q36_solo_gate.py ... # twice, 10/10
+STRATA_Q36M_GDN_WY=1 STRATA_Q36M_DENSE_MMA=1 ... --mtp 2 ...     # 10/10 vs --mtp 0
+```
+
+Measured (M2, 2026-10-18, build `4836ba99` — the WY slice's full gate list, all green): parity all
+stages OK — `wy out` rel 2.51e-07, `wy S` rel 1.21e-07, the two-chunk T=40 stage 2.99e-07/1.26e-07
+(the 1e-5 bound holds with ~40x margin), prep v/beta bit-exact; byte-identity 10/10; the WY ladder
+10/10 twice; `--mtp 2` with the knob 10/10 vs base. Kernel bench (median of 5 after warm-up):
+
+| GDN stage | T = 512 | T = 2048 |
+|---|---:|---:|
+| `k_gdn_chunk` (sequential) | 167.730 ms | 670.919 ms |
+| prep + cprep + cstate + cout | 0.834 + 2.172 + 6.742 + 1.729 = **11.476 ms** | 3.580 + 8.680 + 26.007 + 6.674 = **44.942 ms** |
+| | **14.6x** | **14.9x** |
+
+cstate is the largest WY part at both sizes (~59%) — the GC=64 / segmented-combine follow-up lever if
+it ever matters. Reported from the same machine's live-session round (build `3dca4b47`, the dense
+slice included): the dense rows ran 110.2 → 7.2 ms per chunk at the attn_qkv shape (**15.3x**) —
+combined with the GDN scan, the two kernel classes dropped from ~280 ms to ~18.7 ms per 512-token
+chunk. Short-chunk TTFT with the WY knob measured −40-44% (p01 1917→1090 ms, p02 1952→1118 ms,
+p08 2247→1258 ms).
+
+**Ad-hoc live validation in place of the TTFT matrix (deliberate, the §9 pattern).** The hours-class
+`q36_prefill_bench.py` matrix was skipped this round in favor of a live server session with every
+lever on (`--ctx 16384 --prefill auto --kv-f16`, `STRATA_METAL_STREAM=1`, `STRATA_Q36M_PREFILL=1`,
+`STRATA_Q36M_ATTN_GQA=1`, `STRATA_Q36M_GDN_WY=1`, `STRATA_Q36M_DENSE_MMA=1`, ~11.8 GB resident):
+six requests, 1,051 cumulative tokens, decode 12.2-16.3 tok/s client-side and 57-66 ms per step
+throughout — including at depth, where the pre-ticket build collapsed to 2.7-3.2 tok/s. The
+attribution: the depth stability is §8's fold and §9's halved caches (both merged); this ticket's
+contribution is the prefill kernel paths above. **The default path does not flip**: the no-flag
+engine is byte-identical to the release and the knobs stay opt-in — the measured ≥5x-on-every-size
+bar a default change needs (§6) has not been run since the levers landed, and the ad-hoc TTFT
+deltas, while large on short chunks, are not that matrix. The remaining pre-merge gates are the
+quick ones on the current tip: the compile test, the six `mma <type>` parity stages, the MMA-knob
+ladder and the both-knobs `--mtp 2` ladder.

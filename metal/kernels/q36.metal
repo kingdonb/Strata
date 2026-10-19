@@ -1330,6 +1330,219 @@ kernel void k_gated_norm_chunk(device float* o [[buffer(0)]],
     oh[tid] = v * rsqrt(s / float(D) + eps) * w[tid] * silu(z[(ulong) t * ZV + (ulong) h * D + tid]);
 }
 
+// ---- The chunk GDN's WY / UT form (STRATA_Q36M_GDN_WY=1): the parallel associative scan for the gated
+// delta rule, ported from gdn_prompt.metal's gdn_cprep / gdn_cstate / gdn_cout (the mac-kern chain's
+// chunked form, parity-proven there by gdn_prompt_parity against the sequential recurrence at rel <
+// 1e-5).  With G_t the product of the chunk's gates up to t (log space: lg_t) and S0 the state entering
+// the 32-token chunk, per value head h (i = the value channel, j = the key channel):
+//   (I + A) D = B,  A_ts = beta_t (k_t . k_s) G_t / G_s (s < t),  B = [beta v | beta G k]  ->  D = [U | W]
+//   delta = U - W S0,   o_t = G_t S0 q_t + sum_{s <= t} (q_t . k_s) G_t / G_s delta_s,
+//   S_L = G_L S0 + sum_s G_L / G_s delta_s k_s^T
+// - the sequential recurrence's algebra (k_gdn's S_t = g_t S_{t-1} + d_t k_t^T, o_t = S_t q_t) with the
+// scan reassociated, so the match to k_gdn_chunk is to rounding, not bits.  Differences from the donor:
+// the state layout is q36's S[(h*D + i)*D + j], and the 1/sqrt(D) query scale is folded into qn by the
+// prep kernel (k_gdn_chunk's sh_q convention), so the output needs no extra scale.  The prep replaces
+// gdn_pre's conv half (k_conv_chunk already ran) and is bit-identical to k_gdn_chunk's inline arithmetic
+// by construction: the same block_sum over the same 128 threads, the same formulas.
+constant constexpr int GDN_GC = 32;
+
+// grid (HV, T), 128 threads = one (token, head)'s channels; qn/kn [T][HK][D], vc [T][HV][D], gb [T][HV]
+kernel void k_gdn_prep_c(device const float* conv [[buffer(0)]],
+                         device const float* alpha [[buffer(1)]],
+                         device const float* dt_bias [[buffer(2)]],
+                         device const float* ssm_a [[buffer(3)]],
+                         device const float* beta_raw [[buffer(4)]],
+                         device float* qn [[buffer(5)]],
+                         device float* kn [[buffer(6)]],
+                         device float* vc [[buffer(7)]],
+                         device float2* gb [[buffer(8)]],
+                         constant int& HK [[buffer(9)]],
+                         constant int& D [[buffer(10)]],
+                         constant int& C [[buffer(11)]],
+                         constant float& eps [[buffer(12)]],
+                         constant int& T [[buffer(13)]],
+                         uint3 g [[threadgroup_position_in_grid]],
+                         uint3 tg_dim [[threadgroups_per_grid]],
+                         uint tid [[thread_index_in_threadgroup]],
+                         ushort lane [[thread_index_in_simdgroup]],
+                         ushort sgid [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sh_red[4];
+    const int HV = (int) tg_dim.x;
+    const int h = (int) g.x, t = (int) g.y;
+    if (t >= T) return;
+    const int kh = h % HK;
+    const float qi = conv[(ulong) t * C + kh * D + tid];
+    const float ki = conv[(ulong) t * C + HK * D + kh * D + tid];
+    const float vi = conv[(ulong) t * C + 2 * HK * D + (ulong) h * D + tid];
+
+    const float qsum = block_sum(qi * qi, sh_red, tid, lane, sgid);
+    const float ksum = block_sum(ki * ki, sh_red, tid, lane, sgid);
+
+    qn[((ulong) t * HK + kh) * D + tid] = qi * rsqrt(qsum + eps) * (1.0f / sqrt((float) D));
+    kn[((ulong) t * HK + kh) * D + tid] = ki * rsqrt(ksum + eps);
+    vc[((ulong) t * HV + h) * D + tid] = vi;
+    if (tid == 0)
+        gb[(ulong) t * HV + h] =
+            float2(exp(softplus(alpha[(ulong) t * HV + h] + dt_bias[h]) * ssm_a[h]),
+                   sigm(beta_raw[(ulong) t * HV + h]));
+}
+
+// grid (HV, chunks), 256 threads.  U, W: [h][chunk][GC][128]; lgo: [h][chunk][GC]
+kernel void k_gdn_cprep_c(device const float* qn [[buffer(0)]], device const float* kn [[buffer(1)]],
+                          device const float* vc [[buffer(2)]], device const float2* gb [[buffer(3)]],
+                          device float* U [[buffer(4)]], device float* W [[buffer(5)]], device float* lgo [[buffer(6)]],
+                          constant int& HK [[buffer(7)]], constant int& HV [[buffer(8)]], constant int& T [[buffer(9)]],
+                          uint3 tg [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]]) {
+    constexpr int S = 128;
+    threadgroup float A[GDN_GC][GDN_GC];
+    threadgroup float lg[GDN_GC], bt[GDN_GC];
+    const int h = int(tg.x), c = int(tg.y), hkn = HK, hk = h % hkn;
+    const int NC = (T + GDN_GC - 1) / GDN_GC, t0 = c * GDN_GC, nb = min(GDN_GC, T - t0);
+    if (tid == 0) {
+        float s = 0.0f;
+        for (int t = 0; t < GDN_GC; ++t) {
+            if (t < nb) s += max(log(gb[(t0 + t) * HV + h].x), -80.0f);
+            lg[t] = s;
+            bt[t] = t < nb ? gb[(t0 + t) * HV + h].y : 0.0f;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int idx = tid; idx < GDN_GC * GDN_GC; idx += 256) {
+        const int t = idx / GDN_GC, s = idx % GDN_GC;
+        float v = 0.0f;
+        if (s < t && t < nb) {
+            device const float4* kt = (device const float4*)(kn + ((t0 + t) * hkn + hk) * S);
+            device const float4* ks = (device const float4*)(kn + ((t0 + s) * hkn + hk) * S);
+            float d = 0.0f;
+            for (int i = 0; i < S / 4; ++i) d += dot(kt[i], ks[i]);
+            v = bt[t] * d * exp(lg[t] - lg[s]);
+        }
+        A[t][s] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // forward substitution, column j of B a thread (threads 0..127: beta v; 128..255: beta G k)
+    const int j = tid & 127;
+    const bool isw = tid >= 128;
+    float x[GDN_GC];
+    for (int t = 0; t < GDN_GC; ++t) {
+        float b = 0.0f;
+        if (t < nb)
+            b = isw ? bt[t] * exp(lg[t]) * kn[((t0 + t) * hkn + hk) * S + j] : bt[t] * vc[((t0 + t) * HV + h) * S + j];
+        for (int s = 0; s < t; ++s) b = fma(-A[t][s], x[s], b);
+        x[t] = b;
+    }
+    device float* o = (isw ? W : U) + (ulong(h) * NC + c) * GDN_GC * S + j;
+    for (int t = 0; t < GDN_GC; ++t) o[t * S] = x[t];
+    if (tid < GDN_GC) lgo[(h * NC + c) * GDN_GC + tid] = lg[tid];
+}
+
+// grid (HV * 4), 256 threads = 8 row blocks of 16 x 32 columns; the state's 128 x 32 block in registers
+// (16 a thread).  The donor's orientation with q36's state layout: the thread's 16 registers hold
+// S[h][value channel j][key channels i0..i0+15], so the state reads/writes are the port's only change.
+kernel void k_gdn_cstate_c(device float* state [[buffer(0)]], device const float* qn [[buffer(1)]],
+                           device const float* kn [[buffer(2)]], device const float* U [[buffer(3)]],
+                           device const float* W [[buffer(4)]], device const float* lgo [[buffer(5)]],
+                           device float* delta [[buffer(6)]], device float* o [[buffer(7)]],
+                           constant int& HK [[buffer(8)]], constant int& HV [[buffer(9)]], constant int& T [[buffer(10)]],
+                           uint3 tg [[threadgroup_position_in_grid]], ushort sg [[simdgroup_index_in_threadgroup]],
+                           ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr int S = 128, RB = 16;
+    threadgroup float red[8][16][32];
+    threadgroup float dl[GDN_GC][32];
+    const int h = int(tg.x) / 4, hkn = HK, hk = h % hkn;
+    const int NC = (T + GDN_GC - 1) / GDN_GC;
+    const int j = (int(tg.x) % 4) * 32 + lane, i0 = sg * RB;
+    float st[RB];
+    for (int r = 0; r < RB; ++r) st[r] = state[((ulong) h * S + j) * S + i0 + r];
+    for (int c = 0; c < NC; ++c) {
+        const int t0 = c * GDN_GC, nb = min(GDN_GC, T - t0);
+        device const float* Uc = U + (ulong(h) * NC + c) * GDN_GC * S;
+        device const float* Wc = W + (ulong(h) * NC + c) * GDN_GC * S;
+        device const float* lg = lgo + (h * NC + c) * GDN_GC;
+        // pass 0: delta = U - W S0;  pass 1: o_inter = G_t S0 q_t;  16 tokens at a time
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int hf = 0; hf < 2; ++hf) {
+                float p[16];
+                for (int u = 0; u < 16; ++u) {
+                    const int t = hf * 16 + u;
+                    float s = 0.0f;
+                    if (t < nb) {
+                        device const float* v = pass == 0 ? Wc + t * S + i0 : qn + ((t0 + t) * hkn + hk) * S + i0;
+                        for (int r = 0; r < RB; ++r) s = fma(v[r], st[r], s);
+                    }
+                    p[u] = s;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                for (int u = 0; u < 16; ++u) red[sg][u][lane] = p[u];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                for (int u = sg * 2; u < sg * 2 + 2; ++u) {
+                    const int t = hf * 16 + u;
+                    float s = 0.0f;
+                    for (int b = 0; b < 8; ++b) s += red[b][u][lane];
+                    if (t < nb) {
+                        if (pass == 0) {
+                            const float d = Uc[t * S + j] - s;
+                            dl[t][lane] = d;
+                            delta[((ulong(h) * NC + c) * GDN_GC + t) * S + j] = d;
+                        } else {
+                            o[((t0 + t) * HV + h) * S + j] = exp(lg[t]) * s;
+                        }
+                    } else if (pass == 0) {
+                        dl[t][lane] = 0.0f;
+                    }
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // S = G_L S0 + sum_s G_L / G_s delta_s k_s^T
+        const float lgl = lg[nb - 1], gl = exp(lgl);
+        for (int r = 0; r < RB; ++r) st[r] *= gl;
+        for (int s = 0; s < nb; ++s) {
+            const float f = exp(lgl - lg[s]) * dl[s][lane];
+            device const float* ks = kn + ((t0 + s) * hkn + hk) * S + i0;
+            for (int r = 0; r < RB; ++r) st[r] = fma(ks[r], f, st[r]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (int r = 0; r < RB; ++r) state[((ulong) h * S + j) * S + i0 + r] = st[r];
+}
+
+// grid (HV, chunks), 128 threads (column j): o_t = o_inter_t + sum_{s <= t} (q_t . k_s) G_t / G_s delta_s.
+// No output scale: k_gdn_prep_c's qn carries the 1/sqrt(D) k_gdn_chunk folds into sh_q.
+kernel void k_gdn_cout_c(device const float* qn [[buffer(0)]], device const float* kn [[buffer(1)]],
+                         device const float* delta [[buffer(2)]], device const float* lgo [[buffer(3)]],
+                         device float* o [[buffer(4)]],
+                         constant int& HK [[buffer(5)]], constant int& HV [[buffer(6)]], constant int& T [[buffer(7)]],
+                         uint3 tg [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]]) {
+    constexpr int S = 128;
+    threadgroup float M[GDN_GC][GDN_GC];
+    const int h = int(tg.x), c = int(tg.y), hkn = HK, hk = h % hkn;
+    const int NC = (T + GDN_GC - 1) / GDN_GC, t0 = c * GDN_GC, nb = min(GDN_GC, T - t0);
+    device const float* lg = lgo + (h * NC + c) * GDN_GC;
+    for (int idx = tid; idx < GDN_GC * GDN_GC; idx += 128) {
+        const int t = idx / GDN_GC, s = idx % GDN_GC;
+        float v = 0.0f;
+        if (s <= t && t < nb) {
+            device const float4* qt = (device const float4*)(qn + ((t0 + t) * hkn + hk) * S);
+            device const float4* ks = (device const float4*)(kn + ((t0 + s) * hkn + hk) * S);
+            float d = 0.0f;
+            for (int i = 0; i < S / 4; ++i) d += dot(qt[i], ks[i]);
+            v = d * exp(lg[t] - lg[s]);
+        }
+        M[t][s] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const int j = tid;
+    device const float* dc = delta + (ulong(h) * NC + c) * GDN_GC * S + j;
+    float dv[GDN_GC];
+    for (int s = 0; s < GDN_GC; ++s) dv[s] = s < nb ? dc[s * S] : 0.0f;
+    for (int t = 0; t < nb; ++t) {
+        float s = o[((t0 + t) * HV + h) * S + j];
+        for (int u = 0; u <= t; ++u) s = fma(M[t][u], dv[u], s);
+        o[((t0 + t) * HV + h) * S + j] = s;
+    }
+}
+
 // Attention prep for T tokens: k_attn_prep over grid (T, H + HKV); q / gate rows land at (t * H + head),
 // the split-K kernels' row order; k / v land in the shared KV cache at position pos0 + t.  Buffer indices
 // are the args' positions (the runtime binds them positionally).
