@@ -51,7 +51,8 @@ int main() {
     }
     const char* fixed_kernels[] = {"k_route_chunk", "k_tables", "k_gather_t", "k_zero", "k_hist",
                                    "k_exp_off", "k_place", "k_moe_sum_chunk", "k_conv_chunk", "k_gdn_chunk",
-                                   "k_gated_norm_chunk", "k_attn_prep_chunk"};
+                                   "k_gated_norm_chunk", "k_attn_prep_chunk", "k_gdn_prep_c", "k_gdn_cprep_c",
+                                   "k_gdn_cstate_c", "k_gdn_cout_c"};
     for (const char* k : fixed_kernels) {
         auto p = cx.pipeline(lib, k);
         std::printf("pipeline %s created: (max threads: %d)\n", k, p.max_threads);

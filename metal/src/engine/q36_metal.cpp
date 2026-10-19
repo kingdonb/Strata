@@ -109,6 +109,10 @@ struct State {
     mtl::Buffer router_c, ids_c, wts_c, scr, srt_in_gu, srt_in_d, pos_c;
     mtl::Buffer eg_c, eu_c, eh_c, ey_c, sg_c, su_c, sh_c, sy_c, sgate_c;
     mtl::Buffer hg_c, ident_c;   // the gathered expert input rows ((t,k)-ordered) + the identity entry map
+    // The chunk GDN's WY form's scratch (STRATA_Q36M_GDN_WY=1): the prep's normalized q/k, v and gates,
+    // then cprep's U/W/lgo and cstate's delta - sized for this run's largest chunk, shared across layers
+    // (one command buffer per layer orders the reuse).
+    mtl::Buffer gqn_c, gkn_c, gvc_c, ggb_c, gU_c, gW_c, glgo_c, gdelta_c;
     std::vector<mtl::Buffer> conv_state, S, kc, vc;
     // MTP speculative decoding (--mtp N): the draft block's own KV cache (it is a full-attention
     // layer), the verify window's scratch recurrent states (copied from the real S/conv before each
@@ -159,6 +163,19 @@ bool env_flag(const char* name) {
     const char* e = std::getenv(name);
     return e && *e && std::atoi(e) != 0;
 }
+
+// The chunk GDN's WY form (STRATA_Q36M_GDN_WY=1): read once per process (the first caller initializes
+// the static), so the MTP verify window and its commit re-run can never take different paths mid-run,
+// and every dispatch site sees the same choice.  With the knob off, the released k_gdn_chunk runs.
+bool q36_gdn_wy() {
+    static const bool v = env_flag("STRATA_Q36M_GDN_WY");
+    return v;
+}
+
+// The chunk GDN's WY form's 32-token width (q36.metal's GDN_GC); the state size it assumes (128) is
+// guarded at startup.
+constexpr int WY_GC = 32;
+constexpr int WY_S = 128;
 
 // Debug-trace sums (STRATA_Q36M_TRACE=1): rows summed in order, each row's sum accumulated in index order.
 // The decode path prints one line per (token, cut); tools/qwen35/q36_trace_cmp.py sums those over the
@@ -224,6 +241,7 @@ struct Pipelines {
     // prompt-chunk pipelines (init_prompt, when --prefill is on)
     std::map<int, mtl::Pipeline> p_emb_c, p_gemv_c, p_expc;
     mtl::Pipeline p_route_c, p_tables, p_moe_sum_c, p_conv_c, p_gdn_c, p_gated_norm_c, p_attn_prep_c;
+    mtl::Pipeline p_gdn_prep_c, p_gdn_cprep_c, p_gdn_cstate_c, p_gdn_cout_c;   // the WY form (STRATA_Q36M_GDN_WY=1)
     mtl::Pipeline p_gather_t;
     mtl::Buffer zero_ids;   // nt zeros: the decode lpr8's per-token dummy expert id (chunk dense products)
     std::map<int, mtl::Pipeline> p_gemv;
@@ -357,6 +375,14 @@ struct Pipelines {
         p_gdn_c = cx.pipeline(lib, "k_gdn_chunk");
         p_gated_norm_c = cx.pipeline(lib, "k_gated_norm_chunk");
         p_attn_prep_c = cx.pipeline(lib, "k_attn_prep_chunk");
+        // The WY form's four kernels, only when the knob is on - the no-knob startup compiles and
+        // creates nothing extra, and its behavior is unchanged.
+        if (q36_gdn_wy()) {
+            p_gdn_prep_c = cx.pipeline(lib, "k_gdn_prep_c");
+            p_gdn_cprep_c = cx.pipeline(lib, "k_gdn_cprep_c");
+            p_gdn_cstate_c = cx.pipeline(lib, "k_gdn_cstate_c");
+            p_gdn_cout_c = cx.pipeline(lib, "k_gdn_cout_c");
+        }
     }
 };
 
@@ -1027,7 +1053,63 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                              trace_rows((const float*) s.conv_out_c.ptr, (size_t) nt, (size_t) C),
                              trace_rows((const float*) Cst.ptr, 1, Cst.bytes / 4));
             }
-            {
+            if (q36_gdn_wy()) {
+                // The WY form: the prep computes the norms and gates k_gdn_chunk does inline, once per
+                // (token, head) in parallel (bit-identical by construction); cprep/cstate/cout are the
+                // reassociated scan - 3 dispatches, the state walked 32 tokens at a time instead of one
+                // token at a time, everything else parallel over heads and chunks.  The final state and
+                // the outputs match k_gdn_chunk's to rounding (the parity harness's rel bounds).
+                {
+                    mtl::Dispatch d;
+                    d.p = &pipes.p_gdn_prep_c;
+                    d.args = {mtl::Arg::B(s.conv_out_c), mtl::Arg::B(s.alpha_c), mtl::Arg::B(m.F(L(l, "ssm_dt.bias"))),
+                              mtl::Arg::B(m.F(L(l, "ssm_a"))), mtl::Arg::B(s.beta_c), mtl::Arg::B(s.gqn_c),
+                              mtl::Arg::B(s.gkn_c), mtl::Arg::B(s.gvc_c), mtl::Arg::B(s.ggb_c), mtl::Arg::V(HK),
+                              mtl::Arg::V(DS), mtl::Arg::V(C), mtl::Arg::V(m.eps), mtl::Arg::V(nt)};
+                    d.grid[0] = (uint32_t) HV;
+                    d.grid[1] = (uint32_t) nt;
+                    d.tg[0] = 128;
+                    d.barrier = true;
+                    ds.push_back(d);
+                }
+                {
+                    const int nc = (nt + WY_GC - 1) / WY_GC;
+                    mtl::Dispatch d;
+                    d.p = &pipes.p_gdn_cprep_c;
+                    d.args = {mtl::Arg::B(s.gqn_c), mtl::Arg::B(s.gkn_c), mtl::Arg::B(s.gvc_c), mtl::Arg::B(s.ggb_c),
+                              mtl::Arg::B(s.gU_c), mtl::Arg::B(s.gW_c), mtl::Arg::B(s.glgo_c), mtl::Arg::V(HK),
+                              mtl::Arg::V(HV), mtl::Arg::V(nt)};
+                    d.grid[0] = (uint32_t) HV;
+                    d.grid[1] = (uint32_t) nc;
+                    d.tg[0] = 256;
+                    d.barrier = true;
+                    ds.push_back(d);
+                }
+                {
+                    mtl::Dispatch d;
+                    d.p = &pipes.p_gdn_cstate_c;
+                    d.args = {mtl::Arg::B(Sst), mtl::Arg::B(s.gqn_c), mtl::Arg::B(s.gkn_c), mtl::Arg::B(s.gU_c),
+                              mtl::Arg::B(s.gW_c), mtl::Arg::B(s.glgo_c), mtl::Arg::B(s.gdelta_c),
+                              mtl::Arg::B(s.gdn_out_c), mtl::Arg::V(HK), mtl::Arg::V(HV), mtl::Arg::V(nt)};
+                    d.grid[0] = (uint32_t) (HV * 4);
+                    d.tg[0] = 256;
+                    d.barrier = true;
+                    ds.push_back(d);
+                }
+                {
+                    const int nc = (nt + WY_GC - 1) / WY_GC;
+                    mtl::Dispatch d;
+                    d.p = &pipes.p_gdn_cout_c;
+                    d.args = {mtl::Arg::B(s.gqn_c), mtl::Arg::B(s.gkn_c), mtl::Arg::B(s.gdelta_c),
+                              mtl::Arg::B(s.glgo_c), mtl::Arg::B(s.gdn_out_c), mtl::Arg::V(HK), mtl::Arg::V(HV),
+                              mtl::Arg::V(nt)};
+                    d.grid[0] = (uint32_t) HV;
+                    d.grid[1] = (uint32_t) nc;
+                    d.tg[0] = 128;
+                    d.barrier = true;
+                    ds.push_back(d);
+                }
+            } else {
                 mtl::Dispatch d;
                 d.p = &pipes.p_gdn_c;
                 d.args = {mtl::Arg::B(s.conv_out_c), mtl::Arg::B(s.alpha_c), mtl::Arg::B(m.F(L(l, "ssm_dt.bias"))),
@@ -1905,6 +1987,29 @@ int run(int argc, char** argv) {
         s.hg_c = cx.alloc((size_t) CT * K * N * sizeof(float));
         s.ident_c = cx.alloc(CT * K * sizeof(int));
         for (int i = 0; i < CT * K; ++i) s.ident_c.as<int>()[i] = i;
+        // The WY form's scratch (STRATA_Q36M_GDN_WY=1), allocated before the working-set refusal below
+        // so cx.allocated() counts it.  The kernels assume the 128-wide state and 32-token chunks.
+        if (q36_gdn_wy()) {
+            if (g.ssm_state_size != WY_S) {
+                std::fprintf(stderr, "q36_metal: the WY chunk GDN needs ssm_state_size %d, model has %d\n", WY_S,
+                             (int) g.ssm_state_size);
+                std::exit(1);
+            }
+            const size_t NC = (CT + WY_GC - 1) / WY_GC;
+            s.gqn_c = cx.alloc(CT * g.ssm_k_heads * WY_S * sizeof(float));
+            s.gkn_c = cx.alloc(CT * g.ssm_k_heads * WY_S * sizeof(float));
+            s.gvc_c = cx.alloc(CT * g.ssm_v_heads * WY_S * sizeof(float));
+            s.ggb_c = cx.alloc(CT * g.ssm_v_heads * 2 * sizeof(float));
+            s.gU_c = cx.alloc(g.ssm_v_heads * NC * WY_GC * WY_S * sizeof(float));
+            s.gW_c = cx.alloc(g.ssm_v_heads * NC * WY_GC * WY_S * sizeof(float));
+            s.glgo_c = cx.alloc(g.ssm_v_heads * NC * WY_GC * sizeof(float));
+            s.gdelta_c = cx.alloc(g.ssm_v_heads * NC * WY_GC * WY_S * sizeof(float));
+            std::fprintf(stderr,
+                         "strata metal q36: the chunk GDN runs the WY form (STRATA_Q36M_GDN_WY=1), scratch %.2f MB\n",
+                         (double) (CT * (2 * (size_t) g.ssm_k_heads + g.ssm_v_heads) * WY_S + CT * g.ssm_v_heads * 2
+                                   + (size_t) g.ssm_v_heads * NC * WY_GC * (3 * WY_S + 1))
+                             * 4 / (1024.0 * 1024.0));
+        }
         if ((int) g.n_ff == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_down_exps.weight")).type) > 0
             && !((int) g.n_embd == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_gate_exps.weight")).type) > 0)) {
             std::fprintf(stderr, "q36_metal: chunk prefill cannot reproduce the decode experts for this quant "
