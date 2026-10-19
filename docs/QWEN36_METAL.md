@@ -513,8 +513,10 @@ The engine prints the real numbers once the caches are up, e.g. at `--ctx 32768 
 strata metal q36: --kv-f16: KV caches fp16: 10 QSA layers x 2 (K,V) x 2 KV heads x 32768 ctx x 256 dims x 2 B = 0.67 GB (fp32: 1.34 GB)
 ```
 
-(with `--mtp` the line continues `; draft block 0.07 GB (fp32: 0.13 GB)`). Measured on the M2:
-**pending** — gate 5's two lines land here with the date.
+(with `--mtp` the line continues `; draft block 0.07 GB (fp32: 0.13 GB)`). Measured on the M2
+(2026-10-19, branch build `5bcf2485`): both gate-5 lines matched the table exactly — `--ctx 8192`:
+`... x 8192 ctx x 256 dims x 2 B = 0.17 GB (fp32: 0.34 GB)`; `--ctx 32768`: `... x 32768 ctx x
+256 dims x 2 B = 0.67 GB (fp32: 1.34 GB)`.
 
 The startup refusal's estimate changes only under the flag: `--kv-f16` adds the main-KV projection
 it is about to allocate to `est` (the fp32 path's estimate has never counted the per-layer KV — they
@@ -522,13 +524,18 @@ allocate after the gate — and that fp32 behavior is frozen; §6's memory-gate 
 
 **Text difference (expected, documented — not a bug).** The fp16 cache rounds K and V once at write
 (round-to-nearest-even); runs with the flag are deterministic (two flagged runs are 10/10 identical
-to each other) but differ from the fp32 runs' text. The fp32-vs-f16 ladder's first-divergence
-positions: **pending** — filled from the `q36_cmp_gate.py` pass when the Mac round runs. The parity
-harness's f16 mode (`STRATA_Q36M_KV_F16=1 ./build-metal/q36_chunk_parity`) measures the rounding's
-own cost directly: on a cache of half-exact values both libs' `k_attn` and split-K pair produce
-bit-identical outputs (the "only storage changed" proof), and on a random cache the rel-L1 against
-the fp32 kernels is printed and bounded at 1e-3 (the CUDA `qsa_parity.cpp` precedent's metric and
-phase bound for FP16 paths). Measured: **pending**.
+to each other) but differ from the fp32 runs' text. Measured on the M2 (2026-10-19, the 10 parity
+prompts, ≤128 generated tokens each): **7 of 10 prompts are token-identical across the whole run**;
+the three that diverge do so at generated token 100 (p00), 69 (p01) and 46 (p03) — never at the
+first tokens (the garbage-class signature of a half cache meeting an fp32 pipeline), and every
+prompt is identical up to its divergence point. The parity harness's f16 mode
+(`STRATA_Q36M_KV_F16=1 ./build-metal/q36_chunk_parity`) measures the rounding's own cost directly:
+on a cache of half-exact values both libs' `k_attn` and split-K pair produce bit-identical outputs
+(the "only storage changed" proof), and on a random cache the rel-L1 against the fp32 kernels is
+printed and bounded at 1e-3 (the CUDA `qsa_parity.cpp` precedent's metric and phase bound for FP16
+paths). Measured (M2, 2026-10-19): the half-exact cross is bit-identical on both kernel pairs, and
+the random-cache rel-L1 is **1.75e-4** vs the 1e-3 bound (`kv f16 cross   OK (random-cache rel-L1
+0.000175 <= 1e-03)`).
 
 **Interactions.** Works with `--prefill` (the chunk writer `k_attn_prep_chunk` has an f16 pipeline;
 the MTP verify window rides it), with `--mtp N` (the draft cache halves), and with either attention
@@ -570,6 +577,25 @@ STRATA_Q36M_ATTN_GQA=1 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal
 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
   --args "--native $Q36_MODEL --ctx 4096 --mtp 2 --kv-f16" --out /tmp/q36-mtpf16a.json   # ...then b, cmp 10/10
 ```
+
+Measured on the M2 (Apple M2, macOS 26.6.2, 2026-10-19, branch build `5bcf2485`, UD-Q2_K_XL — every
+gate from this list, same build, same day):
+
+- **gate 1**: green — the f16 lib (index 1) compiles and its seven pipelines create (`all q36 f16
+  pipelines created`), on top of the default lib's full list.
+- **gate 2**: default mode all stages bit-identical (the 38-check suite); f16 mode all-OK plus the
+  cross stage (rel-L1 1.75e-4, above).
+- **gate 3**: the no-flag base json vs the pre-change build's base json — `identical: 10 of 10`.
+  This is the byte-identical proof the contributing rule asks for.
+- **gate 4**: two flagged runs `identical: 10 of 10` (deterministic); the fp32-vs-f16 cmp is 7 of 10
+  with the divergence positions above.
+- **gate 5**: the two KV lines match the memory table exactly (0.17/0.67 GB f16, fp32 would-be
+  0.34/1.34 GB).
+- **gate 6**: split-K-forced, GQA-fold and `--mtp 2` under the flag — each pair twice 10/10
+  self-identical, and each 10/10 token-identical to the plain flagged run (the knob paths and the
+  speculative path agree with the default attention under the flag). The composition
+  `--mtp 2 --kv-f16 --draft-vocab 8192` twice 10/10 self-identical and 10/10 vs the plain flagged
+  run — the draft-vocab head slicing (§7) and the halved caches compose as the review predicted.
 
 **Speed (ready to run, not run yet).** The halved KV traffic should show up as a deep-decode
 tok/s gain; the A/B is documented here and deliberately not a gate (the hours-class benchmark
