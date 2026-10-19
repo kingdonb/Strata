@@ -104,7 +104,7 @@ Measured or verified, item by item:
 
 ### 4.3 Is a combined implementation possible?
 
-**Yes.** The memory math on 24 GB: ~11.4 GB resident weights (UD-Q2_K_XL) + 0.67 GB KV (f16 at 32k, §9 measured) + scratch (~59 MB WY at chunk 512, ~236 MB at 2048, ~40–80 MB MMA arena) + app → **~12.5–13 GB working set, leaving ~10 GB** for Chrome, the IDE and macOS. The 32k experiment proved the memory side empirically on their engine; ours has the same shape plus the explicit refusal gate. The blockers to their prefill speed are kernel dispatch structure (T9/T10), not memory; the deep-context decode gap is T6's pending measurement against T11's ≥6 tok/s-at-16k gate. Nothing about the combined plan requires a bigger machine — it requires the measurements first (§6 order), then the two batch-structure kernels behind parity knobs.
+**Yes.** The memory math on 24 GB: ~11.4 GB resident weights (UD-Q2_K_XL) + 0.67 GB KV (f16 at 32k, §9 measured) + scratch (~59 MB WY at chunk 512, ~236 MB at 2048, ~40 MB MMA arena at the attn_qkv shape — §10) + app → **~12.5–13 GB working set, leaving ~10 GB** for Chrome, the IDE and macOS. The 32k experiment proved the memory side empirically on their engine; ours has the same shape plus the explicit refusal gate. The blockers to their prefill speed are kernel dispatch structure (T9/T10), not memory; the deep-context decode gap is T6's pending measurement against T11's ≥6 tok/s-at-16k gate. Nothing about the combined plan requires a bigger machine — it requires the measurements first (§6 order), then the two batch-structure kernels behind parity knobs.
 
 ## 5. Table B — the Phase 2 roadmap, ticket by ticket
 

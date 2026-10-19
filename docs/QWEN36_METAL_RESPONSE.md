@@ -19,7 +19,7 @@ One number from their side that we find more interesting than any of ours: pinne
 
 ## Is the combined implementation possible?
 
-Yes, and half of it is already proven. The 32k experiment established the memory side on their engine; ours has the same shape: ~11.4 GB weights + 0.67 GB KV at 32k (f16, measured) + ~100–350 MB scratch ≈ **12.5–13 GB working set — about 10 GB left for Chrome, the IDE, and macOS**. The prefill gap is kernel structure (T9: batched flash attention; T10: batched MoE GEMM, with a proven donor kernel and their own CUDA numbers saying what structure is worth). The deep-context gap is T6's measurement. Both engines want the same destination from opposite sides: they have prefill speed and guessy memory budgets; we have explicit budgets, bit-parity, and the deep-context architecture, with the prefill homework written down and gated on measurement.
+Yes, and half of it is already proven. The 32k experiment established the memory side on their engine; ours has the same shape: ~11.4 GB weights + 0.67 GB KV at 32k (f16, measured) + ~100–330 MB scratch depending on chunk size (§10) ≈ **12.5–13 GB working set — about 10 GB left for Chrome, the IDE, and macOS**. The prefill gap is kernel structure (T9: batched flash attention; T10: batched MoE GEMM, with a proven donor kernel and their own CUDA numbers saying what structure is worth). The deep-context gap is T6's measurement. Both engines want the same destination from opposite sides: they have prefill speed and guessy memory budgets; we have explicit budgets, bit-parity, and the deep-context architecture, with the prefill homework written down and gated on measurement.
 
 ## The experiment we'd like to see next
 
