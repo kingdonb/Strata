@@ -79,6 +79,24 @@ greedy-only, opt-in, off by default.
 Gates: `--mtp 2` greedy text identical to `--mtp 0` on the 10 parity prompts; the measured decode ratio
 on the same Mac and day; it stays opt-in unless ≥1.2x is measured. Depends on T2.
 
+## T4.5 — The draft-vocab subset head (`--draft-vocab N`, ticket 000682)
+
+State: built on `feature/000682-draft-vocab-subset-head`; the M2 gates pending (the commands are in
+docs/QWEN36_METAL.md §7's subsection). T4's verdict named this as the missing piece: the draft
+step's head GEMV read the whole 248,320-row `output.weight` and the host argmax scanned all of it,
+every draft step.
+Scope: `--draft-vocab N` (the env `STRATA_Q36_DRAFT_VOCAB` as the fallback, the flag wins — the
+CUDA engine's flag and env, `src/qwen35/q36_engine.cu`): the draft pick runs over the head's first
+N rows in place (a shrunken view of the same tensor, row i = token id i — no gather, no map, no new
+kernel); the startup stderr line prints the subset's rows and MB per draft step against the full
+head's. Parity by construction (drafts only propose), so the T4 gate stands: `--mtp 2
+--draft-vocab N` greedy text identical to `--mtp 0` and to `--mtp 2` on the 10 parity prompts,
+twice. Strictly opt-in; 0 or absent = the whole vocabulary, as before.
+Gates: the build + `q36_compile_test` green; the two 10/10 ladder compares; the no-flag base json
+byte-identical; the measured `{4096, 8192, 16384}` table (tok/s, accept %, English/code and CJK)
+recorded in docs/QWEN36_METAL.md §7; the ≥1.2x rule decides any docs recommendation, never a
+default flip. Depends on T4.
+
 ## T5 — FP16 KV cache and the sampling profile
 
 Scope: `--kv-f16` (opt-in, never a default) with fp32 unpack in the attention kernels; the measured
