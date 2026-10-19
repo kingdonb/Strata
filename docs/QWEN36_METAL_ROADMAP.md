@@ -81,10 +81,12 @@ on the same Mac and day; it stays opt-in unless ≥1.2x is measured. Depends on 
 
 ## T4.5 — The draft-vocab subset head (`--draft-vocab N`, ticket 000682)
 
-State: built on `feature/000682-draft-vocab-subset-head`; the M2 gates pending (the commands are in
-docs/QWEN36_METAL.md §7's subsection). T4's verdict named this as the missing piece: the draft
-step's head GEMV read the whole 248,320-row `output.weight` and the host argmax scanned all of it,
-every draft step.
+State: built on `feature/000682-draft-vocab-subset-head` (`acd8c8a0`); compiles clean on the M2 and
+the startup traffic line is verified there (Apple M2, 2026-10-19, UD-Q2_K_XL: the head is Q4_K,
+1,152 B/row — 8,192 rows read 9.4 MB of the full head's 286 MB, 30.4×); the parity ladder and the
+measurement table are in flight (docs/QWEN36_METAL.md §7). T4's verdict named this as the missing
+piece: the draft step's head GEMV read the whole 248,320-row `output.weight` and the host argmax
+scanned all of it, every draft step.
 Scope: `--draft-vocab N` (the env `STRATA_Q36_DRAFT_VOCAB` as the fallback, the flag wins — the
 CUDA engine's flag and env, `src/qwen35/q36_engine.cu`): the draft pick runs over the head's first
 N rows in place (a shrunken view of the same tensor, row i = token id i — no gather, no map, no new

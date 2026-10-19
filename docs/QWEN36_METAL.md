@@ -322,11 +322,15 @@ nothing. The engine prints the subset's rows and MB per draft step beside the fu
 startup. Operators turn it on from the config's `args`: `"--draft-vocab", "8192"` beside
 `"--mtp", "2"`.
 
-Per draft step the subset reads `N × row_bytes(head)` instead of `248,320 × row_bytes(head)` — at
-the Q8_0 head's 2,304 B/row (UD-Q4_K_XL's, per docs/QWEN36.md's rocprof note; the M2's file reads
-its own out at load): 8,192 rows ≈ 18.9 MB against 572 MB (30×), 4,096 ≈ 9.4 MB (61×), 16,384 ≈
-37.8 MB (15×). The verify window's own full-head pass stays and becomes the round's remaining head
-term.
+Per draft step the subset reads `N × row_bytes(head)` instead of `248,320 × row_bytes(head)`. Measured
+on the M2 at startup (Apple M2, 2026-10-19, build `acd8c8a0`, UD-Q2_K_XL): the head is **Q4_K** there,
+1,152 B/row, so the full head streams 286 MB per draft step and
+
+    strata metal q36: --draft-vocab 8192: the draft pick reads the head's first 8192 rows (9.4 MB per draft step against the full head's 286 MB)
+
+— 8,192 rows = 9.4 MB (30.4×), 4,096 ≈ 4.7 MB (61×), 16,384 ≈ 18.9 MB (15×). (UD-Q4_K_XL's head is
+Q8_0 at 2,304 B/row per docs/QWEN36.md's rocprof note — the line reads the file's own bytes, whatever
+they are.) The verify window's own full-head pass stays and becomes the round's remaining head term.
 
 Gates (same Mac, same day, same build):
 
@@ -340,13 +344,14 @@ python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-mtp.json  /tmp/q36-dv.json   # 10/
 # share of token ids above each draft-vocab limit (the coverage predictor per language)
 ```
 
-M2 numbers: **pending** — the change is built and reviewed; the two 10/10 ladder compares, the
-no-flag base compare and the `{4096, 8192, 16384}` × (English/code, CJK) table run on the M2 before
-this subsection's verdict is filled. The CUDA engine's own data point for the same knob (docs/QWEN36.md,
-"Tried and dropped"): the first 16K–131K rows gain 5–8% on English and code but lose 10–15% on
-Chinese/Russian/Arabic/Hindi, and it stayed opt-in. Verdict rule: ≥1.2× vs `--mtp 0` on English/code
-may be recommended here; the flag stays strictly opt-in either way, with the CJK trade-off
-documented.
+M2 state (Apple M2, 2026-10-19, build `acd8c8a0`): the build is clean, the startup line above is
+verified, and the 10-prompt parity ladder (`--mtp 2 --draft-vocab 8192` vs `--mtp 0` and vs
+`--mtp 2`) is running — the 10/10 compares, the no-flag base compare and the `{4096, 8192, 16384}`
+× (English/code, CJK) table land here when it completes. The CUDA engine's own data point for the
+same knob (docs/QWEN36.md, "Tried and dropped"): the first 16K–131K rows gain 5–8% on English and
+code but lose 10–15% on Chinese/Russian/Arabic/Hindi, and it stayed opt-in. Verdict rule: ≥1.2× vs
+`--mtp 0` on English/code may be recommended here; the flag stays strictly opt-in either way, with
+the CJK trade-off documented.
 
 ## 8. GQA-folded attention (`STRATA_Q36M_ATTN_GQA=1`)
 
