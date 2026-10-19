@@ -428,6 +428,7 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
                       mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(D), mtl::Arg::V(n_pos), mtl::Arg::V(s.ctx),
                       mtl::Arg::V(scale)};
             d.grid[0] = (uint32_t) HKV;
+            d.grid[1] = (uint32_t)((n_pos + 127) / 128);   // one 128-cell tile per threadgroup
             d.tg[0] = 128;
             d.tg_mem = (uint32_t)((size_t) HG * D * sizeof(float));
             d.barrier = true;
@@ -438,6 +439,7 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
                        mtl::Arg::B(att, 4 * (size_t) i * H * D), mtl::Arg::V(H), mtl::Arg::V(HKV),
                        mtl::Arg::V(D), mtl::Arg::V(n_pos), mtl::Arg::V(s.ctx)};
             dm.grid[0] = (uint32_t) HKV;
+            dm.grid[1] = (uint32_t) HG;   // one threadgroup per (KV head, query head)
             dm.tg[0] = 128;
             dm.tg_mem = (uint32_t)(n_pos * sizeof(float));
             dm.barrier = true;

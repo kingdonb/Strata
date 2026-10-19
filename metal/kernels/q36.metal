@@ -648,11 +648,12 @@ kernel void k_attn_sk_merge(device const float* pacc [[buffer(0)]],
 // exp recompute: exact FLOPs, the only new traffic is the score-scratch round trip (HG x n_pos,
 // ~256x smaller than the KV term it replaces).
 
-// Path A, part 1 of 2 (the k_attn range, n_pos <= SK_TG_CAP): one threadgroup per KV head.
-// Thread tid computes the group's HG scores for cells p = tid (mod 128): the K row is read once
-// and all HG dots chain against it.  Scores land in scratch [head][cell] (row stride n_pos, the
-// GLOBAL head index - all HKV groups' rows live at once); the merge kernel finds the per-head
-// max from them (exact, tree-free).
+// Path A, part 1 of 2 (the k_attn range, n_pos <= SK_TG_CAP): grid (HKV, ceil(n_pos / 128)) -
+// one threadgroup per (KV head, 128-cell tile), one cell per thread.  The tile grid keeps the
+// score pass wide (72 threadgroups at a 4.5K-cell context, vs 2 without tiling); the K row is
+// still read once per (KV head, cell) and all HG dots chain against it.  Scores land in scratch
+// [head][cell] (row stride n_pos, the GLOBAL head index - all HKV groups' rows live at once);
+// the merge kernel finds the per-head max from them (exact, tree-free).
 kernel void k_attn_gqa_part(device const float* q [[buffer(0)]],
                             device const float* kc [[buffer(1)]],
                             device float* scr [[buffer(2)]],
@@ -663,14 +664,16 @@ kernel void k_attn_gqa_part(device const float* q [[buffer(0)]],
                             constant int& ctx [[buffer(7)]],
                             constant float& scale [[buffer(8)]],
                             threadgroup float* qs [[threadgroup(0)]],
-                            uint kvh [[threadgroup_position_in_grid]],
+                            uint2 g [[threadgroup_position_in_grid]],
                             uint tid [[thread_index_in_threadgroup]]) {
     const int HG = H / HKV;
+    const int kvh = (int) g.x;
+    const int p = (int) g.y * 128 + (int) tid;   // this thread's one cell
     for (int j = (int) tid; j < HG * D; j += 128)
         qs[j] = q[(ulong)(kvh * HG) * D + j];   // the group's q rows, contiguous
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (int p = (int) tid; p < n_pos; p += 128) {
+    if (p < n_pos) {
         device const float* kp = kc + ((ulong) kvh * ctx + p) * D;
         for (int hh = 0; hh < HG; ++hh) {
             threadgroup const float* qh = qs + (ulong) hh * D;
@@ -681,12 +684,16 @@ kernel void k_attn_gqa_part(device const float* q [[buffer(0)]],
     }
 }
 
-// Path A, part 2 of 2: per KV head, k_attn's own one-pass sequence over the staged scores -
-// max (k_attn's tree), exp into a threadgroup tile + per-thread partial sums (p = tid (mod 128),
-// ascending), block_sum, then the P.V chains per output dim (i = tid (mod 128)) - each thread
-// does its HG heads' dims, the V cells read once per group.  The tile is n_pos floats, the same
-// threadgroup budget k_attn's score buffer takes; a barrier at the loop end orders the previous
-// head's tile reads before the next head's tile writes.
+// Path A, part 2 of 2: grid (HKV, HG) - one threadgroup per (KV head, query head): k_attn's own
+// one-pass sequence for that head over the staged scores - max (k_attn's tree), exp into the
+// threadgroup tile + per-thread partial sums (p = tid (mod 128), ascending), block_sum, then the
+// P.V chains per output dim (i = tid (mod 128)), p ascending - with the V cells read once per
+// head, the same per-head pattern as k_attn itself.  (An earlier revision looped the heads inside
+// one (HKV)-grid threadgroup: bit-identical output, but the per-head V re-walks streamed the
+// whole slice through a too-small L1 eight times and the dispatch ran on 2 threadgroups - the
+// measured deep-decode collapse.  Hoisting the head loop into the grid restores the occupancy
+// and the per-head-once V reads while keeping every chain's arithmetic identical.)  The tile is
+// n_pos floats, the same threadgroup budget k_attn's score buffer takes.
 kernel void k_attn_gqa_merge(device const float* vc [[buffer(0)]],
                              device const float* gate [[buffer(1)]],
                              device const float* scr [[buffer(2)]],
@@ -697,47 +704,42 @@ kernel void k_attn_gqa_merge(device const float* vc [[buffer(0)]],
                              constant int& n_pos [[buffer(7)]],
                              constant int& ctx [[buffer(8)]],
                              threadgroup float* et [[threadgroup(0)]],
-                             uint kvh [[threadgroup_position_in_grid]],
+                             uint2 g [[threadgroup_position_in_grid]],
                              uint tid [[thread_index_in_threadgroup]],
                              ushort lane [[thread_index_in_simdgroup]],
                              ushort sgid [[simdgroup_index_in_threadgroup]]) {
-    const int HG = H / HKV;
     threadgroup float sh_m[4];
     threadgroup float sh_s[4];
-    const int h0 = kvh * HG;
+    const int kvh = (int) g.x, hh = (int) g.y;
+    const ulong h = (ulong)(kvh * (H / HKV) + hh);
+    device const float* sr = scr + h * n_pos;
 
-    for (int hh = 0; hh < HG; ++hh) {
-        const ulong h = (ulong)(h0 + hh);
-        device const float* sr = scr + h * n_pos;
+    float mx = -INFINITY;
+    for (int p = (int) tid; p < n_pos; p += 128) mx = max(mx, sr[p]);
+    mx = simd_max(mx);
+    if (lane == 0) sh_m[sgid] = mx;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgid == 0) {
+        float tot = (lane < 4) ? sh_m[lane] : -INFINITY;
+        tot = simd_max(tot);
+        if (lane == 0) sh_m[0] = tot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    mx = sh_m[0];
 
-        float mx = -INFINITY;
-        for (int p = (int) tid; p < n_pos; p += 128) mx = max(mx, sr[p]);
-        mx = simd_max(mx);
-        if (lane == 0) sh_m[sgid] = mx;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (sgid == 0) {
-            float tot = (lane < 4) ? sh_m[lane] : -INFINITY;
-            tot = simd_max(tot);
-            if (lane == 0) sh_m[0] = tot;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        mx = sh_m[0];
+    float sum = 0.0f;
+    for (int p = (int) tid; p < n_pos; p += 128) {
+        float e = exp(sr[p] - mx);
+        et[p] = e;
+        sum += e;
+    }
+    sum = block_sum(sum, sh_s, tid, lane, sgid);
+    const float inv_sum = 1.0f / sum;
 
-        float sum = 0.0f;
-        for (int p = (int) tid; p < n_pos; p += 128) {
-            float e = exp(sr[p] - mx);
-            et[p] = e;
-            sum += e;
-        }
-        sum = block_sum(sum, sh_s, tid, lane, sgid);
-        const float inv_sum = 1.0f / sum;
-
-        for (int i = (int) tid; i < D; i += 128) {
-            float acc = 0.0f;
-            for (int p = 0; p < n_pos; ++p) acc += et[p] * vc[((ulong) kvh * ctx + p) * D + i];
-            out[h * D + i] = (acc * inv_sum) * sigm(gate[h * D + i]);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int i = (int) tid; i < D; i += 128) {
+        float acc = 0.0f;
+        for (int p = 0; p < n_pos; ++p) acc += et[p] * vc[((ulong) kvh * ctx + p) * D + i];
+        out[h * D + i] = (acc * inv_sum) * sigm(gate[h * D + i]);
     }
 }
 
