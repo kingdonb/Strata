@@ -345,13 +345,17 @@ python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-mtp.json  /tmp/q36-dv.json   # 10/
 ```
 
 M2 state (Apple M2, 2026-10-19, build `acd8c8a0`): the build is clean, the startup line above is
-verified, and the 10-prompt parity ladder (`--mtp 2 --draft-vocab 8192` vs `--mtp 0` and vs
-`--mtp 2`) is running — the 10/10 compares, the no-flag base compare and the `{4096, 8192, 16384}`
-× (English/code, CJK) table land here when it completes. The CUDA engine's own data point for the
-same knob (docs/QWEN36.md, "Tried and dropped"): the first 16K–131K rows gain 5–8% on English and
-code but lose 10–15% on Chinese/Russian/Arabic/Hindi, and it stayed opt-in. Verdict rule: ≥1.2× vs
-`--mtp 0` on English/code may be recommended here; the flag stays strictly opt-in either way, with
-the CJK trade-off documented.
+M2 state (Apple M2, 2026-10-19, build `acd8c8a0`, UD-Q2_K_XL): the build is clean, the startup line
+above is verified, and the subset's parity ladder is done — `--mtp 2 --draft-vocab 8192` is
+token-identical to `--mtp 0` (**10 of 10**) and to `--mtp 2` (full head, **10 of 10**), as the
+construction argument predicts. Still open on the M2: the no-flag base compare against the
+pre-change build, the `{4096, 8192, 16384}` × (English/code, CJK) measurement table, and the
+composability run with the GQA-folded attention (`STRATA_Q36M_ATTN_GQA=1 --mtp 2 --draft-vocab
+8192`). The CUDA engine's own data point for the same knob (docs/QWEN36.md, "Tried and dropped"):
+the first 16K–131K rows gain 5–8% on English and code but lose 10–15% on
+Chinese/Russian/Arabic/Hindi, and it stayed opt-in. Verdict rule: ≥1.2× vs `--mtp 0` on
+English/code may be recommended here; the flag stays strictly opt-in either way, with the CJK
+trade-off documented.
 
 ## 8. GQA-folded attention (`STRATA_Q36M_ATTN_GQA=1`)
 
