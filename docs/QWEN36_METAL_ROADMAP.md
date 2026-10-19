@@ -180,10 +180,14 @@ follow-through paths for hardware the maintainers do not have.
 
 ## Phase 2: Post-0.2.0 Milestones — Benchmarking Against Unsloth & Uncapped Context
 
-On 2026-10-19, empirical benchmarks were conducted on an Apple M2 comparing Strata's custom Metal Qwen3.6 engine against Unsloth's `Qwen3.6-35B-A3B-MTP-GGUF` (`UD-Q2_K_XL`):
-- **Unsloth Highlights**: Achieved ~263.6 tok/s prefill on bulk prompts (5,862 tokens in 22.24s) via batched SIMD-group matrix multiply, and sustained 23.8 tok/s generation across 2,328 tokens via Multi-Token Prediction (MTP). Demonstrated instant prefix caching (5,858 cache hits on resume).
-- **Unsloth Limitation**: Hard ceiling at 8,192 tokens (`8.2k / 8.2k`). When the 5,862 prompt tokens combined with 2,328 generated tokens reached 8,190 tokens, a resume attempt could only emit 2 additional tokens before halting mid-sentence with *"Response hit the Max Tokens limit."*
-- **Strata Advantage**: Strata's custom Split-K attention and dynamic memory budgeting already sustain continuous generation at 6,000+ context depth (7.2 tok/s decode) up to 16k+ without hitting a hard 8.2k wall. However, Strata's prefill currently runs at ~25 tok/s due to parity-first row-by-row dispatch in `forward_prompt_chunk`.
+> **Author**: Gemini-3.8-Flash  
+> **Status**: Draft candidate initiatives for Helix review.  
+> - [ ] **Review Status**: Pending review by Qwen-3.8-Flash-Next and ticket ordering in Helix.
+
+On 2026-10-19, empirical benchmarks were conducted on an Apple M2 (24 GB) comparing Strata's custom Metal Qwen3.6 engine against Unsloth's `Qwen3.6-35B-A3B-MTP-GGUF` (`UD-Q2_K_XL`):
+- **Unsloth Highlights**: Achieved ~263.6 tok/s prefill on bulk prompts (5,862 tokens in 22.24s) via batched SIMD-group matrix multiply, and sustained 23.8 tok/s decode generation across 2,328 tokens. Demonstrated instant prefix caching (5,858 cache hits on resume). Note: while the model file contains MTP weights, proposal/acceptance telemetry was uninstrumented, so the exact speed contribution of MTP vs. fused kernel dequantization and memory bandwidth utilization remains an unverified research question.
+- **Context Allocation**: In the desktop benchmark run on the 24 GB M2 under active desktop load (Chrome, IDE, etc.), the session context was budgeted at 8,192 tokens (`8.2k / 8.2k`), likely based on available free system RAM at model load time. When the 5,862 prompt tokens combined with 2,328 generated tokens reached 8,190 tokens, a resume attempt could only emit 2 additional tokens before halting mid-sentence with *"Response hit the Max Tokens limit."* (Closing concurrent heavy applications would allow desktop auto-calculators to allocate more headroom, but memory headroom remains variable).
+- **Strata Advantage**: Strata's custom Split-K attention and explicit memory management (`--kv-f16` halving KV cache footprint) already sustain continuous generation at 6,000+ context depth (7.2 tok/s decode) up to 16k+ on the same 24 GB hardware without relying on massive unallocated RAM margins. However, Strata's prefill currently runs at ~25 tok/s due to parity-first row-by-row dispatch in `forward_prompt_chunk`.
 
 The following candidate initiatives form the Phase 2 roadmap to achieve prefill throughput parity with Unsloth while maintaining Strata's deep-context edge:
 
@@ -202,7 +206,7 @@ The following candidate initiatives form the Phase 2 roadmap to achieve prefill 
 - **Scope**: Group tokens in each chunk by routed expert ID and execute true batched GEMM matrix multiplications across active experts, replacing per-token dispatches with high-occupancy SIMD-group operations.
 
 ### T11 — Paged & Dynamic Context Architecture (Sustained Context > 8.2k)
-- **Observation**: Unsloth hard-caps context at 8,192 tokens due to static KV cache allocations, failing to complete answers when prompts approach the ceiling.
-- **Scope**: Formalize Strata's split-K attention, dynamic KV chunking, and memory budgeting into an official paged context architecture that guarantees sustained generation across 16k–32k context on 24GB Unified Memory.
+- **Observation**: Standard desktop runtimes budget context dynamically based on free system RAM at launch, risking truncation under concurrent desktop workloads.
+- **Scope**: Formalize Strata's split-K attention, dynamic KV chunking, and `--kv-f16` memory budgeting into an official paged context architecture that guarantees sustained generation across 16k–32k context on 24GB Unified Memory regardless of background application memory pressure.
 - **Gate**: Zero truncation errors on prompts exceeding 8k tokens; sustained decode > 6 tok/s at 16k context depth.
 
