@@ -1453,27 +1453,35 @@ static void push_mtp_block_row(std::vector<mtl::Dispatch>& ds, const Pipelines& 
 // (seeded by s.hlast) - the last row's head argmax is draft d1; the chained drafts d2.. seed from
 // the block's own output (s.hmtp).  s.pos is not touched; the block's KV cache takes the rows.
 static void mtp_draft(mtl::Context& cx, const Pipelines& pipes, const Model& m, State& s, bool sk_force,
-                      int nx, const std::vector<int32_t>& fix, int D, std::vector<int32_t>& drafts) {
+                      int nx, const std::vector<int32_t>& fix, int D, int draft_n, std::vector<int32_t>& drafts) {
     const int64_t p = s.pos;
     const size_t N = (size_t) m.g.n_embd;
     const int V = (int) m.g.n_vocab;
     drafts.assign((size_t) D, 0);
+    // The draft head over the first draft_n rows only (--draft-vocab, the CUDA engine's
+    // STRATA_Q36_DRAFT_VOCAB): a shrunken view of the same tensor - rows [0, draft_n) read in place,
+    // row i is token id i, no remap.  A draft only proposes: the verify window's full-head pick
+    // decides, so a token past draft_n is a rejected draft and nothing else - the kept text is the
+    // same greedy text whatever draft_n is.
+    Tensor head_v = m.W("output.weight");
+    const int nv = draft_n > 0 && draft_n < V ? draft_n : V;
+    if (nv != V) head_v.shape[1] = nv;
     {
         std::vector<mtl::Dispatch> ds;
         for (size_t i = 0; i < fix.size(); ++i)
             push_mtp_block_row(ds, pipes, m, s, s.hmain_w, i * N * 4, fix[i],
                                p - (int64_t) fix.size() + (int64_t) i, sk_force);
         push_mtp_block_row(ds, pipes, m, s, s.hlast, 0, nx, p, sk_force);
-        push_gemv(ds, pipes, m.W("output.weight"), s.hmtp, s.mtp_logits, nullptr, 1, 0, true);
+        push_gemv(ds, pipes, head_v, s.hmtp, s.mtp_logits, nullptr, 1, 0, true);
         cx.run_graph(ds);
     }
-    drafts[0] = mtp_argmax(s.mtp_logits.as<float>(), V);
+    drafts[0] = mtp_argmax(s.mtp_logits.as<float>(), nv);
     for (int d = 1; d < D; ++d) {   // chained: (the block's own output, the last draft) at the next position
         std::vector<mtl::Dispatch> ds;
         push_mtp_block_row(ds, pipes, m, s, s.hmtp, 0, drafts[(size_t) d - 1], p + d, sk_force);
-        push_gemv(ds, pipes, m.W("output.weight"), s.hmtp, s.mtp_logits, nullptr, 1, 0, true);
+        push_gemv(ds, pipes, head_v, s.hmtp, s.mtp_logits, nullptr, 1, 0, true);
         cx.run_graph(ds);
-        drafts[(size_t) d] = mtp_argmax(s.mtp_logits.as<float>(), V);
+        drafts[(size_t) d] = mtp_argmax(s.mtp_logits.as<float>(), nv);
     }
 }
 
@@ -1581,6 +1589,7 @@ int run(int argc, char** argv) {
     bool prefill_given = false;
     bool serve_mode = false;
     int mtp_d = 0;           // --mtp N: MTP draft tokens per speculative step (0 = off, as before)
+    int draft_vocab = -1;    // --draft-vocab N: the MTP drafts pick among the first N rows of the head (-1 = unset)
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -1620,6 +1629,11 @@ int run(int argc, char** argv) {
                 std::fprintf(stderr, "strata metal q36: ignoring --mtp %s (this family's MTP is the GGUF's own "
                                      "block: --mtp N drafts)\n", mv.c_str());
             }
+        } else if (a == "--draft-vocab" && i + 1 < argc) {
+            // a number of rows: the drafts pick among the first N rows of output.weight (the CUDA engine,
+            // src/qwen35/q36_engine.cu, takes the same integer here; a subset FILE is Flash-Next's
+            // --mtp-draft-vocab, a different name)
+            draft_vocab = std::atoi(argv[++i]);
         }
     }
     if (prefill_chunk < 0) prefill_chunk = 0;
@@ -1660,6 +1674,20 @@ int run(int argc, char** argv) {
         std::fprintf(stderr, "strata metal q36: --mtp %d needs the GGUF's own MTP block "
                              "(qwen35moe.nextn_predict_layers); this file has none\n", mtp_d);
         return 1;
+    }
+
+    // The draft-vocab subset (the CUDA engine's STRATA_Q36_DRAFT_VOCAB, q36_engine.cu): the flag wins,
+    // the env is the fallback, and 0 = the whole vocabulary, as before.
+    int draft_n = draft_vocab;
+    if (draft_n < 0)
+        if (const char* e = std::getenv("STRATA_Q36_DRAFT_VOCAB")) draft_n = std::atoi(e);
+    if (draft_n < 0) draft_n = 0;
+    if (draft_vocab >= 0 && mtp_d == 0)
+        std::fprintf(stderr, "strata metal q36: --draft-vocab %d has no effect without --mtp N\n", draft_vocab);
+    if (draft_n > 0 && draft_n >= m.g.n_vocab) {
+        std::fprintf(stderr, "strata metal q36: --draft-vocab %d covers all %lld rows: the full head stays\n",
+                     draft_n, (long long) m.g.n_vocab);
+        draft_n = 0;
     }
 
     const std::string p = "qwen35moe.";
@@ -1747,6 +1775,12 @@ int run(int argc, char** argv) {
     if (mtp_d > 0)
         std::fprintf(stderr, "strata metal q36: --mtp %d: the draft block (blk.%lld) is loaded\n",
                      mtp_d, (long long) m.g.n_layers);
+    if (mtp_d > 0 && draft_n > 0) {
+        const size_t rb = m.W("output.weight").row_bytes;
+        std::fprintf(stderr, "strata metal q36: --draft-vocab %d: the draft pick reads the head's first %d rows "
+                             "(%.1f MB per draft step against the full head's %.0f MB)\n",
+                     draft_n, draft_n, (double) draft_n * rb / 1e6, (double) m.g.n_vocab * rb / 1e6);
+    }
 
     // Allocate runtime state buffers
     State s;
@@ -2156,7 +2190,7 @@ int run(int argc, char** argv) {
                     // short by a stop rule commits only its shown prefix, so the state ends where
                     // the shown tokens end (the prefix cache's contract) and the DONE line stays
                     // byte-for-byte what it was.
-                    mtp_draft(cx, pipes, m, s, sk_force, cur_tok, fix, mtp_d, drafts);
+                    mtp_draft(cx, pipes, m, s, sk_force, cur_tok, fix, mtp_d, draft_n, drafts);
                     mtp_offered += mtp_d;
                     mtp_verify(cx, pipes, m, s, sk_force, cur_tok, drafts, mtp_d, picks);
                     int a = 0;
@@ -2283,7 +2317,7 @@ int run(int argc, char** argv) {
             std::printf(" %d", nx);
             if ((int) gen.size() >= n_gen) break;
             if (s.pos + mtp_d + 1 <= s.ctx) {
-                mtp_draft(cx, pipes, m, s, sk_force, nx, fix, mtp_d, drafts);
+                mtp_draft(cx, pipes, m, s, sk_force, nx, fix, mtp_d, draft_n, drafts);
                 offered += mtp_d;
                 mtp_verify(cx, pipes, m, s, sk_force, nx, drafts, mtp_d, picks);
                 int a = 0;

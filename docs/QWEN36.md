@@ -177,7 +177,10 @@ The new default's goldens are `phaseA-tests/q36speed/golden/` (six documents, gr
 changes): the first 16K-131K rows gain 5-8% on English and code but lose 10-15% on Chinese / Russian / Arabic / Hindi (70% of a Chinese
 prompt's token ids are above 65,536), and a candidate list built from the tokens seen so far loses on both. The shared expert on a second
 stream (captured into the decode graph) decodes at 36 tok/s instead of 117 with this ROCm. Chunked (WY) GDN and the PCIe-assisted hybrid decode
-were not attempted.
+were not attempted. The Metal engine takes the same flag and env as an opt-in (docs/QWEN36_METAL.md §7) — on the M2's 100 GB/s bus the head
+pass it trims is a far larger share of a draft round than on the cards here, and measured there (2026-10-19): the cut is real (286 → 9.4 MB per
+draft step at 8,192 rows, 30.4×) and the parity exact, but the verdict stays opt-in — on the M2 the verify window, not the head, dominates the
+round.
 
 ## Not done / limits
 

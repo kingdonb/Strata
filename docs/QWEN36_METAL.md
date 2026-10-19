@@ -304,6 +304,71 @@ Measured on the M2 (Apple M2, 2026-10-18, UD-Q2_K_XL):
 - **Speed**: decode tok/s across the 10 prompts measured at 5.6–11.7 tok/s (base without MTP: ~17.5–21.4 tok/s); draft accept rate measured at ~15–25%.
 - **Verdict**: The target $\ge 1.2\times$ speedup is not met on Apple Silicon unified memory without a draft-vocab subset head (CUDA's `STRATA_Q36_DRAFT_VOCAB`). Per the ticket scope, the flag remains strictly opt-in (`--mtp 0` / flag-absent default); no default flip is taken.
 
+### The draft-vocab subset head (`--draft-vocab N`, ticket 000682)
+
+T4's verdict named the missing piece, and this is it. Without it, every draft step's head GEMV
+reads the whole `output.weight` — all 248,320 rows — and the host argmax scans all 248,320 logits;
+`--mtp 2` runs two such passes per round, and on the M2's 100 GB/s bus that is the draft round's
+largest term. `--draft-vocab N` (an integer; the env `STRATA_Q36_DRAFT_VOCAB` is the fallback, the
+flag wins — the CUDA engine, `src/qwen35/q36_engine.cu`, takes the same flag and env) restricts the
+draft pick to the head's **first N rows**, read in place: a shrunken view of the same tensor (same
+buffer, same offset, same row bytes, `n_out = N`), so no new kernel, no gather and no id map — row
+*i* is token id *i*. The lowest ids are the most frequent ones (the CUDA engine's own rationale for
+the same knob); a token past row N is a rejected draft and nothing else: drafts only propose, the
+verify window's full-head pick decides, and the kept text is the same greedy text whatever N is.
+0 or an absent flag = the whole vocabulary, as before; a value at or past the vocabulary falls back
+to the full head with a stderr note, and `--draft-vocab` without `--mtp N` notes that it does
+nothing. The engine prints the subset's rows and MB per draft step beside the full head's at
+startup. Operators turn it on from the config's `args`: `"--draft-vocab", "8192"` beside
+`"--mtp", "2"`.
+
+Per draft step the subset reads `N × row_bytes(head)` instead of `248,320 × row_bytes(head)`. Measured
+on the M2 at startup (Apple M2, 2026-10-19, build `acd8c8a0`, UD-Q2_K_XL): the head is **Q4_K** there,
+1,152 B/row, so the full head streams 286 MB per draft step and
+
+    strata metal q36: --draft-vocab 8192: the draft pick reads the head's first 8192 rows (9.4 MB per draft step against the full head's 286 MB)
+
+— 8,192 rows = 9.4 MB (30.4×), 4,096 ≈ 4.7 MB (61×), 16,384 ≈ 18.9 MB (15×). (UD-Q4_K_XL's head is
+Q8_0 at 2,304 B/row per docs/QWEN36.md's rocprof note — the line reads the file's own bytes, whatever
+they are.) The verify window's own full-head pass stays and becomes the round's remaining head term.
+
+Gates (same Mac, same day, same build):
+
+```bash
+python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
+  --args "--native $Q36_MODEL --ctx 4096 --mtp 2 --draft-vocab 8192" --out /tmp/q36-dv.json
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-base.json /tmp/q36-dv.json   # 10/10 identical, twice
+python3 tools/qwen35/q36_cmp_gate.py /tmp/q36-mtp.json  /tmp/q36-dv.json   # 10/10 identical
+# the measurement: the same ladder at --draft-vocab {4096, 8192, 16384}; per-prompt tok/s and the
+# engine's accept-rate stderr line; tools/qwen35/q36_multilingual_prompts.py prints each prompt's
+# share of token ids above each draft-vocab limit (the coverage predictor per language)
+```
+
+M2 results (Apple M2, 2026-10-19, build `acd8c8a0`, UD-Q2_K_XL):
+
+- **Build**: `cmake --build build-metal` and `./build-metal/q36_compile_test` clean; `q36_chunk_parity` 38/38 bit-identical.
+- **Parity**: `--mtp 2 --draft-vocab N` is token-identical to `--mtp 0` (**10 of 10**) across all tested values:
+  - $N=4,096$: `identical: 10 of 10`
+  - $N=8,192$: `identical: 10 of 10` (and `10 of 10` vs full-head `--mtp 2`)
+  - $N=16,384$: `identical: 10 of 10`
+  - Composed with folded attention (`STRATA_Q36M_ATTN_GQA=1 --mtp 2 --draft-vocab 8192`): `identical: 10 of 10` vs `--mtp 0`.
+  - Baseline no-flag compare: `identical: 10 of 10` vs pre-patch base.
+- **Traffic Reduction**:
+  - $N=4,096$: 4.7 MB per draft step against the full head's 286 MB (**60.6× cut**).
+  - $N=8,192$: 9.4 MB per draft step against the full head's 286 MB (**30.4× cut**).
+  - $N=16,384$: 18.9 MB per draft step against the full head's 286 MB (**15.1× cut**).
+- **Speed & Acceptance**:
+  - $N=4,096$: 5.0–8.8 tok/s across prompts.
+  - $N=8,192$: 5.0–8.7 tok/s across prompts.
+  - $N=16,384$: 5.5–11.1 tok/s across prompts (draft accept rate improves with 16k coverage, reaching 11.1 tok/s on code).
+  - Baseline greedy decode without MTP (`--mtp 0`): ~17.5–21.4 tok/s.
+- **Verdict**: the ≥1.2× threshold is **not met** on the M2. Even with the draft head's memory traffic reduced by up to 60.6×, the draft head is no longer the bottleneck — the 3-token chunk verify window through all 40 layers of the main model dominates when draft acceptance sits at ~15–25%. The bandwidth cut is real and output parity is exact across all prompts (English, code, and CJK), but MTP remains slower than pure baseline decode on Apple Silicon unified memory. Both flags remain strictly opt-in (`draft_n = 0` and `--mtp 0` defaults untouched).
+
+The CUDA engine's own data point for the same knob (docs/QWEN36.md, "Tried and dropped") reads the
+same way from the other side: there the head pass was small enough that the subset moved tok/s by
+single-digit percents and cost 10–15% on other scripts — on the M2 the head pass was large, but the
+round's binding term was the window all along.
+
 ## 8. GQA-folded attention (`STRATA_Q36M_ATTN_GQA=1`)
 
 The model is grouped-query: 16 query heads share 2 KV heads (H/HKV = 8, read from the geometry,
