@@ -85,6 +85,23 @@ int main() {
     std::printf("pipeline k_attn_prep_chunk (f16 lib) created: %s (max threads: %d)\n", p_attn_prep_c_f16.name.c_str(),
                 p_attn_prep_c_f16.max_threads);
     std::printf("all q36 f16 pipelines created\n");
+
+    // STRATA_Q36M_DENSE_MMA's third runtime compile: the donor set (quant + units + mma) plus
+    // q36_dense.metal - act_f16, the dq_f16_<type> instantiations (the numeric ggml ids the two-level
+    // DQ_ macro produces) and the gemm_f16 tiles the engine dispatches.
+    int lib_mma = cx.compile({"quant.metal", "units.metal", "mma.metal", "q36_dense.metal"});
+    std::printf("q36_dense.metal compiled (with units/mma), lib index: %d\n", lib_mma);
+    auto p_act16 = cx.pipeline(lib_mma, "act_f16");
+    std::printf("pipeline act_f16 created: (max threads: %d)\n", p_act16.max_threads);
+    auto p_gemm = cx.pipeline(lib_mma, "gemm_f16_64_64_4");
+    std::printf("pipeline gemm_f16_64_64_4 created: (max threads: %d)\n", p_gemm.max_threads);
+    auto p_gemm32 = cx.pipeline(lib_mma, "gemm_f16_64_32_4");
+    std::printf("pipeline gemm_f16_64_32_4 created: (max threads: %d)\n", p_gemm32.max_threads);
+    const int dq_types[] = {0, 30, 8, 10, 11, 12, 13, 14, 17, 18, 23};
+    for (int ty : dq_types) {
+        auto p = cx.pipeline(lib_mma, ("dq_f16_" + std::to_string(ty)).c_str());
+        std::printf("pipeline dq_f16_%d created: (max threads: %d)\n", ty, p.max_threads);
+    }
     std::printf("all q36 pipelines created\n");
     return 0;
 }

@@ -179,6 +179,13 @@ static void run_bench() {
                   p_cp = cx.pipeline(lib, "k_gdn_cprep_c"), p_cs = cx.pipeline(lib, "k_gdn_cstate_c"),
                   p_co = cx.pipeline(lib, "k_gdn_cout_c");
     ref::Rng r(7);
+    auto timeit = [&](const std::vector<mtl::Dispatch>& ds) {
+        cx.warm(ds, 0.3);
+        std::vector<double> t;
+        for (int i = 0; i < 5; ++i) t.push_back(cx.run(ds));
+        std::sort(t.begin(), t.end());
+        return t[t.size() / 2];
+    };
     for (int T : {512, 2048}) {
         const int NC = (T + 31) / 32;
         auto F = [&](size_t n) { return cx.alloc(4 * n); };
@@ -237,16 +244,70 @@ static void run_bench() {
         d4.grid[1] = NC;
         d4.tg[0] = 128;
         d4.barrier = true;
-        auto timeit = [&](const std::vector<mtl::Dispatch>& ds) {
-            cx.warm(ds, 0.3);
-            std::vector<double> t;
-            for (int i = 0; i < 5; ++i) t.push_back(cx.run(ds));
-            std::sort(t.begin(), t.end());
-            return t[t.size() / 2];
-        };
         const double seq = timeit({dq}), prep = timeit({d1}), cp = timeit({d2}), cs = timeit({d3}), co = timeit({d4});
         std::printf("T %4d: k_gdn_chunk %8.3f ms | WY: prep %7.3f + cprep %7.3f + cstate %7.3f + cout %7.3f = %8.3f ms\n",
                     T, seq * 1e3, prep * 1e3, cp * 1e3, cs * 1e3, co * 1e3, (prep + cp + cs + co) * 1e3);
+    }
+
+    // the dense projections at the attn_qkv shape (n_out 10240 x n_in 2048): the released chunk GEMV vs
+    // act + dq + gemm on the matrix units, Q4_K and Q2_K (UD-Q2_K_XL's dominant dense types)
+    {
+        const int NIN = 2048, NOUT = 10240;
+        const int lib_mma = cx.compile({"quant.metal", "units.metal", "mma.metal", "q36_dense.metal"});
+        mtl::Pipeline p_act16 = cx.pipeline(lib_mma, "act_f16"), p_g64 = cx.pipeline(lib_mma, "gemm_f16_64_64_4");
+        mtl::Pipeline p_gq4 = cx.pipeline(lib, "k_gemv_c_T_Q4_K"), p_gq2 = cx.pipeline(lib, "k_gemv_c_T_Q2_K");
+        struct DqArgsA {
+            uint32_t n_in, n_out, row_bytes, perm;
+        };
+        struct GemmArgsA {
+            int M, N, K, pad;
+        };
+        const int types[] = {12, 10};      // Q4_K, Q2_K
+        const int rbs[] = {144, 84};       // bytes per 256-wide block
+        for (int T : {512, 2048})
+            for (int ti = 0; ti < 2; ++ti) {
+                auto F = [&](size_t n) { return cx.alloc(4 * n); };
+                mtl::Buffer W = cx.alloc((size_t) rbs[ti] * (NIN / 256) * NOUT);
+                for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym();
+                sanitize(W);
+                mtl::Buffer x = F((size_t) T * NIN), y1 = F((size_t) T * NOUT), y2 = F((size_t) T * NOUT);
+                mtl::Buffer xh = cx.alloc(2 * (size_t) T * NIN), wh = cx.alloc(2 * (size_t) NOUT * NIN);
+                GemvParam p{(unsigned long) rbs[ti] * (NIN / 256), 0, NIN, NOUT, (unsigned long) NIN};
+                mtl::Dispatch dg;
+                dg.p = ti == 0 ? &p_gq4 : &p_gq2;
+                dg.args = {mtl::Arg::B(W), mtl::Arg::B(x), mtl::Arg::B(y1), mtl::Arg::V(p), mtl::Arg::V(T),
+                           mtl::Arg::V(0), mtl::Arg::V(T)};
+                dg.grid[0] = (NOUT + 7) / 8;
+                dg.grid[1] = 1;
+                dg.tg[0] = 256;
+                mtl::Dispatch d0;
+                d0.p = &p_act16;
+                d0.args = {mtl::Arg::B(x), mtl::Arg::B(xh), mtl::Arg::V((uint32_t) (T * NIN))};
+                d0.grid[0] = ((size_t) T * NIN + 255) / 256;
+                d0.tg[0] = 256;
+                d0.barrier = true;
+                DqArgsA da{(uint32_t) NIN, (uint32_t) NOUT, (uint32_t) (rbs[ti] * (NIN / 256)), 0};
+                mtl::Pipeline p_dq_t = cx.pipeline(lib_mma, ("dq_f16_" + std::to_string(types[ti])).c_str());
+                mtl::Dispatch d1;
+                d1.p = &p_dq_t;
+                d1.args = {mtl::Arg::B(W), mtl::Arg::B(wh), mtl::Arg::V(da)};
+                d1.grid[0] = (NIN / 32 + 63) / 64;
+                d1.grid[1] = NOUT;
+                d1.tg[0] = 64;
+                d1.barrier = true;
+                GemmArgsA ga{T, NOUT, NIN, 0};
+                mtl::Dispatch d2;
+                d2.p = &p_g64;
+                d2.args = {mtl::Arg::B(xh), mtl::Arg::B(wh), mtl::Arg::B(y2), mtl::Arg::V(ga)};
+                d2.grid[0] = (NOUT + 63) / 64;
+                d2.grid[1] = (T + 63) / 64;
+                d2.tg[0] = 128;
+                d2.barrier = true;
+                const double seq = timeit({dg}), act = timeit({d0}), dqt = timeit({d1}), gmt = timeit({d2});
+                std::printf("T %4d dense %s: k_gemv_c %8.3f ms | MMA: act %6.3f + dq %6.3f + gemm %7.3f = %8.3f ms\n", T,
+                            ti == 0 ? "q4_K" : "q2_K", seq * 1e3, act * 1e3, dqt * 1e3, gmt * 1e3,
+                            (act + dqt + gmt) * 1e3);
+            }
     }
 }
 
@@ -280,6 +341,8 @@ int main(int argc, char** argv) {
     mtl::Pipeline p_g_q5k = pipe("k_gemv_T_Q5_K"), p_g_q6k = pipe("k_gemv_T_Q6_K");
     mtl::Pipeline p_gc_f32 = pipe("k_gemv_c_T_F32"), p_gc_q8 = pipe("k_gemv_c_T_Q8_0"), p_gc_q4k = pipe("k_gemv_c_T_Q4_K");
     mtl::Pipeline p_gc_q5k = pipe("k_gemv_c_T_Q5_K"), p_gc_q6k = pipe("k_gemv_c_T_Q6_K");
+    mtl::Pipeline p_gc_q2k = pipe("k_gemv_c_T_Q2_K"), p_gc_iq2 = pipe("k_gemv_c_T_IQ2_XS"),
+                  p_gc_iq3 = pipe("k_gemv_c_T_IQ3_XXS");
     mtl::Pipeline p_lpr8 = pipe("k_gemv_lpr8_T_Q4_K");
     mtl::Pipeline p_topk = pipe("k_topk_router"), p_route = pipe("k_route_chunk");
     mtl::Pipeline p_zero = pipe("k_zero"), p_hist = pipe("k_hist"), p_off = pipe("k_exp_off"), p_place = pipe("k_place");
@@ -910,6 +973,78 @@ int main(int argc, char** argv) {
         cx.run_graph({d1, d2, d3, d4});
         check_rel("wy out 2c", go4.ptr, go5.ptr, 4 * TW * ZV, 1e-5);
         check_rel("wy S 2c", S4.ptr, S5.ptr, 4 * HV * S * S, 1e-5);
+    }
+
+    // ---- 9d. the MMA dense (q36_dense.metal, STRATA_Q36M_DENSE_MMA=1's kernels) vs k_gemv_c per type:
+    // act_f16 + dq_f16 + gemm_f16 against the released chunk GEMV on the same weight and rows.  The
+    // fp16 operands re-round (~5e-4 relative per element), so this compares to rounding (rel < 1e-3);
+    // M = 8 rows inside a 64-row tile and NOUT = 96 inside two 64-wide tiles exercise the matmul2d
+    // boundary clamp the donor's tensors carry (the reviewer's ragged-boundary note).  BF16 is not in
+    // the list: its values round-trip exactly through fp16, so the F32 case covers that path.
+    {
+        const int lib_mma = cx.compile({"quant.metal", "units.metal", "mma.metal", "q36_dense.metal"});
+        mtl::Pipeline p_act16 = cx.pipeline(lib_mma, "act_f16"), p_g64 = cx.pipeline(lib_mma, "gemm_f16_64_64_4");
+        const int NOUT = 96;
+        struct DqArgsA {
+            uint32_t n_in, n_out, row_bytes, perm;
+        };
+        struct GemmArgsA {
+            int M, N, K, pad;
+        };
+        const int types[] = {0, 12, 10, 17, 18, 14};   // F32, Q4_K, Q2_K, IQ2_XS, IQ3_XXS, Q6_K
+        const int units[] = {16, 32, 32, 16, 16, 32};  // fmt<F>::UNIT (quant.metal)
+        const int rbs[] = {4 * N, 144, 84, 74, 98, 210};   // one 256-wide block's bytes (N = 256)
+        for (int ti = 0; ti < 6; ++ti) {
+            const int ty = types[ti];
+            mtl::Buffer W = cx.alloc((size_t) rbs[ti] * NOUT);
+            if (ty == 0) {   // fp32 weights filled as floats: the byte-sanitize would denormal them past fp16
+                for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym() * 0.5f;
+            } else {
+                for (size_t i = 0; i < W.bytes / 4; ++i) W.as<float>()[i] = r.sym();
+                sanitize(W);
+            }
+            mtl::Buffer y_ref = cx.alloc(4 * T * NOUT), y_mma = cx.alloc(4 * T * NOUT);
+            mtl::Buffer xh = cx.alloc(2 * T * N), wh = cx.alloc(2 * NOUT * N);
+            mtl::Pipeline& ref_p = ty == 0 ? p_gc_f32 : ty == 12 ? p_gc_q4k : ty == 10 ? p_gc_q2k
+                                                                                 : ty == 17 ? p_gc_iq2
+                                                                                 : ty == 18 ? p_gc_iq3 : p_gc_q6k;
+            GemvParam p{(unsigned long) rbs[ti], 0, N, NOUT, (unsigned long) N};
+            mtl::Dispatch dr;
+            dr.p = &ref_p;
+            dr.args = {mtl::Arg::B(W), mtl::Arg::B(h_all), mtl::Arg::B(y_ref), mtl::Arg::V(p), mtl::Arg::V(T),
+                       mtl::Arg::V(0), mtl::Arg::V(T)};
+            dr.grid[0] = (NOUT + 7) / 8;
+            dr.grid[1] = 1;
+            dr.tg[0] = 256;
+            cx.run_graph({dr});
+            mtl::Dispatch d0;
+            d0.p = &p_act16;
+            d0.args = {mtl::Arg::B(h_all), mtl::Arg::B(xh), mtl::Arg::V((uint32_t) (T * N))};
+            d0.grid[0] = (T * N + 255) / 256;
+            d0.tg[0] = 256;
+            d0.barrier = true;
+            DqArgsA da{(uint32_t) N, (uint32_t) NOUT, (uint32_t) rbs[ti], 0};
+            mtl::Pipeline p_dq_t = cx.pipeline(lib_mma, ("dq_f16_" + std::to_string(ty)).c_str());
+            mtl::Dispatch d1m;
+            d1m.p = &p_dq_t;
+            d1m.args = {mtl::Arg::B(W), mtl::Arg::B(wh), mtl::Arg::V(da)};
+            d1m.grid[0] = (N / units[ti] + 63) / 64;
+            d1m.grid[1] = NOUT;
+            d1m.tg[0] = 64;
+            d1m.barrier = true;
+            GemmArgsA ga{T, NOUT, N, 0};
+            mtl::Dispatch d2m;
+            d2m.p = &p_g64;
+            d2m.args = {mtl::Arg::B(xh), mtl::Arg::B(wh), mtl::Arg::B(y_mma), mtl::Arg::V(ga)};
+            d2m.grid[0] = (NOUT + 63) / 64;
+            d2m.grid[1] = (T + 63) / 64;
+            d2m.tg[0] = 128;
+            d2m.barrier = true;
+            cx.run_graph({d0, d1m, d2m});
+            char name[24];
+            std::snprintf(name, sizeof(name), "mma %d", ty);
+            check_rel(name, y_mma.ptr, y_ref.ptr, 4 * T * NOUT, 1e-3);
+        }
     }
 
     // ---- 10. gated norm over the chunk vs per token ---------------------------------------------------------

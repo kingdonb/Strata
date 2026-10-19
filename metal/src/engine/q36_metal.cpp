@@ -113,6 +113,9 @@ struct State {
     // then cprep's U/W/lgo and cstate's delta - sized for this run's largest chunk, shared across layers
     // (one command buffer per layer orders the reuse).
     mtl::Buffer gqn_c, gkn_c, gvc_c, ggb_c, gU_c, gW_c, glgo_c, gdelta_c;
+    // The MMA dense path's fp16 staging (STRATA_Q36M_DENSE_MMA=1): the chunk's X rows and one weight
+    // arena reused per matrix (the per-layer graph's dispatches are barrier-ordered, so no ping-pong).
+    mtl::Buffer xh_c, wh_c;
     std::vector<mtl::Buffer> conv_state, S, kc, vc;
     // MTP speculative decoding (--mtp N): the draft block's own KV cache (it is a full-attention
     // layer), the verify window's scratch recurrent states (copied from the real S/conv before each
@@ -172,10 +175,36 @@ bool q36_gdn_wy() {
     return v;
 }
 
+// The chunk's dense projections on the matrix units (STRATA_Q36M_DENSE_MMA=1): read once per process,
+// same reasoning as the WY knob - verify windows and commits must not mix paths.
+bool q36_dense_mma() {
+    static const bool v = env_flag("STRATA_Q36M_DENSE_MMA");
+    return v;
+}
+
 // The chunk GDN's WY form's 32-token width (q36.metal's GDN_GC); the state size it assumes (128) is
 // guarded at startup.
 constexpr int WY_GC = 32;
 constexpr int WY_S = 128;
+
+// q36_dense.metal's DqArgs (constant buffer 2 of dq_f16_<type>) and GemmArgs (buffer 3 of gemm_f16),
+// copied from dense_mm.metal / prompt_chain.inc's Pc structs; keep in step.
+struct DqArgs {
+    uint32_t n_in;
+    uint32_t n_out;
+    uint32_t row_bytes;
+    uint32_t perm;
+};
+struct GemmArgs {
+    int M, N, K;
+    int pad;
+};
+
+// units per 128-wide chunk per format (prompt_chain.inc's pc_unit_of, narrowed to the types the q36
+// dense matrices take; the dq_f16 grid divides by it - fmt<F>::UNIT in quant.metal)
+int q36_unit_of(int t) {
+    return t == T_F32 || t == T_BF16 || t == T_IQ2_XS || t == T_IQ3_XXS ? 16 : 32;
+}
 
 // Debug-trace sums (STRATA_Q36M_TRACE=1): rows summed in order, each row's sum accumulated in index order.
 // The decode path prints one line per (token, cut); tools/qwen35/q36_trace_cmp.py sums those over the
@@ -242,6 +271,14 @@ struct Pipelines {
     std::map<int, mtl::Pipeline> p_emb_c, p_gemv_c, p_expc;
     mtl::Pipeline p_route_c, p_tables, p_moe_sum_c, p_conv_c, p_gdn_c, p_gated_norm_c, p_attn_prep_c;
     mtl::Pipeline p_gdn_prep_c, p_gdn_cprep_c, p_gdn_cstate_c, p_gdn_cout_c;   // the WY form (STRATA_Q36M_GDN_WY=1)
+    // --dense-mma (init_dense_mma): the chunk's dense projections dequantized to fp16 once per chunk
+    // and multiplied on the matrix units (q36_dense.metal, the dense_mm.metal donor + three more dq
+    // types).  A third runtime compile, paid only when the flag is set; types without a dq pipeline
+    // fall back to k_gemv_c per matrix.
+    bool dense_mma = false;
+    int lib_mma = -1;
+    std::map<int, mtl::Pipeline> p_dq_c;
+    mtl::Pipeline p_act16, p_gemm_64_64, p_gemm_64_32;
     mtl::Pipeline p_gather_t;
     mtl::Buffer zero_ids;   // nt zeros: the decode lpr8's per-token dummy expert id (chunk dense products)
     std::map<int, mtl::Pipeline> p_gemv;
@@ -323,6 +360,19 @@ struct Pipelines {
         p_attn_gqa_merge_f16 = cx.pipeline(lib_f16, "k_attn_gqa_merge");
         p_attn_sk_part_gqa_f16 = cx.pipeline(lib_f16, "k_attn_sk_part_gqa");
         p_attn_prep_c_f16 = cx.pipeline(lib_f16, "k_attn_prep_chunk");
+    }
+
+    // The MMA dense lib (STRATA_Q36M_DENSE_MMA=1): the donor set quant + units + mma (DW<F>'s home) plus
+    // q36_dense.metal - the act/dq/gemm kernels and the type->dq pipeline map the eligible matrices pick
+    // from.  Called from run() only when the flag is set and the chunk path is on.
+    void init_dense_mma(mtl::Context& cx) {
+        dense_mma = true;
+        lib_mma = cx.compile({"quant.metal", "units.metal", "mma.metal", "q36_dense.metal"});
+        p_act16 = cx.pipeline(lib_mma, "act_f16");
+        p_gemm_64_64 = cx.pipeline(lib_mma, "gemm_f16_64_64_4");
+        p_gemm_64_32 = cx.pipeline(lib_mma, "gemm_f16_64_32_4");
+        for (int ty : {T_F32, T_BF16, T_Q8_0, T_Q2_K, T_Q3_K, T_Q4_K, T_Q5_K, T_Q6_K, T_IQ2_XS, T_IQ3_XXS, T_IQ4_XS})
+            p_dq_c[ty] = cx.pipeline(lib_mma, ("dq_f16_" + std::to_string(ty)).c_str());
     }
 
     // The prompt-chunk kernels (k_*_chunk / k_gemv_c / k_expc): compiled and created only when --prefill
@@ -879,6 +929,62 @@ void push_c_gemv(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const T
     ds.push_back(d);
 }
 
+// The MMA dense projection of a chunk (STRATA_Q36M_DENSE_MMA=1): the weight dequantized to fp16 once
+// per chunk (dq_f16_<type>), the X rows staged to half (act_f16), then the T x n_out x n_in product on
+// the matrix units (MPP matmul2d, 64 x 64 tiles, fp32 out) - the dense_mm.metal donor's dispatch
+// shapes (prompt_chain.inc's gemm/dq/act16 lambdas).  The per-layer graph's dispatches are
+// barrier-ordered, so one weight arena is reused per matrix (no ping-pong to overlap into).
+void push_c_gemm(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, State& s, const Tensor& w,
+                 const mtl::Buffer& x, const mtl::Buffer& y, int nt, int x_stride) {
+    const int n_in = (int) w.shape[0], n_out = (int) w.shape[1];
+    {   // act_f16: the chunk's X rows to half (x rows are contiguous: x_stride == the row width)
+        mtl::Dispatch d;
+        d.p = &pipes.p_act16;
+        d.args = {mtl::Arg::B(x), mtl::Arg::B(s.xh_c), mtl::Arg::V((uint32_t) ((size_t) nt * x_stride))};
+        d.grid[0] = (uint32_t) (((size_t) nt * x_stride + 255) / 256);
+        d.tg[0] = 256;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    {   // dq_f16: the whole matrix to half rows, once per chunk
+        auto it_dq = pipes.p_dq_c.find(w.type);
+        if (it_dq == pipes.p_dq_c.end()) {
+            std::fprintf(stderr, "q36_metal: no dq_f16 pipeline for dense type %d\n", w.type);
+            std::exit(1);
+        }
+        DqArgs a{(uint32_t) n_in, (uint32_t) n_out, (uint32_t) w.row_bytes, 0};
+        mtl::Dispatch d;
+        d.p = &it_dq->second;
+        d.args = {mtl::Arg::B(w.b, w.offset), mtl::Arg::B(s.wh_c), mtl::Arg::V(a)};
+        d.grid[0] = (uint32_t) ((n_in / q36_unit_of(w.type) + 63) / 64);
+        d.grid[1] = (uint32_t) n_out;
+        d.tg[0] = 64;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+    {   // gemm_f16: Y[t][n] = Xh[t] . Wh[n], fp32 out; the tensors carry the extents (ragged M/N/K clamp)
+        const int tn = n_out <= 64 ? 32 : 64;
+        GemmArgs g{nt, n_out, n_in, 0};
+        mtl::Dispatch d;
+        d.p = tn == 32 ? &pipes.p_gemm_64_32 : &pipes.p_gemm_64_64;
+        d.args = {mtl::Arg::B(s.xh_c), mtl::Arg::B(s.wh_c), mtl::Arg::B(y), mtl::Arg::V(g)};
+        d.grid[0] = (uint32_t) ((n_out + tn - 1) / tn);
+        d.grid[1] = (uint32_t) ((nt + 63) / 64);
+        d.tg[0] = 128;
+        d.barrier = true;
+        ds.push_back(d);
+    }
+}
+
+// The chunk's dense projection, knob-dispatched: the MMA path where the flag is set and the type has a
+// dq_f16 pipeline, the released k_gemv_c everywhere else (per matrix, so a mixed-quant model engages
+// where it can and the parity path covers the rest).
+void push_c_dense(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, State& s, const Tensor& w,
+                  const mtl::Buffer& x, const mtl::Buffer& y, int nt, int x_stride) {
+    if (q36_dense_mma() && pipes.p_dq_c.count(w.type) > 0) push_c_gemm(ds, pipes, s, w, x, y, nt, x_stride);
+    else push_c_gemv(ds, pipes, w, x, y, nt, x_stride);
+}
+
 // Routed experts of a chunk: k_expc over the placed per-expert entry runs (every expert's weights read
 // once per chunk); x rows are selected per entry through srt_in; off/cnt are byte offsets into the
 // engine's small scratch (the k_tables results: counts at 0, offsets at 256 ints).
@@ -1021,8 +1127,8 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             // verify window's scratch copies (the real states stay at the accept point)
             const mtl::Buffer& Sst = S_use ? (*S_use)[(size_t) l] : s.S[(size_t) l];
             const mtl::Buffer& Cst = conv_use ? (*conv_use)[(size_t) l] : s.conv_state[(size_t) l];
-            push_c_gemv(ds, pipes, m.W(L(l, "attn_qkv.weight")), s.hc, s.qkv_c, nt, N);
-            push_c_gemv(ds, pipes, m.W(L(l, "attn_gate.weight")), s.hc, s.z_c, nt, N);
+            push_c_dense(ds, pipes, s, m.W(L(l, "attn_qkv.weight")), s.hc, s.qkv_c, nt, N);
+            push_c_dense(ds, pipes, s, m.W(L(l, "attn_gate.weight")), s.hc, s.z_c, nt, N);
             push_c_gemv(ds, pipes, m.W(L(l, "ssm_beta.weight")), s.hc, s.beta_c, nt, N);
             push_c_gemv(ds, pipes, m.W(L(l, "ssm_alpha.weight")), s.hc, s.alpha_c, nt, N);
             if (trc && l == 0) {   // debug cut G1: the four projections
@@ -1139,7 +1245,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                 d.barrier = true;
                 ds.push_back(d);
             }
-            push_c_gemv(ds, pipes, m.W(L(l, "ssm_out.weight")), s.gdn_out_c, s.yc, nt, ZV);
+            push_c_dense(ds, pipes, s, m.W(L(l, "ssm_out.weight")), s.gdn_out_c, s.yc, nt, ZV);
             if (trc && l == 0) {   // debug cut G4: the gated norm's z and the mixer output y
                 cx.run_graph(ds);
                 ds.clear();
@@ -1148,9 +1254,9 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                              trace_rows((const float*) s.yc.ptr, (size_t) nt, (size_t) N));
             }
         } else {
-            push_c_gemv(ds, pipes, m.W(L(l, "attn_q.weight")), s.hc, s.qg_c, nt, N);
-            push_c_gemv(ds, pipes, m.W(L(l, "attn_k.weight")), s.hc, s.k_c, nt, N);
-            push_c_gemv(ds, pipes, m.W(L(l, "attn_v.weight")), s.hc, s.v_c, nt, N);
+            push_c_dense(ds, pipes, s, m.W(L(l, "attn_q.weight")), s.hc, s.qg_c, nt, N);
+            push_c_dense(ds, pipes, s, m.W(L(l, "attn_k.weight")), s.hc, s.k_c, nt, N);
+            push_c_dense(ds, pipes, s, m.W(L(l, "attn_v.weight")), s.hc, s.v_c, nt, N);
             {
                 mtl::Dispatch d;
                 d.p = pipes.kv_f16 ? &pipes.p_attn_prep_c_f16 : &pipes.p_attn_prep_c;
@@ -1170,7 +1276,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             // one-pass order by ulps and diverged the ladder from the first full-attention layer)
             push_qsa_attention(ds, pipes, s, s.q_c, s.gate_c, s.att_c, s.kc[l], s.vc[l], H, HKV, D, sk_force, nt,
                                pos0);
-            push_c_gemv(ds, pipes, m.W(L(l, "attn_output.weight")), s.att_c, s.yc, nt, H * D);
+            push_c_dense(ds, pipes, s, m.W(L(l, "attn_output.weight")), s.att_c, s.yc, nt, H * D);
         }
 
         // Residual add + post norm
@@ -1286,8 +1392,8 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
                          gu_lpr8 ? trace_rows((const float*) s.eh_c.ptr, n_ent, (size_t) FF)
                                  : trace_rows_pos((const float*) s.eh_c.ptr, s.pos_c.as<int>(), n_ent, (size_t) FF));
         }
-        push_c_gemv(ds, pipes, m.W(L(l, "ffn_gate_shexp.weight")), s.hc, s.sg_c, nt, N);
-        push_c_gemv(ds, pipes, m.W(L(l, "ffn_up_shexp.weight")), s.hc, s.su_c, nt, N);
+        push_c_dense(ds, pipes, s, m.W(L(l, "ffn_gate_shexp.weight")), s.hc, s.sg_c, nt, N);
+        push_c_dense(ds, pipes, s, m.W(L(l, "ffn_up_shexp.weight")), s.hc, s.su_c, nt, N);
         {
             const int n_val = nt * FS;
             mtl::Dispatch d;
@@ -1304,7 +1410,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
             push_c_expc(ds, pipes, wd, s.eh_c, gu_lpr8 ? s.srt_in_d : s.ident_c, s.scr, 256 * sizeof(int), 0,
                         s.ey_c, FF);
         }
-        push_c_gemv(ds, pipes, m.W(L(l, "ffn_down_shexp.weight")), s.sh_c, s.sy_c, nt, FS);
+        push_c_dense(ds, pipes, s, m.W(L(l, "ffn_down_shexp.weight")), s.sh_c, s.sy_c, nt, FS);
         push_c_gemv(ds, pipes, m.W(L(l, "ffn_gate_inp_shexp.weight")), s.hc, s.sgate_c, nt, N);
         if (trc && l == 0) {   // debug cut G9: the down projections + the shared expert + its gate
                                // ((t,k)-ordered ey when the down went per-entry, placed-ordered otherwise)
@@ -2009,6 +2115,36 @@ int run(int argc, char** argv) {
                          (double) (CT * (2 * (size_t) g.ssm_k_heads + g.ssm_v_heads) * WY_S + CT * g.ssm_v_heads * 2
                                    + (size_t) g.ssm_v_heads * NC * WY_GC * (3 * WY_S + 1))
                              * 4 / (1024.0 * 1024.0));
+        }
+        // The MMA dense path (STRATA_Q36M_DENSE_MMA=1): the fp16 staging (the chunk's X rows) and one
+        // fp16 weight arena reused per matrix, sized from the model's actual dense matrices whose type
+        // has a dq_f16 pipeline; allocated before the working-set refusal so cx.allocated() counts it.
+        if (q36_dense_mma()) {
+            pipes.init_dense_mma(cx);
+            static const char* const dense_names[] = {"attn_qkv.weight", "attn_gate.weight", "ssm_out.weight",
+                                                      "attn_q.weight",   "attn_k.weight",    "attn_v.weight",
+                                                      "attn_output.weight", "ffn_gate_shexp.weight",
+                                                      "ffn_up_shexp.weight", "ffn_down_shexp.weight"};
+            size_t wh_half = 0, xh_half = 0;
+            for (int64_t l = 0; l < g.n_layers; ++l)
+                for (const char* nm : dense_names) {
+                    if (m.t.count(L(l, nm)) == 0) continue;   // the layer kind that has no such matrix
+                    const Tensor& w = m.t.at(L(l, nm));
+                    if (pipes.p_dq_c.count(w.type) == 0) continue;   // falls back to k_gemv_c, needs no arena
+                    const size_t nin = (size_t) w.shape[0], nout = (size_t) w.shape[1];
+                    wh_half = std::max(wh_half, nin * nout);
+                    xh_half = std::max(xh_half, nin);
+                }
+            if (wh_half == 0) {
+                std::fprintf(stderr, "q36_metal: STRATA_Q36M_DENSE_MMA=1 but no dense matrix has a dq_f16 pipeline\n");
+                std::exit(1);
+            }
+            s.xh_c = cx.alloc(xh_half * CT * sizeof(uint16_t));
+            s.wh_c = cx.alloc(wh_half * sizeof(uint16_t));
+            std::fprintf(stderr,
+                         "strata metal q36: the chunk's dense projections run on the matrix units "
+                         "(STRATA_Q36M_DENSE_MMA=1), fp16 staging %.2f MB\n",
+                         (double) (xh_half * CT + wh_half) * 2 / (1024.0 * 1024.0));
         }
         if ((int) g.n_ff == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_down_exps.weight")).type) > 0
             && !((int) g.n_embd == 2048 && pipes.p_gemv_lpr8.count(m.W(L(0, "ffn_gate_exps.weight")).type) > 0)) {
