@@ -395,7 +395,7 @@ kernel void k_attn(device const float* q [[buffer(0)]],
     device const float* qh = q + (ulong)h * D;
 
     for (int p = tid; p < n_pos; p += 128) {
-        device const float* kp = kc + ((ulong)kvh * ctx + p) * D;
+        device const KV_T* kp = kc + ((ulong)kvh * ctx + p) * D;
         float s = 0.0f;
         for (int i = 0; i < D; ++i) s += qh[i] * float(kp[i]);
         sc[p] = s * scale;
