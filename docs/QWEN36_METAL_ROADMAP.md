@@ -89,7 +89,17 @@ Gates: the memory and profile numbers measured; sampled parity with a fixed seed
 
 ## T6 — GQA-folded attention: one K/V read per KV-head group (new idea, from T3's first measurements)
 
-State: proposed (2026-10-18, from the T3 data). The measurement it comes from (M2, UD-Q2_K_XL, build
+State: built on the delivery branch `feature/000681-gqa-folded-attention-one` (2026-10-19): the folded
+kernels (`k_attn_gqa_part`/`k_attn_gqa_merge` for the `k_attn` range, `k_attn_sk_part_gqa` above it with
+`k_attn_sk_merge` unchanged), the `STRATA_Q36M_ATTN_GQA=1` parity knob, the H x ctx score scratch and the
+startup guards. M2-run results: compile test green; forced-fold ladder 10/10; SK+GQA and MTP+GQA cross-checks
+10/10; `q36_chunk_parity` 38/38. The first merge-kernel revision collapsed deep-decode occupancy (2 threadgroups,
+per-head V re-walks past a too-small L1: 2.7-3.2 tok/s vs the 8 tok/s baseline at pos ~4,100) - fixed by hoisting
+the head loop into the grid (merge grid (HKV, HG), the score pass position-tiled; bit-identity re-proven on the
+host sim); the fixed pair's deep-decode and read deltas are the pending M2 measurement (docs/QWEN36_METAL.md §8's
+commands), and the V-shared merge variant (one thread owning a dim's HG chains, V traffic 1x, occupancy capped
+at HKV x D threads by the parity contract) is the follow-up experiment. The measurement it comes
+from (M2, UD-Q2_K_XL, build
 `36b394c8` + PR #5): a 4,098-token prompt at `--ctx 16384` reads in ≈243 s chunked and ≈245 s token-by-token,
 per-chunk cost growing with position (22 → 40 s per 512), and the decode at pos ≈4,100 runs 8 tok/s vs 17 at
 the ctx-4096 ladder's shallow positions. At depth, both paths are bound by the attention's KV reads — and

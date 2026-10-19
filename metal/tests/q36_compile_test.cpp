@@ -19,6 +19,12 @@ int main() {
     std::printf("pipeline k_attn_sk_part created: %s (max threads: %d)\n", p_attn_sk_part.name.c_str(), p_attn_sk_part.max_threads);
     auto p_attn_sk_merge = cx.pipeline(lib, "k_attn_sk_merge");
     std::printf("pipeline k_attn_sk_merge created: %s (max threads: %d)\n", p_attn_sk_merge.name.c_str(), p_attn_sk_merge.max_threads);
+    auto p_attn_gqa_part = cx.pipeline(lib, "k_attn_gqa_part");
+    std::printf("pipeline k_attn_gqa_part created: %s (max threads: %d)\n", p_attn_gqa_part.name.c_str(), p_attn_gqa_part.max_threads);
+    auto p_attn_gqa_merge = cx.pipeline(lib, "k_attn_gqa_merge");
+    std::printf("pipeline k_attn_gqa_merge created: %s (max threads: %d)\n", p_attn_gqa_merge.name.c_str(), p_attn_gqa_merge.max_threads);
+    auto p_attn_sk_part_gqa = cx.pipeline(lib, "k_attn_sk_part_gqa");
+    std::printf("pipeline k_attn_sk_part_gqa created: %s (max threads: %d)\n", p_attn_sk_part_gqa.name.c_str(), p_attn_sk_part_gqa.max_threads);
     auto p_gemv_q8 = cx.pipeline(lib, "k_gemv_T_Q8_0");
     std::printf("pipeline k_gemv_T_Q8_0 created: %s (max threads: %d)\n", p_gemv_q8.name.c_str(), p_gemv_q8.max_threads);
     auto p_gemv_q4k = cx.pipeline(lib, "k_gemv_T_Q4_K");

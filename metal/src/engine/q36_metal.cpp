@@ -103,6 +103,7 @@ struct State {
     mtl::Buffer x, h, y, qkv, z, alpha, beta, conv_out, gdn_out, qg, k, v, q, gate, att, router, eg, eu, eh, ey, sg, su, sh, sy, sgate, wts, logits;
     mtl::Buffer ids;
     mtl::Buffer sk_pacc, sk_pm, sk_pl;   // split-K attention partials (k_attn_sk_part / k_attn_sk_merge)
+    mtl::Buffer gqa_scr;                 // GQA-folded scores, [head][cell] (k_attn_gqa_part / k_attn_gqa_merge)
     // prompt-chunk buffers (allocated when --prefill is on; CT = the chunk size)
     mtl::Buffer toks_c, xc, hc, yc, qkv_c, z_c, alpha_c, beta_c, conv_out_c, gdn_out_c, qg_c, k_c, v_c, q_c, gate_c, att_c;
     mtl::Buffer router_c, ids_c, wts_c, scr, srt_in_gu, srt_in_d, pos_c;
@@ -202,6 +203,7 @@ static double trace_rows_pos(const float* p, const int* pos, int n_ent, size_t w
 // k_attn's scores are threadgroup memory, capped at 32 KB: 8,192 cells.  Above that (or forced by
 // STRATA_Q36M_ATTN_SK, the parity knob) the split-K kernels take over; SK_HD must be the head_dim.
 constexpr int SK_CELLS = 256;
+constexpr int SK_HD = 256;         // the split-K (and folded) kernels' head_dim; the host refuses anything else
 constexpr int SK_ROWS_MAX = 256;   // query rows per split-K dispatch (decode: n_head; prompt chunks row-block)
 constexpr int SK_TG_CAP = 8192;    // the longest context the plain k_attn path serves
 
@@ -210,6 +212,7 @@ struct Pipelines {
     mtl::Buffer dummy_ids;
     mtl::Pipeline p_rms, p_conv, p_gdn_gb, p_gdn, p_gated_norm, p_attn_prep, p_attn, p_swiglu, p_add, p_moe_sum, p_topk_router;
     mtl::Pipeline p_attn_sk_part, p_attn_sk_merge;
+    mtl::Pipeline p_attn_gqa_part, p_attn_gqa_merge, p_attn_sk_part_gqa;   // the GQA-folded kernels
     // prompt-chunk pipelines (init_prompt, when --prefill is on)
     std::map<int, mtl::Pipeline> p_emb_c, p_gemv_c, p_expc;
     mtl::Pipeline p_route_c, p_tables, p_moe_sum_c, p_conv_c, p_gdn_c, p_gated_norm_c, p_attn_prep_c;
@@ -233,6 +236,9 @@ struct Pipelines {
         p_attn = cx.pipeline(lib, "k_attn");
         p_attn_sk_part = cx.pipeline(lib, "k_attn_sk_part");
         p_attn_sk_merge = cx.pipeline(lib, "k_attn_sk_merge");
+        p_attn_gqa_part = cx.pipeline(lib, "k_attn_gqa_part");
+        p_attn_gqa_merge = cx.pipeline(lib, "k_attn_gqa_merge");
+        p_attn_sk_part_gqa = cx.pipeline(lib, "k_attn_sk_part_gqa");
         p_swiglu = cx.pipeline(lib, "k_swiglu");
         p_add = cx.pipeline(lib, "k_add");
         p_moe_sum = cx.pipeline(lib, "k_moe_sum");
@@ -376,6 +382,13 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
                                const mtl::Buffer& kc, const mtl::Buffer& vc,
                                int H, int HKV, int D, bool sk_force, int rows, int64_t pos0) {
     const float scale = 1.0f / std::sqrt((float) D);
+    // The GQA fold (STRATA_Q36M_ATTN_GQA=1) replaces whichever kernels this row's length selects: the
+    // k_attn pair below the 8,192-cell cap, the split-K part above it (the merge is common).  Read at
+    // the point of use like STRATA_Q36M_TRACE, so every push_qsa_attention caller - decode, chunk
+    // rows, the MTP draft rows - gets the fold with no threading to miss; run() reads the same env
+    // once for the startup guard and the score scratch.
+    const bool gqa = env_flag("STRATA_Q36M_ATTN_GQA");
+    const int HG = H / HKV;
     for (int i = 0; i < rows; ++i) {
         const int n_pos = (int) pos0 + i + 1;
         if (sk_force || n_pos > SK_TG_CAP) {
@@ -385,14 +398,15 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
             }
             const int n_chunk = (n_pos + SK_CELLS - 1) / SK_CELLS;
             mtl::Dispatch d;
-            d.p = &pipes.p_attn_sk_part;
+            d.p = gqa ? &pipes.p_attn_sk_part_gqa : &pipes.p_attn_sk_part;
             d.args = {mtl::Arg::B(q), mtl::Arg::B(kc), mtl::Arg::B(vc),
                       mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(s.ctx), mtl::Arg::V(scale),
                       mtl::Arg::V(n_chunk), mtl::Arg::V((int) pos0), mtl::Arg::V(i * H),
                       mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl)};
             d.grid[0] = (uint32_t) n_chunk;
-            d.grid[1] = (uint32_t) H;
+            d.grid[1] = (uint32_t)(gqa ? HKV : H);   // folded: one threadgroup per KV-head group
             d.tg[0] = SK_CELLS;
+            if (gqa) d.tg_mem = (uint32_t)((size_t) HG * (SK_HD + 8 + SK_CELLS) * sizeof(float));
             d.barrier = true;
             ds.push_back(d);
             mtl::Dispatch dm;
@@ -402,6 +416,32 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
                        mtl::Arg::V(i * H)};
             dm.grid[0] = (uint32_t) H;
             dm.tg[0] = SK_CELLS;
+            dm.barrier = true;
+            ds.push_back(dm);
+        } else if (gqa) {
+            // the folded k_attn pair: scores of the whole KV-head group to scratch (one K read),
+            // then the per-head one-pass softmax + P.V against one V read - k_attn's exact
+            // arithmetic per head, see the kernels' contract comment
+            mtl::Dispatch d;
+            d.p = &pipes.p_attn_gqa_part;
+            d.args = {mtl::Arg::B(q, 4 * (size_t) i * H * D), mtl::Arg::B(kc), mtl::Arg::B(s.gqa_scr),
+                      mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(D), mtl::Arg::V(n_pos), mtl::Arg::V(s.ctx),
+                      mtl::Arg::V(scale)};
+            d.grid[0] = (uint32_t) HKV;
+            d.grid[1] = (uint32_t)((n_pos + 127) / 128);   // one 128-cell tile per threadgroup
+            d.tg[0] = 128;
+            d.tg_mem = (uint32_t)((size_t) HG * D * sizeof(float));
+            d.barrier = true;
+            ds.push_back(d);
+            mtl::Dispatch dm;
+            dm.p = &pipes.p_attn_gqa_merge;
+            dm.args = {mtl::Arg::B(vc), mtl::Arg::B(gate, 4 * (size_t) i * H * D), mtl::Arg::B(s.gqa_scr),
+                       mtl::Arg::B(att, 4 * (size_t) i * H * D), mtl::Arg::V(H), mtl::Arg::V(HKV),
+                       mtl::Arg::V(D), mtl::Arg::V(n_pos), mtl::Arg::V(s.ctx)};
+            dm.grid[0] = (uint32_t) HKV;
+            dm.grid[1] = (uint32_t) HG;   // one threadgroup per (KV head, query head)
+            dm.tg[0] = 128;
+            dm.tg_mem = (uint32_t)(n_pos * sizeof(float));
             dm.barrier = true;
             ds.push_back(dm);
         } else {
@@ -1627,6 +1667,24 @@ int run(int argc, char** argv) {
     if (const strata::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
     if (const strata::MetaValue* v = gm.meta().get(p + "rope.dimension_count")) m.n_rot = (int) v->u;
     const bool sk_force = env_flag("STRATA_Q36M_ATTN_SK");
+    const bool gqa_fold = env_flag("STRATA_Q36M_ATTN_GQA");
+    if (gqa_fold) {
+        // the fold is a no-op at one query head per KV head, and its threadgroup staging is bounded:
+        // the folded split-K part takes HG * (SK_HD + 8 + SK_CELLS) floats, the folded k_attn part
+        // HG * D - both must fit the 32 KB threadgroup ceiling.  Refuse with the numbers; no fallback.
+        const long long hg = (long long)(m.g.n_head / m.g.n_head_kv);
+        const size_t tg_sk = (size_t) hg * (SK_HD + 8 + SK_CELLS) * sizeof(float);
+        const size_t tg_a = (size_t) hg * (size_t) m.g.head_dim * sizeof(float);
+        if (hg < 2 || tg_sk > 32768 || tg_a > 32768) {
+            std::fprintf(stderr, "strata metal q36: STRATA_Q36M_ATTN_GQA cannot fold H/HKV = %lld "
+                                 "(H %lld, HKV %lld, head_dim %lld): %s; threadgroup staging %zu B (split-K) / "
+                                 "%zu B (k_attn) vs the 32768 B ceiling\n",
+                         hg, (long long) m.g.n_head, (long long) m.g.n_head_kv,
+                         (long long) m.g.head_dim, hg < 2 ? "folding is a no-op" : "staging past the ceiling",
+                         tg_sk, tg_a);
+            return 1;
+        }
+    }
 
     // Wrap GGUF tensors no-copy directly into Metal buffers
     uint64_t total_weight_bytes = 0;
@@ -1732,6 +1790,12 @@ int run(int argc, char** argv) {
         s.sk_pm = cx.alloc((size_t) SK_ROWS_MAX * n_chunk_max * sizeof(float));
         s.sk_pl = cx.alloc((size_t) SK_ROWS_MAX * n_chunk_max * sizeof(float));
     }
+
+    // GQA-folded score scratch (STRATA_Q36M_ATTN_GQA=1): one row's scores for every head,
+    // [head][cell] with the dispatch's n_pos as the row stride, reused per row (dispatch barriers
+    // separate rows).
+    if (gqa_fold)
+        s.gqa_scr = cx.alloc((size_t) g.n_head * (size_t) ctx * sizeof(float));
 
     // Prompt-chunk buffers (--prefill N), and the same scratch for the MTP verify window (--mtp N:
     // the window is a chunk of mtp_d + 1 rows through the chunk kernels).  Sized for this run's
