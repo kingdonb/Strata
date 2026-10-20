@@ -2506,7 +2506,7 @@ int run(int argc, char** argv) {
                 const size_t last = ids.size() - 1;   // the last prompt token runs as a decode window
                 while (pi < last) {
                     const int nt = (int) std::min<size_t>((size_t) prefill_chunk, last - pi);
-                    forward_prompt_chunk(cx, pipes, m, s, ids.data() + pi, nt, s.pos);
+                    forward_prompt_chunk(cx, pipes, m, s, ids.data() + pi, nt, s.pos, nullptr, nullptr, sk_force);
                     s.pos += nt;
                     pi += nt;
                     pp_line(pi - reuse);   // one line per chunk: the percent steps, the read beats the watchdog
@@ -2653,7 +2653,7 @@ int run(int argc, char** argv) {
             const size_t last = prompt.size() - 1;   // the last prompt token runs as a decode window
             while (pi < last) {
                 const int nt = (int) std::min<size_t>((size_t) prefill_chunk, last - pi);
-                forward_prompt_chunk(cx, pipes, m, s, prompt.data() + pi, nt, s.pos);
+                forward_prompt_chunk(cx, pipes, m, s, prompt.data() + pi, nt, s.pos, nullptr, nullptr, sk_force);
                 s.pos += nt;
                 pi += nt;
             }

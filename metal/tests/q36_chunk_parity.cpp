@@ -1298,7 +1298,7 @@ int main(int argc, char** argv) {
                     dp.p = &p_part;
                     dp.args = {mtl::Arg::B(q_a, 4 * (size_t) t * H * 256), mtl::Arg::B(kc), mtl::Arg::B(vc),
                                mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(CTX), mtl::Arg::V(scale),
-                               mtl::Arg::V(n_chunk), mtl::Arg::V(p0base), mtl::Arg::V(0),
+                               mtl::Arg::V(n_chunk), mtl::Arg::V(p0base + t), mtl::Arg::V(0),
                                mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s)};
                     dp.grid[0] = n_chunk;
                     dp.grid[1] = part_gy;
@@ -1311,7 +1311,7 @@ int main(int argc, char** argv) {
                     dm.args = {mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s),
                                mtl::Arg::B(gate_all, 4 * (size_t) t * H * 256),
                                mtl::Arg::B(att1, 4 * (size_t) t * H * 256), mtl::Arg::V(H),
-                               mtl::Arg::V(n_chunk), mtl::Arg::V(p0base), mtl::Arg::V(0)};
+                               mtl::Arg::V(n_chunk), mtl::Arg::V(p0base + t), mtl::Arg::V(0)};
                     dm.grid[0] = H;
                     dm.tg[0] = 256;
                     dm.barrier = true;
