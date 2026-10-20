@@ -90,12 +90,12 @@ def run_config(name, env=None, extra_args=None, fresh_check=False):
         "R4_reroll_free": rows[3]["reused"] == len(P) and rows[3]["read"] == 0 and r4 == r1,
         "R5_fallback_reset": rows[0]["reused"] == 0 and rows[4]["reused"] == 0,
     }
+    eng.close()
     if fresh_check:
-        eng2 = Eng(a.exe, shlex.split(a.args) + (extra_args or []), env=env, log=log)
+        eng2 = Eng(a.exe, shlex.split(a.args) + (extra_args or []), env=env, log=(log + ".fresh") if log else None)
         ftoks, fdone, _, _ = eng2.solo(P + r1[:m] + tail, a.n)
         eng2.close()
         checks["R3_bit_identical_to_fresh"] = ftoks == r3
-    eng.close()
     return {"name": name, "rows": rows, "checks": checks}
 
 
