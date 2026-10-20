@@ -66,6 +66,16 @@ struct Dispatch {
     bool barrier = true;              // run_graph: a buffer memory barrier before this dispatch
 };
 
+// The dispatch tally (T13's instrumentation): Context::run_graph counts each encoded dispatch once,
+// classified by the pipeline's name into attn (every attention kernel), gemv (the GEMV/expert
+// family: k_gemv*, lpr8, expc, moe sums, swiglu, gather, tables, route - the dense projections'
+// GEMVs land here too), other (norms, conv, GDN, embed, sampling).  Counting runs only when
+// STRATA_Q36M_DISPATCH_LOG is set (read once - the STRATA_Q36M_SYNC_EVERY pattern); off, nothing is
+// counted and nothing is printed.
+struct DispatchTally {
+    uint64_t attn = 0, gemv = 0, other = 0, total = 0;
+};
+
 // A pipeline whose maxTotalThreadsPerThreadgroup is below the threadgroup size a dispatch asks for is NOT executed by
 // Metal and raises no error (0.1.44, #2323: gdn_step needs 512 threads, an M2 Max gave 448 for the GDN_NTOK >= 2
 // specializations - the layers silently kept their old outputs and every answer was garbage).  So every dispatch is
@@ -133,6 +143,11 @@ public:
     double run_icb(const std::vector<Dispatch>& ds, int reps, bool barrier_between);
     // Runs `ds` repeatedly for about `seconds` of wall time: lifts the GPU out of its idle clocks before a timing.
     void warm(const std::vector<Dispatch>& ds, double seconds = 0.3);
+
+    // The dispatch tally (STRATA_Q36M_DISPATCH_LOG): run_graph counts what it encodes; the q36 chunk
+    // path resets around a chunk and prints one stderr line per chunk from the read.
+    void dispatch_tally_reset();
+    DispatchTally dispatch_tally() const;
 
     std::string ggml_common_path;                // where ggml-common.h is read from
     std::string kernel_dir;                      // where relative kernel paths resolve

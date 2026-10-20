@@ -182,6 +182,28 @@ bool q36_dense_mma() {
     return v;
 }
 
+// The chunk path's split-K attention row blocking (STRATA_Q36M_ATTN_ROWS=B): B token rows per
+// part/merge dispatch pair instead of one - the same row-blocked SK pair, dispatches / B per chunk.
+// Read once per process (the WY/MMA pattern) so the MTP verify window never mixes row-block sizes.
+// Unset or <= 0 keeps the released per-row dispatches.  The B * H <= SK_ROWS_MAX guard sits in run()
+// beside the fold's guards (it needs the model's H).
+int q36_attn_rows() {
+    static const int v = [] {
+        const char* e = std::getenv("STRATA_Q36M_ATTN_ROWS");
+        const int b = e && *e ? std::atoi(e) : 1;
+        return b < 1 ? 1 : b;
+    }();
+    return v;
+}
+
+// The dispatch tally's stderr line (T13, folded into T9-r1): one line per chunk with the per-bucket
+// counts the Context tallied at the encode choke point.  The env is read once here too (the Context
+// reads the same process env once at startup); unset, nothing is counted and no line prints.
+bool q36_dispatch_log() {
+    static const bool v = env_flag("STRATA_Q36M_DISPATCH_LOG");
+    return v;
+}
+
 // The chunk GDN's WY form's 32-token width (q36.metal's GDN_GC); the state size it assumes (128) is
 // guarded at startup.
 constexpr int WY_GC = 32;
@@ -471,12 +493,14 @@ void push_gemv(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const Ten
     ds.push_back(d);
 }
 
-// The QSA attention rows, one dispatch sequence per query row - exactly what the token-by-token path
-// runs at that position: k_attn (the one-pass threadgroup softmax) while the row's n_pos fits the
-// 8,192-cell threadgroup score cap, the split-K pair above it (the round-2-verified decode form).
-// The chunk's earlier row-blocked split-K computed the online-softmax order, which differs from
-// k_attn's by ulps and diverged the ladder from layer 3 (the first full-attention layer) with
-// reproducible greedy flips.  Shared by both paths so the parity is structural, not mirrored.
+// The QSA attention rows - the dispatch sequence the token-by-token path runs at that position:
+// k_attn (the one-pass threadgroup softmax) while the row's n_pos fits the 8,192-cell threadgroup
+// score cap, the split-K pair above it (the round-2-verified decode form).  Per query row, except
+// that the split-K rows block STRATA_Q36M_ATTN_ROWS token rows per part/merge pair (the same
+// kernels; the chunk path's dispatch-count lever).  The chunk's earlier row-blocked split-K
+// computed the online-softmax order, which differs from k_attn's by ulps and diverged the ladder
+// from layer 3 (the first full-attention layer) with reproducible greedy flips.  Shared by both
+// paths so the parity is structural, not mirrored.
 static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& pipes, const State& s,
                                const mtl::Buffer& q, const mtl::Buffer& gate, const mtl::Buffer& att,
                                const mtl::Buffer& kc, const mtl::Buffer& vc,
@@ -490,14 +514,23 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
     const bool gqa = env_flag("STRATA_Q36M_ATTN_GQA");
     const bool kf = pipes.kv_f16;   // --kv-f16: the reader pipelines come from the STRATA_KV_F16 lib
     const int HG = H / HKV;
-    for (int i = 0; i < rows; ++i) {
+    const int attn_rows = q36_attn_rows();   // read once per process: B token rows per SK dispatch
+    int i = 0;
+    while (i < rows) {
         const int n_pos = (int) pos0 + i + 1;
         if (sk_force || n_pos > SK_TG_CAP) {
             if (D != 256) {
                 std::fprintf(stderr, "q36_metal: split-K attention needs head_dim 256, model has %d\n", D);
                 std::exit(1);
             }
-            const int n_chunk = (n_pos + SK_CELLS - 1) / SK_CELLS;
+            // The row block (STRATA_Q36M_ATTN_ROWS, the knob's B): B consecutive SK-eligible token rows
+            // per part/merge pair - the released per-row dispatches at B = 1.  Rows under the 8,192 cap
+            // stay on k_attn, so a block ends at the cap boundary too; the block's n_chunk is its LAST
+            // row's count (the part kernel skips chunks past each row's own npos and the merge folds
+            // only c < nc, so the unchanged kernels see exactly the per-row forms' partials).
+            int nb = 1;
+            while (nb < attn_rows && i + nb < rows && (sk_force || pos0 + i + nb + 1 > SK_TG_CAP)) ++nb;
+            const int n_chunk = ((int) pos0 + i + nb + SK_CELLS - 1) / SK_CELLS;
             mtl::Dispatch d;
             d.p = gqa ? (kf ? &pipes.p_attn_sk_part_gqa_f16 : &pipes.p_attn_sk_part_gqa)
                       : (kf ? &pipes.p_attn_sk_part_f16 : &pipes.p_attn_sk_part);
@@ -506,9 +539,14 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
                       mtl::Arg::V(n_chunk), mtl::Arg::V((int) pos0), mtl::Arg::V(i * H),
                       mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl)};
             d.grid[0] = (uint32_t) n_chunk;
-            d.grid[1] = (uint32_t)(gqa ? HKV : H);   // folded: one threadgroup per KV-head group
+            if (gqa) {   // folded: one threadgroup per (KV-head group, token row); g.z is the token row
+                d.grid[1] = (uint32_t) HKV;
+                d.grid[2] = (uint32_t) nb;
+                d.tg_mem = (uint32_t)((size_t) HG * (SK_HD + 8 + SK_CELLS) * sizeof(float));
+            } else {     // unfolded: one threadgroup per (chunk, query row); row = row0 + g.y
+                d.grid[1] = (uint32_t)(nb * H);
+            }
             d.tg[0] = SK_CELLS;
-            if (gqa) d.tg_mem = (uint32_t)((size_t) HG * (SK_HD + 8 + SK_CELLS) * sizeof(float));
             d.barrier = true;
             ds.push_back(d);
             mtl::Dispatch dm;
@@ -516,10 +554,11 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
             dm.args = {mtl::Arg::B(s.sk_pacc), mtl::Arg::B(s.sk_pm), mtl::Arg::B(s.sk_pl), mtl::Arg::B(gate),
                        mtl::Arg::B(att), mtl::Arg::V(H), mtl::Arg::V(n_chunk), mtl::Arg::V((int) pos0),
                        mtl::Arg::V(i * H)};
-            dm.grid[0] = (uint32_t) H;
+            dm.grid[0] = (uint32_t)(nb * H);
             dm.tg[0] = SK_CELLS;
             dm.barrier = true;
             ds.push_back(dm);
+            i += nb;
         } else if (gqa) {
             // the folded k_attn pair: scores of the whole KV-head group to scratch (one K read),
             // then the per-head one-pass softmax + P.V against one V read - k_attn's exact
@@ -546,6 +585,7 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
             dm.tg_mem = (uint32_t)(n_pos * sizeof(float));
             dm.barrier = true;
             ds.push_back(dm);
+            ++i;
         } else {
             mtl::Dispatch d;
             d.p = kf ? &pipes.p_attn_f16 : &pipes.p_attn;
@@ -558,6 +598,7 @@ static void push_qsa_attention(std::vector<mtl::Dispatch>& ds, const Pipelines& 
             d.tg_mem = (uint32_t)(n_pos * sizeof(float));
             d.barrier = true;
             ds.push_back(d);
+            ++i;
         }
     }
 }
@@ -1067,6 +1108,7 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
         std::fprintf(stderr, "q36_metal: chunk prefill needs head_dim 256, model has %d\n", D);
         std::exit(1);
     }
+    if (q36_dispatch_log()) cx.dispatch_tally_reset();   // count this chunk's dispatches only
     if (g.ssm_d_conv - 1 > 16) {   // k_conv_chunk's shift register
         std::fprintf(stderr, "q36_metal: chunk prefill needs ssm_d_conv <= 17, model has %d\n", (int) g.ssm_d_conv);
         std::exit(1);
@@ -1480,8 +1522,15 @@ double forward_prompt_chunk(mtl::Context& cx, const Pipelines& pipes, const Mode
         }
     }
 
+    const double tail = trc ? 0.0 : cx.run_graph(ds);
+    if (q36_dispatch_log()) {   // one line per chunk: the encode choke point's counts, per bucket
+        const mtl::DispatchTally t = cx.dispatch_tally();
+        std::fprintf(stderr, "q36 dispatches: pos0=%lld nt=%d attn=%llu gemv=%llu other=%llu total=%llu\n",
+                     (long long) pos0, nt, (unsigned long long) t.attn, (unsigned long long) t.gemv,
+                     (unsigned long long) t.other, (unsigned long long) t.total);
+    }
     if (trc) return 0.0;   // the per-layer sub-graphs already ran
-    return gpu_ms + cx.run_graph(ds);
+    return gpu_ms + tail;
 }
 
 // ------------------------------------------------------------------------------------------------- MTP
@@ -1916,6 +1965,19 @@ int run(int argc, char** argv) {
     if (const strata::MetaValue* v = gm.meta().get(p + "rope.dimension_count")) m.n_rot = (int) v->u;
     const bool sk_force = env_flag("STRATA_Q36M_ATTN_SK");
     const bool gqa_fold = env_flag("STRATA_Q36M_ATTN_GQA");
+    const int attn_rows = q36_attn_rows();
+    if (attn_rows > 1 && (long long) attn_rows * m.g.n_head > SK_ROWS_MAX) {
+        std::fprintf(stderr, "strata metal q36: STRATA_Q36M_ATTN_ROWS=%d takes %d x H %lld = %lld query "
+                             "rows per split-K dispatch, past the SK_ROWS_MAX %d scratch bound (max B %d "
+                             "at H %lld)\n",
+                     attn_rows, attn_rows, (long long) m.g.n_head, (long long) attn_rows * m.g.n_head,
+                     SK_ROWS_MAX, SK_ROWS_MAX / (int) m.g.n_head, (long long) m.g.n_head);
+        return 1;
+    }
+    if (attn_rows > 1)
+        std::fprintf(stderr, "strata metal q36: STRATA_Q36M_ATTN_ROWS=%d: the split-K pair dispatches %d "
+                             "token rows (%d query rows) per part/merge dispatch\n",
+                     attn_rows, attn_rows, attn_rows * (int) m.g.n_head);
     if (gqa_fold) {
         // the fold is a no-op at one query head per KV head, and its threadgroup staging is bounded:
         // the folded split-K part takes HG * (SK_HD + 8 + SK_CELLS) floats, the folded k_attn part

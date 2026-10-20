@@ -34,6 +34,8 @@ struct Context::Impl {
     std::vector<id<MTLLibrary>> libs;
     id<MTLSharedEvent> ev = nil;   // run_graph_seg's handshake timeline
     uint64_t ev_v = 0;
+    DispatchTally tally;           // STRATA_Q36M_DISPATCH_LOG: the encode-loop's per-bucket counts
+    bool tally_on = false;
 };
 
 static inline id<MTLBuffer> B(const Buffer& b) { return (__bridge id<MTLBuffer>)b.handle; }
@@ -45,6 +47,19 @@ static inline id<MTLBuffer> BO(const Buffer& b, size_t off, size_t& o) {
     return (__bridge id<MTLBuffer>)(*b.chunks)[k];
 }
 static inline id<MTLComputePipelineState> P(const Pipeline* p) { return (__bridge id<MTLComputePipelineState>)p->handle; }
+
+// The dispatch tally's bucket (T13): 0 attn, 1 gemv, 2 other - the substrings of the pipeline names
+// the q36 engine's graphs carry.  The attn bucket is the load-bearing one (the T9 before/after).
+static int tally_bucket(const std::string& name) {
+    if (name.find("attn") != std::string::npos) return 0;
+    if (name.find("gemv") != std::string::npos || name.find("lpr8") != std::string::npos ||
+        name.find("expc") != std::string::npos || name.find("moe") != std::string::npos ||
+        name.find("swiglu") != std::string::npos || name.find("gather") != std::string::npos ||
+        name.find("tables") != std::string::npos || name.find("route") != std::string::npos)
+        return 1;
+    return 2;
+}
+
 static std::string g_device_name = "unknown GPU";
 
 Context::Context() : impl_(new Impl) {
@@ -54,6 +69,8 @@ Context::Context() : impl_(new Impl) {
         std::exit(2);
     }
     impl_->q = [impl_->dev newCommandQueue];
+    if (const char* e = std::getenv("STRATA_Q36M_DISPATCH_LOG"))
+        impl_->tally_on = *e && std::atoi(e) != 0;
     // env, then <exe dir>/metal/ (a component package), then the compiled-in source-tree path
     ggml_common_path = strata_metal::resource("STRATA_GGML_COMMON", "ggml-common.h", STRATA_GGML_COMMON_DEFAULT);
     kernel_dir = strata_metal::resource("STRATA_METAL_KERNELS", "kernels", STRATA_METAL_KERNELS_DEFAULT);
@@ -71,6 +88,9 @@ bool Context::supports_metal4() const {
 }
 uint64_t Context::recommended_working_set() const { return [impl_->dev recommendedMaxWorkingSetSize]; }
 uint64_t Context::max_buffer_length() const { return [impl_->dev maxBufferLength]; }
+
+void Context::dispatch_tally_reset() { impl_->tally = DispatchTally{}; }
+DispatchTally Context::dispatch_tally() const { return impl_->tally; }
 
 int Context::compile(const std::vector<std::string>& files, const std::string& prelude, bool fast_math) {
     std::string src = prelude + "\n#include <metal_stdlib>\nusing namespace metal;\n";
@@ -326,6 +346,14 @@ double Context::run_graph(const std::vector<Dispatch>& ds) {
             for (size_t i = s0; i < end; ++i) {
                 if (i > s0 && ds[i].barrier) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                 encode(enc, ds[i]);
+                if (impl_->tally_on) {
+                    switch (tally_bucket(ds[i].p->name)) {
+                        case 0: ++impl_->tally.attn; break;
+                        case 1: ++impl_->tally.gemv; break;
+                        default: ++impl_->tally.other; break;
+                    }
+                    ++impl_->tally.total;
+                }
             }
             [enc endEncoding];
             [cb commit];

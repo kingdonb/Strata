@@ -755,14 +755,17 @@ kernel void k_attn_gqa_merge(device const KV_T* vc [[buffer(0)]],
 }
 
 // Path B (the split-K range, n_pos > SK_TG_CAP or STRATA_Q36M_ATTN_SK=1): the folded part kernel.
-// One threadgroup per (256-cell chunk, KV head) covers the group's HG query rows - k_attn_sk_part's
-// body per head, the K row and the V cells of the chunk read once per group (the per-head walks of
-// them hit L1).  Per-head reduction slots (sh) so back-to-back heads cannot race the sh[0] reads;
-// a barrier between sk_max and sk_sum closes the same-sh write-vs-read race the unfolded part
-// kernel's back-to-back pair leaves open.  Partials land in the same (row, chunk) scratch slots
-// ((row - row0) * n_chunk + c), so k_attn_sk_merge runs unchanged and sees bit-identical partials.
-// Threadgroup budget: HG * (SK_HD + 8 + SK_CELLS) floats - the host refuses HG past the 32 KB
-// ceiling (HG <= 15 at SK_HD = 256).
+// One threadgroup per (256-cell chunk, KV head, token row of the row block) covers that token's HG
+// query rows of the group - k_attn_sk_part's body per head, the K row and the V cells of the chunk
+// read once per group (the per-head walks of them hit L1).  grid.z = tl is the token row inside the
+// host's row block (STRATA_Q36M_ATTN_ROWS): 1 gives the released per-token dispatch shape, B gives
+// B tokens per dispatch - the per-(row, chunk) body and its order are identical either way.
+// Per-head reduction slots (sh) so back-to-back heads cannot race the sh[0] reads; a barrier
+// between sk_max and sk_sum closes the same-sh write-vs-read race the unfolded part kernel's
+// back-to-back pair leaves open.  Partials land in the same (row, chunk) scratch slots
+// ((row - row0) * n_chunk + c; here row - row0 = tl * H + kvh * HG + hh), so k_attn_sk_merge runs
+// unchanged and sees bit-identical partials.  Threadgroup budget: HG * (SK_HD + 8 + SK_CELLS)
+// floats - the host refuses HG past the 32 KB ceiling (HG <= 15 at SK_HD = 256).
 kernel void k_attn_sk_part_gqa(device const float* q [[buffer(0)]],
                                device const KV_T* kc [[buffer(1)]],
                                device const KV_T* vc [[buffer(2)]],
@@ -782,9 +785,9 @@ kernel void k_attn_sk_part_gqa(device const float* q [[buffer(0)]],
                                ushort lane [[thread_index_in_simdgroup]],
                                ushort sgid [[simdgroup_index_in_threadgroup]]) {
     const int HG = H / HKV;
-    const int c = (int) g.x, kvh = (int) g.y;
-    const int row_base = row0 + kvh * HG;
-    const int t = row_base / H;   // one dispatch never spans tokens: rows row0 + [0, H) share t
+    const int c = (int) g.x, kvh = (int) g.y, tl = (int) g.z;   // tl: the token row inside the block
+    const int row_base = row0 + tl * H + kvh * HG;   // row0 is token-aligned (row0 = i0 * H)
+    const int t = row_base / H;   // = row0 / H + tl: one (g.y, g.z) pair covers one token's group rows
     const int npos = pos0 + t + 1;
     const int p0 = c * SK_CELLS;
     // whole threadgroup exits together: p0 and npos are threadgroup-uniform, no barrier is skipped midway
@@ -803,7 +806,7 @@ kernel void k_attn_sk_part_gqa(device const float* q [[buffer(0)]],
     const int n = min(SK_CELLS, npos - p0);
     device const KV_T* vp = vc + ((ulong) kvh * ctx + p0) * SK_HD + j;
     for (int hh = 0; hh < HG; ++hh) {
-        const ulong o = (ulong)(kvh * HG + hh) * (ulong) n_chunk + (ulong) c;
+        const ulong o = (ulong)(tl * H + kvh * HG + hh) * (ulong) n_chunk + (ulong) c;
         float s = -INFINITY;
         if (p < npos) {
             device const KV_T* kp = kc + ((ulong) kvh * ctx + p) * SK_HD;
