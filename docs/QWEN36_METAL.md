@@ -153,7 +153,25 @@ below.
   reuses the same kernels row-blocked (`row0` per dispatch).
 - **Engagement**: automatic on the decode step as soon as `n_pos` passes 8,192 cells; at or below it the
   original `k_attn` runs unchanged. `STRATA_Q36M_ATTN_SK=1` forces split-K at any length — the parity
-  knob against `k_attn` at short context.
+  knob against `k_attn` at short context — on the decode step, the MTP draft/verify paths, and (since
+  the multi-row change below) the chunked prefill too, which previously forced split-K only above
+  8,192. The knob-unset paths keep the released behavior exactly.
+- **Multi-row blocks on the chunk path** (`STRATA_Q36M_ATTN_ROWS=B`, read once per process): the
+  chunked prefill's split-K pair dispatches B token rows per part/merge pair instead of one — the same
+  kernels, the same per-row arithmetic, bit-identical outputs (parity suite stage 13b, and the
+  10-prompt ladders 10/10 with `--prefill 512`, unfolded and GQA-folded). The engine refuses B with
+  `B * H` past `SK_ROWS_MAX` and prints the numbers (max B = 16 at H = 16). Measured on the M2
+  (2026-10-20, the 000685 session, `--prefill 512`, split-K forced): one 512-token chunk's dispatches
+  go from 11,210 to 1,610 — the attention bucket 10,250 → 650 (512 rows × 2 dispatches × 10 QSA layers
+  + 10 prep → 32 blocks × 2 × 10 + 10), the MoE GEMV (749) and the rest (211) unchanged. The chunk
+  cost itself barely moved at this depth (2,048-token read: TTFT 80.4 s → 79.4 s, 25.5 → 25.8 tok/s) —
+  the dispatch overhead is a small term next to the KV reads; the counts, not this delta, are the
+  mechanism evidence.
+- **Dispatch counter** (`STRATA_Q36M_DISPATCH_LOG=1`): one stderr line per chunk —
+  `q36 dispatches: pos0=… nt=… attn=… gemv=… other=… total=…` — counted at the single encode point
+  (`Context::run_graph`), classified by kernel name (attn: every attention kernel; gemv: the GEMV and
+  routed-expert family; other: norms, conv, GDN, the rest). Diagnostic only; unset, nothing is counted
+  or printed.
 - **Memory gate at startup**: before the per-layer caches allocate, the engine refuses a `--ctx` above
   8,192 (and `--prefill`/`--mtp` runs at any context) when its working-set estimate exceeds
   `recommended_working_set()`: everything allocated so far (the wrapped weights, the decode and chunk

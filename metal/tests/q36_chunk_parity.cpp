@@ -1248,6 +1248,128 @@ int main(int argc, char** argv) {
         check("sk rows", att1.ptr, att2.ptr, 4 * T * H * 256);
     }
 
+    // ---- 13b. split-K rows, multi-token blocks: the per-token form vs the STRATA_Q36M_ATTN_ROWS row
+    // blocks (B token rows per part/merge pair; the block's n_chunk is its LAST row's count) - the
+    // new host shapes the engine's blocking loop emits: n_chunk > 1, pos0 > 0, a partial tail block,
+    // and the folded part kernel's grid.z token form.  Same per-(row, chunk) arithmetic, so every
+    // comparison is bit-equal; the scratch is NaN-poisoned (0xff) so a stale-slot read shows up as
+    // NaN cells in the check (row 0 at pos0=255 has an unwritten slot by design and never reads it).
+    {
+        const int CTX = 600;
+        const float scale = 1.0f / std::sqrt((float) 256);
+        mtl::Buffer q_a = cx.alloc(4 * T * H * 256), gate_all = cx.alloc(4 * T * H * 256);
+        for (int i = 0; i < T * H * 256; ++i) {
+            q_a.as<float>()[i] = r.sym();
+            gate_all.as<float>()[i] = r.sym();
+        }
+        const size_t kvb = (size_t) HKV * CTX * 256 * (kf ? 2 : 4);
+        mtl::Buffer kc = cx.alloc(kvb), vc = cx.alloc(kvb);
+        for (int i = 0; i < HKV * CTX * 256; ++i) {
+            if (kf) {   // seed through the float->half rounding once, so both row forms read identical halves
+                ((uint16_t*) kc.ptr)[i] = ref::f32_to_f16(r.sym());
+                ((uint16_t*) vc.ptr)[i] = ref::f32_to_f16(r.sym());
+            } else {
+                kc.as<float>()[i] = r.sym();
+                vc.as<float>()[i] = r.sym();
+            }
+        }
+        mtl::Pipeline p_sk_part_gqa = pipe_kv("k_attn_sk_part_gqa");
+        const int nc_max = (CTX + 255) / 256;
+        mtl::Buffer pacc_s = cx.alloc(4 * 256 * nc_max * 256), pm_s = cx.alloc(4 * 256 * nc_max),
+                    pl_s = cx.alloc(4 * 256 * nc_max);
+        mtl::Buffer att1 = cx.alloc(4 * T * H * 256), att2 = cx.alloc(4 * T * H * 256);
+
+        for (int pass = 0; pass < 2; ++pass) {   // 0: the unfolded part kernel, 1: the folded one
+            const bool folded = pass == 1;
+            const mtl::Pipeline& p_part = folded ? p_sk_part_gqa : p_sk_part;
+            const int part_gy = folded ? HKV : H;   // threadgroups per token: HKV (folded) or H rows
+            const uint32_t tgmem = (uint32_t)(folded ? (size_t)(H / HKV) * (256 + 8 + 256) * 4 : 0);
+            for (int p0base : {0, 255, 300}) {
+                // the per-token form (the released dispatches): one part+merge pair per token
+                std::memset(att1.ptr, 0xff, att1.bytes);
+                std::memset(pacc_s.ptr, 0xff, pacc_s.bytes);
+                std::memset(pm_s.ptr, 0xff, pm_s.bytes);
+                std::memset(pl_s.ptr, 0xff, pl_s.bytes);
+                std::vector<mtl::Dispatch> ds;
+                for (int t = 0; t < T; ++t) {
+                    const int npos = p0base + t + 1;
+                    const int n_chunk = (npos + 255) / 256;
+                    mtl::Dispatch dp;
+                    dp.p = &p_part;
+                    dp.args = {mtl::Arg::B(q_a, 4 * (size_t) t * H * 256), mtl::Arg::B(kc), mtl::Arg::B(vc),
+                               mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(CTX), mtl::Arg::V(scale),
+                               mtl::Arg::V(n_chunk), mtl::Arg::V(p0base + t), mtl::Arg::V(0),
+                               mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s)};
+                    dp.grid[0] = n_chunk;
+                    dp.grid[1] = part_gy;
+                    dp.tg[0] = 256;
+                    dp.tg_mem = tgmem;
+                    dp.barrier = true;
+                    ds.push_back(dp);
+                    mtl::Dispatch dm;
+                    dm.p = &p_sk_merge;
+                    dm.args = {mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s),
+                               mtl::Arg::B(gate_all, 4 * (size_t) t * H * 256),
+                               mtl::Arg::B(att1, 4 * (size_t) t * H * 256), mtl::Arg::V(H),
+                               mtl::Arg::V(n_chunk), mtl::Arg::V(p0base + t), mtl::Arg::V(0)};
+                    dm.grid[0] = H;
+                    dm.tg[0] = 256;
+                    dm.barrier = true;
+                    ds.push_back(dm);
+                }
+                cx.run_graph(ds);
+
+                // the row-block form: B consecutive token rows per part/merge pair (B=3's last block
+                // holds 2 rows - the partial tail the engine's final block has whenever nt % B != 0)
+                for (int B : {3, 4}) {
+                    std::memset(att2.ptr, 0xff, att2.bytes);
+                    std::memset(pacc_s.ptr, 0xff, pacc_s.bytes);
+                    std::memset(pm_s.ptr, 0xff, pm_s.bytes);
+                    std::memset(pl_s.ptr, 0xff, pl_s.bytes);
+                    std::vector<mtl::Dispatch> ds2;
+                    int t = 0;
+                    while (t < T) {
+                        int nb = 1;
+                        while (nb < B && t + nb < T) ++nb;
+                        const int n_chunk = (p0base + t + nb + 255) / 256;
+                        mtl::Dispatch dp;
+                        dp.p = &p_part;
+                        dp.args = {mtl::Arg::B(q_a), mtl::Arg::B(kc), mtl::Arg::B(vc),
+                                   mtl::Arg::V(H), mtl::Arg::V(HKV), mtl::Arg::V(CTX), mtl::Arg::V(scale),
+                                   mtl::Arg::V(n_chunk), mtl::Arg::V(p0base), mtl::Arg::V(t * H),
+                                   mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s)};
+                        dp.grid[0] = n_chunk;
+                        if (folded) {
+                            dp.grid[1] = HKV;
+                            dp.grid[2] = nb;
+                        } else {
+                            dp.grid[1] = nb * H;
+                        }
+                        dp.tg[0] = 256;
+                        dp.tg_mem = tgmem;
+                        dp.barrier = true;
+                        ds2.push_back(dp);
+                        mtl::Dispatch dm;
+                        dm.p = &p_sk_merge;
+                        dm.args = {mtl::Arg::B(pacc_s), mtl::Arg::B(pm_s), mtl::Arg::B(pl_s),
+                                   mtl::Arg::B(gate_all), mtl::Arg::B(att2), mtl::Arg::V(H),
+                                   mtl::Arg::V(n_chunk), mtl::Arg::V(p0base), mtl::Arg::V(t * H)};
+                        dm.grid[0] = nb * H;
+                        dm.tg[0] = 256;
+                        dm.barrier = true;
+                        ds2.push_back(dm);
+                        t += nb;
+                    }
+                    cx.run_graph(ds2);
+                    char name[64];
+                    std::snprintf(name, sizeof name, "sk rows mt %s B=%d p0=%d", folded ? "gqa" : "unfold",
+                                  B, p0base);
+                    check(name, att1.ptr, att2.ptr, 4 * T * H * 256);
+                }
+            }
+        }
+    }
+
     // ---- 14. the full MoE chain as ONE barrier-ordered graph (the engine's structure) vs the same
     // dispatches as separate graphs (the stage tests' structure): embed -> rms -> the router gemv -> route
     // -> k_tables -> grouped experts -> swiglu.  All the kernels are proven exact stage by stage (and the
