@@ -3,6 +3,7 @@
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/core/family_layout.hpp"
 #include "mtl_rt.h"
+#include "q36_prefix_plan.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -2399,6 +2400,7 @@ int run(int argc, char** argv) {
 
     const bool zero_state = env_flag("STRATA_Q36M_ZERO_STATE");     // zero scratch at request start
     const bool poison_state = env_flag("STRATA_Q36M_POISON_STATE"); // NaN/-1 fill wins when both set
+    const bool prefix_reset = env_flag("STRATA_Q36M_PREFIX_RESET"); // T8-r1 A/B: force the old full reset
 
     if (serve_mode) {
         std::printf("READY %d stop\n", s.ctx);
@@ -2429,6 +2431,29 @@ int run(int argc, char** argv) {
         reader.detach();
 
         std::vector<int> live_tokens;
+
+        // T8-r1: the divergence restore.  A request that diverges from live_tokens resumes from the deepest
+        // prompt-end checkpoint that still prefixes it instead of re-reading everything.  The chain holds the
+        // last two prompt ends; each entry's S/conv/logits/hlast copies live in slot `entry.slot` of the fixed
+        // sets below, allocated at the first checkpoint and reused in place (the Context owns its buffers and
+        // never frees until exit, so per-entry allocations would grow the footprint monotonically).  KV is
+        // never copied: it is position-indexed, rolling s.pos back is the whole rewind.
+        std::vector<PrefixCheckpoint> prefix_chain;
+        std::vector<std::vector<mtl::Buffer>> cp_S, cp_conv;   // [slot][non-QSA layer]
+        std::vector<mtl::Buffer> cp_logits, cp_hlast;          // [slot]
+        auto restore_prefix = [&](const PrefixCheckpoint& cp) {
+            size_t nl = 0;
+            for (int64_t l = 0; l < m.g.n_layers; ++l) {
+                if (strata::core::is_qsa_layer(m.g, l)) continue;
+                std::memcpy(s.S[(size_t) l].ptr, cp_S[(size_t) cp.slot][(size_t) nl].ptr, s.S[(size_t) l].bytes);
+                std::memcpy(s.conv_state[(size_t) l].ptr, cp_conv[(size_t) cp.slot][(size_t) nl].ptr,
+                            s.conv_state[(size_t) l].bytes);
+                ++nl;
+            }
+            std::memcpy(s.logits.ptr, cp_logits[(size_t) cp.slot].ptr, s.logits.bytes);
+            if (mtp_d > 0) std::memcpy(s.hlast.ptr, cp_hlast[(size_t) cp.slot].ptr, s.hlast.bytes);
+            s.pos = (int) cp.pos;
+        };
 
         for (;;) {
             std::string line;
@@ -2478,18 +2503,35 @@ int run(int argc, char** argv) {
                 continue;
             }
 
-            // Prefix matching
-            size_t reuse = 0;
-            while (reuse < live_tokens.size() && reuse < ids.size() && live_tokens[reuse] == ids[reuse]) {
-                ++reuse;
+            // Prefix matching.  A request that continues live_tokens evaluates only its delta (T0).  One that
+            // diverges resumes from the deepest prompt-end checkpoint that still prefixes it (T8-r1): the
+            // state as of that point is restored and only the divergent tail is read - the shared part
+            // between the checkpoint and the divergence point is re-evaluated, which rebuilds exact state.
+            PrefixPlan plan;
+            plan.reuse = match_len(live_tokens, ids);
+            if (prefix_reset) {
+                if (plan.reuse < live_tokens.size() || plan.reuse == 0) plan.full_reset = true;
+                else plan.eval_start = plan.reuse;
+            } else {
+                plan = plan_prefix(live_tokens, prefix_chain, ids);
             }
+            const size_t eval_start = plan.eval_start;
 
-            if (reuse < live_tokens.size() || reuse == 0) {
+            if (plan.full_reset) {
                 s.reset();
-                reuse = 0;
                 live_tokens.clear();
+                prefix_chain.clear();
             }
             if (zero_state || poison_state) s.fill_scratch(poison_state ? 0xff : 0x00);
+            if (plan.restore_idx >= 0) {   // after the fill: it poisons logits/hlast, which a restore reinstates
+                const PrefixCheckpoint& cp = prefix_chain[(size_t) plan.restore_idx];
+                restore_prefix(cp);
+                drop_deeper_than(prefix_chain, cp.pos);
+                std::fprintf(stderr, "strata metal q36: divergence at %zu of %zu live tokens: resume from the "
+                                     "checkpoint at %zu, %zu of %zu prompt tokens to read\n",
+                             plan.reuse, live_tokens.size(), cp.pos, ids.size() - cp.pos, ids.size());
+                std::fflush(stderr);
+            }
 
             const auto t_prompt0 = std::chrono::steady_clock::now();
             // The serve protocol's prompt progress (the same four fields the CUDA q36 engine sends: <read> <total>
@@ -2497,11 +2539,11 @@ int run(int argc, char** argv) {
             // end).  Without these the server's prompt percent never moves and a long read has no watchdog beat.
             auto pp_line = [&](size_t done_fresh) {
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_prompt0).count();
-                std::printf("PP %lld %lld %.0f %.1f\n", (long long) done_fresh, (long long) (ids.size() - reuse), ms,
+                std::printf("PP %lld %lld %.0f %.1f\n", (long long) done_fresh, (long long) (ids.size() - eval_start), ms,
                             ms > 0.0 ? 1000.0 * (double) done_fresh / ms : 0.0);
                 std::fflush(stdout);
             };
-            size_t pi = reuse;
+            size_t pi = eval_start;
             if (prefill_chunk > 0 && ids.size() >= 2) {
                 const size_t last = ids.size() - 1;   // the last prompt token runs as a decode window
                 while (pi < last) {
@@ -2509,17 +2551,64 @@ int run(int argc, char** argv) {
                     forward_prompt_chunk(cx, pipes, m, s, ids.data() + pi, nt, s.pos, nullptr, nullptr, sk_force);
                     s.pos += nt;
                     pi += nt;
-                    pp_line(pi - reuse);   // one line per chunk: the percent steps, the read beats the watchdog
+                    pp_line(pi - eval_start);   // one line per chunk: the percent steps, the read beats the watchdog
                 }
             }
             for (; pi < ids.size(); ++pi) {
                 forward_token(cx, pipes, m, s, ids[pi], ids_host, sk_force, true);
-                if ((pi + 1 - reuse) % 512 == 0) pp_line(pi + 1 - reuse);   // the token-by-token path beats too
+                if ((pi + 1 - eval_start) % 512 == 0) pp_line(pi + 1 - eval_start);   // the token-by-token path beats too
             }
             live_tokens = ids;
             const double prompt_ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_prompt0).count() * 1000.0;
-            if (mtp_d > 0)   // the draft chain's seed: this request's last prompt row's normed hidden
+            if (mtp_d > 0 && !(plan.restore_idx >= 0 && eval_start == ids.size()))
+                // the draft chain's seed: this request's last prompt row's normed hidden.  A restored request
+                // that read nothing keeps the checkpoint's seed - it is already this prompt's last row's
+                // hidden, and the copy would clobber it with stale s.h (the re-roll's reproduction).
                 std::memcpy(s.hlast.ptr, s.h.ptr, (size_t) m.g.n_embd * sizeof(float));
+
+            if (!prefix_reset) {
+                // T8-r1: this prompt end is the session's newest restore point - the state here is exactly the
+                // eval of this prompt, generation has not touched anything yet.
+                if (cp_S.empty()) {   // first checkpoint: allocate both slots' snapshot buffers once
+                    size_t n_nl = 0;
+                    for (int64_t l = 0; l < m.g.n_layers; ++l) if (!strata::core::is_qsa_layer(m.g, l)) ++n_nl;
+                    const size_t conv_b = (size_t) (m.g.ssm_d_conv - 1) * m.g.ssm_conv_channels * sizeof(float);
+                    const size_t st_b = (size_t) m.g.ssm_v_heads * m.g.ssm_state_size * m.g.ssm_state_size * sizeof(float);
+                    cp_S.assign(2, {});
+                    cp_conv.assign(2, {});
+                    cp_logits.assign(2, {});
+                    cp_hlast.assign(2, {});
+                    for (size_t slot = 0; slot < 2; ++slot) {
+                        cp_S[slot].reserve(n_nl);
+                        cp_conv[slot].reserve(n_nl);
+                        for (int64_t l = 0; l < m.g.n_layers; ++l) {
+                            if (strata::core::is_qsa_layer(m.g, l)) continue;
+                            cp_S[slot].push_back(cx.alloc(st_b));
+                            cp_conv[slot].push_back(cx.alloc(conv_b));
+                        }
+                        cp_logits[slot] = cx.alloc((size_t) m.g.n_vocab * sizeof(float));
+                        if (mtp_d > 0) cp_hlast[slot] = cx.alloc((size_t) m.g.n_embd * sizeof(float));
+                    }
+                    std::fprintf(stderr, "strata metal q36: prefix checkpoints: 2 slots, %.1f MB each (S+conv+logits%s)\n",
+                                 (double) (n_nl * (conv_b + st_b) + (size_t) m.g.n_vocab * sizeof(float) +
+                                           (mtp_d > 0 ? (size_t) m.g.n_embd * sizeof(float) : 0)) / 1e6,
+                                 mtp_d > 0 ? "+hlast" : "");
+                    std::fflush(stderr);
+                }
+                const int cp_slot = push_checkpoint(prefix_chain, 2, ids.size(), ids);
+                if (cp_slot >= 0) {
+                    size_t nl = 0;
+                    for (int64_t l = 0; l < m.g.n_layers; ++l) {
+                        if (strata::core::is_qsa_layer(m.g, l)) continue;
+                        std::memcpy(cp_S[(size_t) cp_slot][(size_t) nl].ptr, s.S[(size_t) l].ptr, s.S[(size_t) l].bytes);
+                        std::memcpy(cp_conv[(size_t) cp_slot][(size_t) nl].ptr, s.conv_state[(size_t) l].ptr,
+                                    s.conv_state[(size_t) l].bytes);
+                        ++nl;
+                    }
+                    std::memcpy(cp_logits[(size_t) cp_slot].ptr, s.logits.ptr, s.logits.bytes);
+                    if (mtp_d > 0) std::memcpy(cp_hlast[(size_t) cp_slot].ptr, s.hlast.ptr, s.hlast.bytes);
+                }
+            }
 
             const auto t_dec0 = std::chrono::steady_clock::now();
             long long produced = 0;
@@ -2601,7 +2690,7 @@ int run(int argc, char** argv) {
 
             const double decode_ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_dec0).count() * 1000.0;
             std::printf("DONE %lld %zu %.1f %.1f %s 0 0 %zu 0 0 0 0 0.0 %zu 0\n",
-                        produced, ids.size(), prompt_ms, decode_ms, finish, reuse, ids.size() - reuse);
+                        produced, ids.size(), prompt_ms, decode_ms, finish, eval_start, ids.size() - eval_start);
             std::fflush(stdout);
         }
         return 0;
