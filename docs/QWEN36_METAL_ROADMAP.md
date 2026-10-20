@@ -178,35 +178,53 @@ follow-through paths for hardware the maintainers do not have.
 
 ---
 
-## Phase 2: Post-0.2.0 Milestones — Benchmarking Against Unsloth & Uncapped Context
+## Phase 2: Post-0.2.0 Milestones — Measured Prefill Parity and Predictable Context
 
-> **Author**: Gemini-3.8-Flash  
-> **Status**: Draft candidate initiatives for Helix review.  
-> - [ ] **Review Status**: Pending review by Qwen-3.8-Flash-Next and ticket ordering in Helix.
+> **Author**: Gemini-3.8-Flash (original draft); reviewed and revised by Qwen-3.8-Flash-Next, 2026-10-19.  
+> **Status**: Reviewed — the claim-by-claim audit, the corrected numbers and the evidence requests are in docs/QWEN36_METAL_REVIEW.md (its §5 is this section's review table).  
+> - [x] **Review Status**: Reviewed by Qwen-3.8-Flash-Next; the tickets below are the post-review versions.
 
-On 2026-10-19, empirical benchmarks were conducted on an Apple M2 (24 GB) comparing Strata's custom Metal Qwen3.6 engine against Unsloth's `Qwen3.6-35B-A3B-MTP-GGUF` (`UD-Q2_K_XL`):
-- **Unsloth Highlights**: Achieved ~263.6 tok/s prefill on bulk prompts (5,862 tokens in 22.24s) via batched SIMD-group matrix multiply, and sustained 23.8 tok/s decode generation across 2,328 tokens. Demonstrated instant prefix caching (5,858 cache hits on resume). Note: while the model file contains MTP weights, proposal/acceptance telemetry was uninstrumented, so the exact speed contribution of MTP vs. fused kernel dequantization and memory bandwidth utilization remains an unverified research question.
-- **Context Allocation**: In the desktop benchmark run on the 24 GB M2 under active desktop load (Chrome, IDE, etc.), the session context was budgeted at 8,192 tokens (`8.2k / 8.2k`), likely based on available free system RAM at model load time. When the 5,862 prompt tokens combined with 2,328 generated tokens reached 8,190 tokens, a resume attempt could only emit 2 additional tokens before halting mid-sentence with *"Response hit the Max Tokens limit."* (Closing concurrent heavy applications would allow desktop auto-calculators to allocate more headroom, but memory headroom remains variable).
-- **Strata Advantage**: Strata's custom Split-K attention and explicit memory management (`--kv-f16` halving KV cache footprint) already sustain continuous generation at 6,000+ context depth (7.2 tok/s decode) up to 16k+ on the same 24 GB hardware without relying on massive unallocated RAM margins. However, Strata's prefill currently runs at ~25 tok/s due to parity-first row-by-row dispatch in `forward_prompt_chunk`.
+On 2026-10-19, empirical benchmarks were conducted on an Apple M2 (24 GB) comparing Strata's custom Metal Qwen3.6 engine against Unsloth's `Qwen3.6-35B-A3B-MTP-GGUF` (`UD-Q2_K_XL`). The post-review state of the evidence (every number sourced in the review doc):
 
-The following candidate initiatives form the Phase 2 roadmap to achieve prefill throughput parity with Unsloth while maintaining Strata's deep-context edge:
+- **The engine is identified**: the Unsloth Desktop build is `b11724-mix-c208e5f` — upstream llama.cpp `b11724` plus 20 pinned commits, none of which touch Metal compute. On the M2, the comparison ran against upstream ggml-metal kernels (the fork's compute pins are CUDA/HIP/Vulkan only; #264's +16.4–17.8% MoE prefill gain on Qwen3.6 is CUDA-only — on Metal a good batched MoE GEMM is a differentiator, not catch-up).
+- **Unsloth highlights (measured, screenshot-derived)**: ~263.6 tok/s prefill on bulk prompts (5,862 tokens in 22.24 s) and ~260 tok/s at a 32k-window session — prefill is depth-independent and batch-size-dependent (136 tok/s on ~447 fresh tokens). Decode: 31.2 tok/s shallow, 23.8 tok/s sustained over 2,328 tokens, 21.2 tok/s sustained 6.3k→11.3k depth on the follow-up. MTP on/off in the benchmark session is unverified (the card's recipe is `-np 1 --spec-type draft-mtp`; the API page showed 4 slots) — one model-load log line settles it.
+- **Context allocation**: Auto budgeted 8,192 tokens under desktop load; a manual 32.8k load succeeded on the same machine (one yellow warning, no failure) — 8.2k was a conservative auto-budget, not an engine ceiling. Strata's differentiator is the explicit working-set gate, not a bigger ceiling.
+- **Strata's recorded side**: the prefill baseline is stale (~25 tok/s is the bringup token-by-token number; the pre-lever matrix reads 22.3 tok/s at 2K, §6) — T12 re-baselines it before any target is set. Split-K + `--kv-f16` sustain 16k+ today; the GQA fold's A/B (T6) is the pending deep-decode lever.
 
-### T8 — KV Cache Prefix Matching (Prompt Caching / Session Reuse)
-- **Observation**: Unsloth reused 5,858 cached tokens with zero compute latency, evaluating only the fresh document delta.
-- **Scope**: Implement token-prefix hashing and state reuse in `q36_metal.cpp` so multi-turn sessions and repeated prompts skip evaluating already-computed prefix tokens.
-- **Gate**: 100% bit-parity against clean prefill; zero time spent on cached token prefix.
+### Execution order (measurement-first; the review doc's §6)
 
-### T9 — Batched 2D FlashAttention for QSA Chunk Prefill
-- **Observation**: `push_qsa_attention` currently dispatches single-row decode attention kernels `nt` times per chunk per layer (thousands of Metal command encoder dispatches per chunk) to preserve bit-for-bit equivalence.
-- **Scope**: Implement a fused 2D causal FlashAttention kernel on Metal that computes attention over the entire chunk $N \times N$ in a single dispatch while preserving numerical stability.
-- **Target**: Scale prompt prefill from ~25 tok/s toward ~150–200+ tok/s on Apple Silicon.
+**T12 → T13 → T6's pending A/B → T8 → T9 → T10 → T11.** The kernel tickets' targets are set against T12's numbers, not against prose. Every measurement block in the review doc's §7 carries a **Decides** line — what each outcome changes. The kernel tickets' risk register and fallback rungs are the review's §13; the scoreboard that tracks every comparative number (measured, recorded, projected, pending) is its §11.
 
-### T10 — Batched MoE GEMM for Routed Experts in Prefill
-- **Observation**: Strata routes tokens per-entry via gathered GEMV (`push_c_gemv` / `push_c_lpr8`).
-- **Scope**: Group tokens in each chunk by routed expert ID and execute true batched GEMM matrix multiplications across active experts, replacing per-token dispatches with high-occupancy SIMD-group operations.
+### T12 — The honest re-baseline (new, first)
+- **Scope**: run the §6 matrix with every lever on (`tools/qwen35/q36_prefill_bench.py`, sizes 2048/4098, chunks 0/512, `--prefill auto --kv-f16`, `STRATA_Q36M_GDN_WY=1 STRATA_Q36M_DENSE_MMA=1 STRATA_Q36M_ATTN_GQA=1`), fresh model load per cell; record prefill and decode with hardware, build, date, and machine state. The full hours-class ablation matrix — levers added one at a time — is the review's §7 block 6, the stretch that ends the which-lever-bought-what question.
+- **Gate**: the numbers land in docs/QWEN36_METAL.md; the targets below are restated against them. No default flips in this ticket.
 
-### T11 — Paged & Dynamic Context Architecture (Sustained Context > 8.2k)
-- **Observation**: Standard desktop runtimes budget context dynamically based on free system RAM at launch, risking truncation under concurrent desktop workloads.
-- **Scope**: Formalize Strata's split-K attention, dynamic KV chunking, and `--kv-f16` memory budgeting into an official paged context architecture that guarantees sustained generation across 16k–32k context on 24GB Unified Memory regardless of background application memory pressure.
-- **Gate**: Zero truncation errors on prompts exceeding 8k tokens; sustained decode > 6 tok/s at 16k context depth.
+### T13 — Dispatch-count instrumentation (new, second)
+- **Scope**: a one-off counter for Metal dispatches per chunk, per path (per-row attention, MoE GEMV, chunked) — counted at the single dispatch choke point (the command-encoder wrapper), one stderr line per chunk, no behavior change. The static ~20,480 estimate it replaces sits labeled in the review's §11 scoreboard.
+- **Gate**: the measured per-chunk dispatch counts recorded per path; replaces the unverified "20,000+ dispatches" estimate in the comparison narrative; T9/T10 cite before/after counts as their evidence.
+
+### T8 — Prefix cache: measure the shipped feature, keep the common prefix on divergence (revised)
+- **Observation (corrected)**: token-prefix matching and state reuse shipped in T0 (`q36_metal.cpp` L2419–2429; docs/QWEN36_METAL.md §2.2). The comparison article's "Cache Hits: 0 (Fresh prefill)" row was a fresh request, not a missing feature.
+- **Scope**: (a) measure the existing reuse — one two-request same-prefix session through the serve protocol (expected: delta-only evaluation); (b) keep the common prefix on divergence — today a divergence resets the state fully; (c) optional, its own decision: persistence across restarts.
+- **Gate**: the measured reuse numbers recorded; the divergence case keeps the common prefix and re-evaluates only the divergent tail; the 10-prompt parity unchanged.
+
+### T9 — Batched FlashAttention for QSA chunk prefill (targets revised)
+- **Observation (kept)**: `push_qsa_attention` dispatches the decode path's per-row attention sequence `nt` times per chunk per layer (`q36_metal.cpp` L1274–1278) — the dispatch storm T13 counts.
+- **Scope**: a fused causal 2D attention kernel for the chunk path behind an opt-in knob (`STRATA_Q36M_ATTN_FLASH=1`, the env pattern read once per process so the MTP verify window never mixes paths), with a measured rel-bound envelope.
+- **Parity contract (the honest version)**: fused online-softmax attention cannot preserve the T2 bit-identity contract — the accumulation order differs by design. The gate set follows the §10 MMA precedent: rel-bound envelope, 10-prompt ladder token-identity (greedy, 128 tokens), byte-identical no-flag default, and the **measured ≥5x-on-every-size bar** (§6) before any default flip.
+- **Target**: set by T12's re-baseline and the ≥5x bar — not prose. The mechanism direction is confirmed from both sides: batch structure is where prefill lives (our T3 numbers; their pinned #264 on CUDA). The risk register and the fallback rung (multi-row blocks through the row-blocked SK pair — dispatches ÷ B at the same envelope class) are the review's §13.
+
+### T10 — Batched MoE GEMM for routed experts (donor-reuse)
+- **Observation (kept)**: routed experts run gathered GEMV (`push_c_gemv` / `push_c_lpr8`).
+- **Scope**: group the chunk's tokens by routed expert ID and run a batched GEMM per active expert, reusing the `q36_dense.metal` donor (`push_c_dense`'s dequant-once, matrix-unit path). Same knob + rel-bound envelope + ladder gates as T9; strictly opt-in until the measured bar clears.
+- **Context**: the fork's pinned #264 (+16.4–17.8% pp on Qwen3.6, decode tie) is CUDA-only — Metal takes the existing path, so this is a differentiator opportunity, not catch-up. The imbalance case (tail experts at 1–2 rows, ~64 rows/expert at a 2k chunk but ~16 at 512) keeps the existing GEMV below a measured row threshold — the threshold comes from T13's rows-per-expert histogram (review §13).
+
+### T11 — Predictable context budgets (reframed)
+- **Observation (corrected)**: there is no measured 8.2k wall — the 32k load succeeded on 24 GB on both engines. The original "paged & dynamic context" premise is refuted; vLLM-style paging is speculative infrastructure at these sizes.
+- **Scope**: keep and document the explicit working-set gate as the differentiator (refusal with override, already built); decide the `--kv-f16` default on the measured record (§9's numbers are in; the flip decision rides on T6's A/B matrix); run the controlled 32k comparison (cool machine, Chrome closed, decode sampled at matched ~2k/6k/11k positions, both engines). Paging only if a measured need appears (e.g. fragmentation under long multi-session use).
+- **Gate**: zero truncation at the gate-approved budget on 24 GB; sustained decode > 6 tok/s at 16k depth measured (T6's A/B feeds this); the comparison table recorded in docs/QWEN36_METAL.md.
+
+### Decode-at-depth workstream (owned by T6's pending A/B; tracked here for ordering)
+
+The comparison's heaviest number is 21.2 tok/s sustained at 6.3k→11.3k depth. The bandwidth arithmetic (review doc §4.1): with the fold + `--kv-f16` the 11.3k-depth ceiling rises to ~76–89 tok/s; at the ~25–35% efficiency class their engine demonstrates at both depths, that is ~19–31 tok/s — parity, *if* the efficiency class carries over to the folded path (the labeled assumption the A/B tests; Strata's recorded deep numbers today run ~14–22% of ceiling at ≤4k depth). Ticket: T6 (Phase 1) — its A/B is Phase 2's third gate; T5's deferred deep-decode matrix folds into the same run. The optional tokens-per-joule experiment (energy at depth, `powermetrics`, cool machine) rides on the same A/B — review doc §4.3.
 
