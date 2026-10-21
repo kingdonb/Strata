@@ -62,7 +62,7 @@ def divergent_tail(live, at, base):
     raise SystemExit("no divergent tail token found")
 
 
-def run_config(name, env=None, extra_args=None, fresh_check=False):
+def run_config(name, env=None, extra_args=None, fresh_check=False, ab=False):
     log = (a.log + "." + name) if a.log else None
     eng = Eng(a.exe, shlex.split(a.args) + (extra_args or []), env=env, log=log)
     rows = []
@@ -85,12 +85,14 @@ def run_config(name, env=None, extra_args=None, fresh_check=False):
 
     checks = {
         "R2_delta_only": rows[1]["reused"] == len(P) + len(r1),
-        "R3_restored_at_prompt_end": rows[2]["reused"] == len(P) and
-                                     rows[2]["read"] == len(P) + len(r1[:m]) + len(tail) - len(P),
-        "R4_reroll_free": rows[3]["reused"] == len(P) and rows[3]["read"] == 0 and r4 == r1,
         "R5_fallback_reset": rows[0]["reused"] == 0 and rows[4]["reused"] == 0,
+        "R4_reproduces_R1": r4 == r1,
     }
-    eng.close()
+    if not ab:   # the restore-behavior checks: meaningless under the A/B flag, which disables the restore
+        checks["R3_restored_at_prompt_end"] = rows[2]["reused"] == len(P) and \
+            rows[2]["read"] == len(P) + len(r1[:m]) + len(tail) - len(P)
+        checks["R4_reroll_free"] = rows[3]["reused"] == len(P) and rows[3]["read"] == 0
+    eng.close()   # sequential: two 35B processes in unified memory swap-thrash (the M2 session's finding)
     if fresh_check:
         eng2 = Eng(a.exe, shlex.split(a.args) + (extra_args or []), env=env, log=(log + ".fresh") if log else None)
         ftoks, fdone, _, _ = eng2.solo(P + r1[:m] + tail, a.n)
@@ -102,7 +104,7 @@ def run_config(name, env=None, extra_args=None, fresh_check=False):
 configs = [run_config("plain", fresh_check=True)]
 if a.mtp:
     configs.append(run_config("mtp", extra_args=["--mtp", "2", "--draft-vocab", "8192"], fresh_check=True))
-configs.append(run_config("ab-reset", env={"STRATA_Q36M_PREFIX_RESET": "1"}))
+configs.append(run_config("ab-reset", env={"STRATA_Q36M_PREFIX_RESET": "1"}, ab=True))
 for cfg in configs[-1:]:   # the A/B: the divergence rows read fully again (R2 keeps the T0 extension); its R3
     cfg["checks"]["divergence_rows_fully_read"] = all(r["reused"] == 0 for r in cfg["rows"]
                                                       if r["name"] != "R2-extension")   # must equal the fresh R3
