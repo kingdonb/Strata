@@ -119,6 +119,9 @@ gates green to schedule one), and the miss itself is a finding for the fold's ti
 
 ### S4 — T8-r1 ladder parity ×2 (only if T8-r1 is merged; 000688 AC 6) — ~10 min
 
+Run early at the ticket level 2026-10-20 (build `ac5e0169`, results in §5 row 6): **10/10 twice, green** —
+session #2 may skip S4/S5 or re-confirm post-merge.
+
 ```bash
 python3 tools/qwen35/q36_solo_gate.py --exe ./build-metal/strata \
   --args "--native $Q36_MODEL --ctx 4096" --out /tmp/q36-t8-a.json
@@ -199,7 +202,7 @@ paragraph; T8's counts → §2.2; scoreboard edits → review §11), naming this
 | 3 | A/B verdict (S2/S2d) | fold-on ÷ fold-off decode ratio; band per review §7 block 2 (≥1.5× schedule the flip behind the soak / 1.2–1.5× keep opt-in, record / <1.2× kill the KV-traffic hypothesis, §12.2) | the recorded decision line **feeding** the headline "Decode, 11.3k depth" cell (that cell stays pending E2 — the A/B is its decision input, not its measurement) | |
 | 4 | Gate-2 parity (S3) | `identical: 10 of 10` (or the miss) | the fold's §8 gate record on this build/day — the flip decision's required-green line | |
 | 5 | T9-r1 (cited — no re-run) | dispatches 11,210 → 1,610; TTFT 80.4 → 79.4 s | "Dispatches per 512-token chunk" — **already filled** (PR #13; `docs/QWEN36_METAL.md` §6's multi-row bullet) | 11,210 → 1,610 |
-| 6 | T8 ladder + reuse (S4/S5) | reused/read per scenario; parity verdicts; checkpoint bytes | not a §11 row — lands in `docs/QWEN36_METAL.md` §2.2's measured record + ticket 000688 (the proceed/stop decision is review §7 block 3's) | |
+| 6 | T8 ladder + reuse (S4/S5) | reused/read per scenario; parity verdicts; checkpoint bytes | not a §11 row — lands in `docs/QWEN36_METAL.md` §2.2's measured record + ticket 000688 (the proceed/stop decision is review §7 block 3's) | **run early at the ticket level 2026-10-20** (build `ac5e0169`, ticket chat paste): ladder `identical: 10 of 10` ×2; checkpoint slot 66.9 MB; R2 reused 111/123 (delta-only, read 12 — carries the phantom's count signature), R3 reused 63 / read 36 and **bit-identical to fresh** (plain and `--mtp 2 --draft-vocab 8192`), R4 read 0 and == R1's reply, R5 full reset; A/B reads fully again, its R3 == fresh R3. Session #2 may skip S4/S5 or re-confirm post-merge |
 | 7 | T10 histogram (S6) | rows per expert, one 512-token chunk | review §13's T10-threshold data (not a §11 cell) | |
 | 8 | E1 (S7) | screenshot: spec-type/n_draft, n_ctx/fit | "MTP in the benchmark session" — the one-capture cell | |
 
