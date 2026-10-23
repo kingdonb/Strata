@@ -18,6 +18,11 @@ This list is edited by the maintainers. An item stays until a report answers it.
 | Same-build split-K attention runs on other Apple Silicon (M1, M3, M4) | Split-K was built and gated on one M2 (macOS 26.6.2); the memory gate reads `recommended_working_set()`, which differs by machine, and the 32K working set is untested elsewhere | — |
 | AMD RX 7000 series (RX 7900 XTX, 7900 XT, 7800 XT and similar, RDNA 3) on Linux or Windows | The RX 7000 builds have not been run on a real RX 7000 card by us; the Docker image for them is also untested on a card | none yet |
 | Windows with an AMD card: the app or the Terminal, one model, one picture sent | The Windows AMD build has not been run on a real card, and neither has its picture reader (CPU under 24 GB, GPU from 24 GB) | none yet |
-| A Mac with Apple silicon (macOS 15 or newer): the app or the Terminal with a real model | Mac builds have run on very few Macs. Tell us the Mac's memory, the model, the speed, and anything that failed. The Mac app has no picture reader yet. The signing script has not been run against Apple's real notary service yet, so a first-launch warning is expected and useful to hear about | none yet |
+| A Mac with Apple silicon (macOS 15 or newer): the app or the Terminal with a real model | Mac builds have run on very few Macs. Tell us the Mac's memory, the model, the speed, and anything that failed. Pictures on the Mac (GPU reader) were run on one Mac mini M4 only: tell us if they work on yours. The signing script has not been run against Apple's real notary service yet, so a first-launch warning is expected and useful to hear about | none yet |
 
 To add a request, open a pull request that adds a row, or tell the maintainers in an issue.
+
+---
+
+Fork note (kingdonb/Strata): this file is the union of upstream v0.2.2's list and this fork's own row (the
+split-K attention request, kept from the fork's Qwen3.6 Metal line). The fork's rows are maintained here.
