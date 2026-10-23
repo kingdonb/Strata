@@ -141,8 +141,9 @@ Then: reload the browser page → Models → the model appears among the install
 Expected: ready in a minute or two (the first start "takes a minute or two"). The memory gate may print its
 numbers and refuse a `--prefill` run whose estimate exceeds the working-set recommendation — that is a
 feature, not a bug: record the numbers and lower `--ctx` (8192 → 4096) in the JSON, save, load again.
-Record: the load time; the engine log file's startup lines (`grep "strata metal q36" "$REPO-data"/strata-q2_0.log | head` —
-the `--ctx`/fit/memory lines); the config's args as loaded.
+Record: the load time; the engine log file's startup lines (`grep "strata metal q36"
+/Users/yebyen/w/Strata-data/strata-q2_0.log | head` — the `--ctx`/fit/memory lines); the config's args as
+loaded.
 Abort: the load errors → the log file's last lines are the record; one retry after a fresh Unload; then
 record-and-decide. The catalog cards (Q4/Q6/Q8) are the fallback only if the owner wants a download — not
 this session's default (S5's reason: the Q4 would stream experts from the SSD and bury every glance).
