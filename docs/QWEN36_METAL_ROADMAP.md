@@ -219,7 +219,7 @@ On 2026-10-19, empirical benchmarks were conducted on an Apple M2 (24 GB) compar
 ### T10 — Batched MoE GEMM for routed experts (donor-reuse)
 - **Observation (kept)**: routed experts run gathered GEMV (`push_c_gemv` / `push_c_lpr8`).
 - **Scope**: group the chunk's tokens by routed expert ID and run a batched GEMM per active expert, reusing the `q36_dense.metal` donor (`push_c_dense`'s dequant-once, matrix-unit path). Same knob + rel-bound envelope + ladder gates as T9; strictly opt-in until the measured bar clears.
-- **Context**: the fork's pinned #264 (+16.4–17.8% pp on Qwen3.6, decode tie) is CUDA-only — Metal takes the existing path, so this is a differentiator opportunity, not catch-up. The imbalance case (tail experts at 1–2 rows, ~64 rows/expert at a 2k chunk but ~16 at 512) keeps the existing GEMV below a measured row threshold — the threshold comes from T13's rows-per-expert histogram (review §13).
+- **Context**: the fork's pinned #264 (+16.4–17.8% pp on Qwen3.6, decode tie) is CUDA-only — Metal takes the existing path, so this is a differentiator opportunity, not catch-up. The imbalance case (tail experts at 1–2 rows, ~64 rows/expert at a 2k chunk but ~16 at 512) keeps the existing GEMV below a measured row threshold — the threshold comes from T13's rows-per-expert histogram (review §13); the host sim's dry-run histogram (T10-r0, `metal/tests/moe_sim.cpp`, docs/QWEN36_METAL.md §11) is the host-side preview and the candidate's pre-Metal validation point.
 
 ### T11 — Predictable context budgets (reframed)
 - **Observation (corrected)**: there is no measured 8.2k wall — the 32k load succeeded on 24 GB on both engines. The original "paged & dynamic context" premise is refuted; vLLM-style paging is speculative infrastructure at these sizes.

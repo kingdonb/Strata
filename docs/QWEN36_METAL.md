@@ -713,3 +713,50 @@ bar a default change needs (§6) has not been run since the levers landed, and t
 deltas, while large on short chunks, are not that matrix. The remaining pre-merge gates are the
 quick ones on the current tip: the compile test, the six `mma <type>` parity stages, the MMA-knob
 ladder and the both-knobs `--mtp 2` ladder.
+
+## 11. The routed-expert host sim (`metal/tests/moe_sim.cpp`, T10-r0)
+
+The chunk path's MoE block now has a host-side parity simulation: pure C++, no Metal, every kernel
+transcribed loop for loop from `q36.metal` / `quant.metal` (`k_route_chunk`, `k_tables`,
+`k_gather_t`, `k_expc`, `k_gemv_c`, `k_gemv_lpr8`, `k_moe_sum_chunk`, the Q8_0/Q4_K/Q5_K/Q6_K
+dequant-dot forms) and the `q36_dense.metal` donor at its fp16-operand semantics. It exists so a
+batched-MoE-GEMM candidate (T10) validates host-side before any Metal compile; T10 plugs its
+transcription in as one arm in the file's `k_arms` registry and every expert-product stage re-runs
+against it. Build and run (Linux or macOS; on macOS the tests glob builds it with the other parity
+programs):
+
+```
+g++ -O2 -std=c++20 -I metal/src -I third_party/ggml metal/src/ref_quant.cpp metal/tests/moe_sim.cpp -o moe_sim && ./moe_sim
+```
+
+Measured on the run of 2026-10-21 (Linux x86_64 sandbox, g++ 15.2, `-O2`, no GPU involved; all 55
+checks OK, 40 s):
+
+- **Bit-identical**: routing (ids and weights, uniform and tie-rich logits), the entry tables
+  (counts/offsets; the placement invariant; the final x invariant to the atomic rank order), the
+  gather, and `k_gemv_c` vs `k_expc` (the same plain order, as the engine claims).
+- **Envelopes vs a double-precision reference**: the plain GEMV order 1.0-1.2e-7; the chain
+  end-to-end 1.2e-9 (small geometry) and 6.8e-9 (the real 2048/640 geometry).
+- **The lpr8-vs-plain order difference** (the engine's documented ~1 ulp; round 9's G8 cut):
+  9.1e-8 dense at T=16, 1.35-1.53e-7 routed at T=32, all three K-quants.
+- **The donor path** (dequant-once fp16, the T10 reference point), rows-per-expert M in
+  {1,2,4,8,16,32,64}: vs the fp16-operand reference 3.5-9.2e-7 (the `dense_mm_parity` 1e-5 bound
+  holds with room); vs the exact reference 2.3-4.1e-4, flat across M. The end-to-end donor swap on
+  the production chain (T=32, gate/up 2048->640 Q4_K, down 640->2048 Q8_0): eh 3.26e-4, ey 1.35e-4,
+  final x 1.38e-6.
+
+The **rows-per-expert histogram** in the same run is the DRY-RUN mechanism evidence for T10's
+hybrid-dispatch threshold (the authoritative on-Metal histogram stays with T13's counter lineage,
+`STRATA_Q36M_DISPATCH_LOG`): the routing replay over synthetic logits (256 experts, top-8), chunk
+sizes 128/512/1024/2048, distributions uniform / skewed / peaked. Reading: at T=128 uniform, 57 of
+256 experts sit at 1-2 rows and none reach 16 (pure GEMV regime); the peaked case (8 dominant
+experts) is GEMM-shaped at every size; the hybrid dispatch model (three dispatches per expert per
+product above the threshold) grows with the expert count, so the dispatch count is not T10's lever
+- the dequant/weight-read amortization is, and the rows distribution is what sizes it. The full
+tables are in the ticket record (`moe_sim_run_2026-10-21.txt`, helix-specs task 000689).
+
+Constraint the sim pins down: 256-block formats need `n_in % 256 == 0`, so at FF = 640 the down
+product can only be a 32-block type (Q8_0 is the tested stand-in; a Q4_K down is bracketed at 512)
+- the real GGUF's per-tensor expert types are T10's model-level fact, and the sim's shapes bracket
+them. IQ2_XS rides the donor arm and the double references through `ref_quant`'s dequantizer; its
+GEMV-side proof is the M2's `moe2048` stages, which already run it bit-identically.
