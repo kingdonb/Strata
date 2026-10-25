@@ -65,6 +65,8 @@ UD_SHARDS = {
 
 def model_shard_names(model: str) -> list[str]:
     """The model's files in order (shard 1 first)."""
+    if MAC_MODELS.get(model, {}).get("family") == "qwen36":
+        return [S.OWN_PATH_FAMILIES["qwen36"]["file"].format(q=model)]
     n = MAC_MODELS[model].get("shards", 2)
     if MAC_MODELS[model].get("family") == "unsloth":
         return [f"Qwen3.8-Flash-Next-{model}-{i:05d}-of-{n:05d}.gguf" for i in range(1, n + 1)]
@@ -321,10 +323,12 @@ def start(cfg_path: Path, port: int | None, open_browser: bool = True) -> int:
 
 # ------------------------------------------------------------------------------------------------ main
 def main(argv=None) -> int:
+    all_fams = list(dict.fromkeys(["qwen", "unsloth", "qwen36", *getattr(S, "FAMILIES", {}), *getattr(S, "OWN_PATH_FAMILIES", {})]))
+    all_models = list(dict.fromkeys([*MAC_MODELS, *(m for f in getattr(S, "OWN_PATH_FAMILIES", {}).values() for m in f.get("models", {}))]))
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--family", choices=["qwen", "unsloth"], default=None,
-                    help="qwen = Qwen3.8-Flash-Next (GSQ-RCO), unsloth = Unsloth's UD-*_K_XL (follows --model)")
-    ap.add_argument("--model", choices=list(MAC_MODELS))
+    ap.add_argument("--family", choices=all_fams, default=None,
+                    help="qwen = Qwen3.8-Flash-Next (GSQ-RCO), unsloth = Unsloth's UD-*_K_XL (follows --model), qwen36 = Qwen3.6-35B-A3B")
+    ap.add_argument("--model", choices=all_models)
     ap.add_argument("--context", type=int)
     ap.add_argument("--port", type=int)
     ap.add_argument("--host")
@@ -399,12 +403,16 @@ def main(argv=None) -> int:
     if ctx > TESTED_CONTEXT:
         S.say(f"  context {ctx}: measured on the Mac up to {TESTED_CONTEXT} (needles found at 8K-32K); longer is kept")
     S.ok(f"{model}, context {ctx}")
-    family = MAC_MODELS[model].get("family", "qwen")
-    if a.family and a.family != family:
-        S.warn(f"--family {a.family}: {model} is a {family} file; using {family}")
-    fam = S.FAMILIES[family]
+    q36_models = S.OWN_PATH_FAMILIES.get("qwen36", {}).get("models", {})
+    if a.family == "qwen36" or (model in q36_models and (not a.family or a.family == "qwen36")):
+        family = "qwen36"
+    else:
+        family = MAC_MODELS[model].get("family", "qwen")
+        if a.family and a.family != family:
+            S.warn(f"--family {a.family}: {model} is a {family} file; using {family}")
+    fam = S.OWN_PATH_FAMILIES[family] if family == "qwen36" else S.FAMILIES[family]
     tag = fam["tag"] + model
-    need = (0 if a.gguf_dir else S.MODELS[model]["download_gb"]) + 6   # --gguf-dir: the files are there already
+    need = (0 if a.gguf_dir else fam["models"][model].get("download_gb", 13) if family == "qwen36" else S.MODELS[model]["download_gb"]) + 6   # --gguf-dir: the files are there already
     if free < need:
         S.warn(f"about {need:.0f} GB are needed on the disk ({free:.0f} GB free): kept as you chose; it may run out")
 
@@ -426,17 +434,64 @@ def main(argv=None) -> int:
     S.step(5, f"downloading {fam['title']} {model}")
     models_dir = Path(a.gguf_dir) if a.gguf_dir else models_root / tag
     models_dir.mkdir(parents=True, exist_ok=True)
-    files = [models_dir / n for n in model_shard_names(model)]
-    for s in files:
-        if s.exists() and S.done(s):
-            S.ok(f"{s.name} already downloaded")
-            continue
-        S.download(fam["hf"].format(q=model) + s.name, s)
-    S.check_shards(files)
-    for s in files:                                    # the Unsloth files: pinned sizes and SHA-256
-        if shard_sha(s.name):
-            S.verify_sha256(s, *shard_sha(s.name))
-    S.ok("model files present")
+    if family == "qwen36":
+        gguf_name = fam["file"].format(q=model)
+        found = None
+        if a.gguf_dir and (Path(a.gguf_dir) / gguf_name).exists():
+            found = Path(a.gguf_dir) / gguf_name
+        if not found:
+            search_paths = [
+                models_dir / gguf_name,
+                models_root / "qwen36" / gguf_name,
+                models_root / tag / gguf_name,
+                models_root / gguf_name,
+                data / "models" / "qwen36" / gguf_name,
+                data / "models" / tag / gguf_name,
+            ]
+            for r in roots:
+                search_paths.extend([
+                    r / "models" / "qwen36" / gguf_name,
+                    r / "models" / tag / gguf_name,
+                    r / "models" / gguf_name,
+                ])
+            try:
+                st = S.load_settings()
+                if st.get("data_dir"):
+                    sd = Path(st["data_dir"])
+                    search_paths.extend([
+                        sd / "models" / "qwen36" / gguf_name,
+                        sd / "models" / tag / gguf_name,
+                        sd / "models" / gguf_name,
+                    ])
+            except Exception:
+                pass
+            for cand in search_paths:
+                if cand.exists():
+                    found = cand
+                    break
+        if found:
+            s = found
+            S.ok(f"{s.name} already downloaded: {s}")
+        else:
+            s = models_dir / gguf_name
+            S.download(fam["hf"] + s.name, s)
+            sha = fam.get("sha256", {}).get(s.name)
+            if sha and sha[1]:
+                S.verify_sha256(s, *sha)
+        files = [s]
+        S.ok("model files present")
+    else:
+        files = [models_dir / n for n in model_shard_names(model)]
+        for s in files:
+            if s.exists() and S.done(s):
+                S.ok(f"{s.name} already downloaded")
+                continue
+            S.download(fam["hf"].format(q=model) + s.name, s)
+        S.check_shards(files)
+        for s in files:                                    # the Unsloth files: pinned sizes and SHA-256
+            if shard_sha(s.name):
+                S.verify_sha256(s, *shard_sha(s.name))
+        S.ok("model files present")
 
     mmproj = vexe = None
     if vision == "yes":
@@ -450,73 +505,118 @@ def main(argv=None) -> int:
 
     # ---- 6. the pack and the MTP draft layer
     S.step(6, "preparing the model for Strata")
-    pack = S.find_in(roots, f"packs/{tag.lower()}") or data / "packs" / tag.lower()
+    pack = S.find_in(roots, f"packs/{tag.lower()}") or (S.find_in(roots, "packs/q2_0") if family == "qwen36" else None) or data / "packs" / tag.lower()
     env = dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py"))
-    # The repack and the pack move 100+ GB through the disk and the pack's python holds up to 20 GB: no engine may run beside
-    # them (an engine of 70-90 GB with a repack froze the 128 GB M5 Max twice).  A lock beside the GPU's file tells the engine
-    # and start() to wait; a running engine stops setup here.
-    lock_dir = data / "metal" if len(files) > 2 else files[0].parent
-    native0 = data / "metal" / f"{tag.lower()}-metal.gguf"
-    work = (len(files) > 2 and not (native0.exists() and S.done(native0))) or \
-        not ((pack / "native_experts.txt").exists() and (pack / "tokenizer" / "vocab.json").exists())
-    prep_lock = lock_dir / PREPARE_LOCK
-    if work:
-        running = engine_pids()
-        if running:
-            S.fail(f"a Strata engine is running (pid {running[0]}): preparing a model beside it can freeze this Mac",
-                   "stop the server (close its window), then run ./setup.sh --setup again")
-        lock_dir.mkdir(parents=True, exist_ok=True)
-        prep_lock.write_text(str(os.getpid()))
-        atexit.register(lambda: prep_lock.unlink() if prep_lock.exists() else None)
-    if len(files) > 2:
-        # many shards: the experts and dense tensors into one GGUF the GPU maps (or streams), the n-gram table read
-        # from its own shard (every tensor checked byte for byte: --verify)
-        native = data / "metal" / f"{tag.lower()}-metal.gguf"
-        native.parent.mkdir(parents=True, exist_ok=True)
-        if not (native.exists() and S.done(native)):
-            S.say(f"  Writing the model's experts and weights into one file for the GPU (one time, "
-                  f"{MAC_MODELS[model]['shard1_gb']:.0f} GB) ...")
-            S.run([sys.executable, str(ROOT / "metal" / "tools" / "metal_repack.py"), "--shard1", str(files[0]),
-                   "--out", str(native), "--verify"])
-            S.mark(native)
-        ple = ple_shard(files)
-        shards = [native, ple]
+    if family == "qwen36":
+        if not (pack / "tokenizer" / "vocab.json").exists():
+            pack = data / "packs" / tag.lower()
+            pack.mkdir(parents=True, exist_ok=True)
+            S.run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(files[0]), "--out", str(pack)], env=env)
+        S.ok(f"model prepared: {pack}")
     else:
-        shards = files
-    if not (pack / "native_experts.txt").exists() or not (pack / "tokenizer" / "vocab.json").exists():
-        S.run([sys.executable, str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(shards[0]), "--out", str(pack),
-               *fam.get("pack_args", [])], env=env)   # Unsloth: --compat-bf16 (the host's copies; the GPU reads the file)
-    S.ok(f"model prepared: {pack}")
-    prep_lock.unlink(missing_ok=True)
-    mtp = (S.find_in(roots, "mtp/mtp-q2_0.gguf") or data / "mtp" / "mtp-q2_0.gguf").parent
-    rt = mtp / "rt"
-    stream = streams(model, info["ram_gb"])
-    use_mtp = stream_mtp(stream, info["ram_gb"])
-    if stream and not use_mtp:
-        S.ok("the experts will stream from the SSD: no MTP draft layer (one token per step is faster there); "
-             "./setup.sh --setup on a Mac with more memory adds it")
-    elif stream:
-        S.ok(f"the experts will stream from the SSD; the MTP draft layer stays on, with --spec {STREAM_SPEC} "
-             "(a longer window pays when every window has a fixed cost per layer)")
-    if stream and info["ram_gb"] < STREAM_MTP_FROM_GB:
-        experts_file(shards[0])           # a small Mac: its misses are many; a big Mac's arena holds most experts
-    if use_mtp and not (mtp / "mtp-q2_0.gguf").exists():
-        S.say("  The MTP draft layer (speculative decoding) comes from the original Qwen checkpoint: only its ~5 GB of")
-        S.say("  MTP tensors are downloaded.")
-        S.run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)],
-              env={**env, "STRATA_SOURCE": S.model_source()})
-        S.run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(mtp), "--experts", "q2_0",
-               "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
-    if use_mtp:
-        rt.mkdir(parents=True, exist_ok=True)          # the Metal engine reads mtp-q2_0.gguf beside it (no rt pack)
-        S.refresh_draft_vocab(rt, a.draft_vocab or "cjk")
-        S.ok(f"MTP draft layer: {mtp / 'mtp-q2_0.gguf'}")
+        # The repack and the pack move 100+ GB through the disk and the pack's python holds up to 20 GB: no engine may run beside
+        # them (an engine of 70-90 GB with a repack froze the 128 GB M5 Max twice).  A lock beside the GPU's file tells the engine
+        # and start() to wait; a running engine stops setup here.
+        lock_dir = data / "metal" if len(files) > 2 else files[0].parent
+        native0 = data / "metal" / f"{tag.lower()}-metal.gguf"
+        work = (len(files) > 2 and not (native0.exists() and S.done(native0))) or \
+            not ((pack / "native_experts.txt").exists() and (pack / "tokenizer" / "vocab.json").exists())
+        prep_lock = lock_dir / PREPARE_LOCK
+        if work:
+            running = engine_pids()
+            if running:
+                S.fail(f"a Strata engine is running (pid {running[0]}): preparing a model beside it can freeze this Mac",
+                       "stop the server (close its window), then run ./setup.sh --setup again")
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            prep_lock.write_text(str(os.getpid()))
+            atexit.register(lambda: prep_lock.unlink() if prep_lock.exists() else None)
+        if len(files) > 2:
+            # many shards: the experts and dense tensors into one GGUF the GPU maps (or streams), the n-gram table read
+            # from its own shard (every tensor checked byte for byte: --verify)
+            native = data / "metal" / f"{tag.lower()}-metal.gguf"
+            native.parent.mkdir(parents=True, exist_ok=True)
+            if not (native.exists() and S.done(native)):
+                S.say(f"  Writing the model's experts and weights into one file for the GPU (one time, "
+                      f"{MAC_MODELS[model]['shard1_gb']:.0f} GB) ...")
+                S.run([sys.executable, str(ROOT / "metal" / "tools" / "metal_repack.py"), "--shard1", str(files[0]),
+                       "--out", str(native), "--verify"])
+                S.mark(native)
+            ple = ple_shard(files)
+            shards = [native, ple]
+        else:
+            shards = files
+        if not (pack / "native_experts.txt").exists() or not (pack / "tokenizer" / "vocab.json").exists():
+            S.run([sys.executable, str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(shards[0]), "--out", str(pack),
+                   *fam.get("pack_args", [])], env=env)   # Unsloth: --compat-bf16 (the host's copies; the GPU reads the file)
+        S.ok(f"model prepared: {pack}")
+        prep_lock.unlink(missing_ok=True)
+        mtp = (S.find_in(roots, "mtp/mtp-q2_0.gguf") or data / "mtp" / "mtp-q2_0.gguf").parent
+        rt = mtp / "rt"
+        stream = streams(model, info["ram_gb"])
+        use_mtp = stream_mtp(stream, info["ram_gb"])
+        if stream and not use_mtp:
+            S.ok("the experts will stream from the SSD: no MTP draft layer (one token per step is faster there); "
+                 "./setup.sh --setup on a Mac with more memory adds it")
+        elif stream:
+            S.ok(f"the experts will stream from the SSD; the MTP draft layer stays on, with --spec {STREAM_SPEC} "
+                 "(a longer window pays when every window has a fixed cost per layer)")
+        if stream and info["ram_gb"] < STREAM_MTP_FROM_GB:
+            experts_file(shards[0])           # a small Mac: its misses are many; a big Mac's arena holds most experts
+        if use_mtp and not (mtp / "mtp-q2_0.gguf").exists():
+            S.say("  The MTP draft layer (speculative decoding) comes from the original Qwen checkpoint: only its ~5 GB of")
+            S.say("  MTP tensors are downloaded.")
+            S.run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)],
+                  env={**env, "STRATA_SOURCE": S.model_source()})
+            S.run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(mtp), "--experts", "q2_0",
+                   "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
+        if use_mtp:
+            rt.mkdir(parents=True, exist_ok=True)          # the Metal engine reads mtp-q2_0.gguf beside it (no rt pack)
+            S.refresh_draft_vocab(rt, a.draft_vocab or "cjk")
+            S.ok(f"MTP draft layer: {mtp / 'mtp-q2_0.gguf'}")
 
     # ---- 7. the config, the start script
     S.step(7, "writing the start script")
     port = a.port or 8080
-    cfg = mac_config(exe, engine_args(pack, shards, rt, ctx, stream, info["ram_gb"]), pack, f"{fam['name']}-{model.lower()}", tag, port)
-    cfg["env"] = {"STRATA_METAL_STREAM": "1" if stream else "0"}   # the engine follows setup's measured choice
+    if family == "qwen36":
+        args = [
+            "--native", str(files[0]),
+            "--ctx", str(ctx or 4096),
+            "--prefill", "auto",
+            "--mtp", "2",
+            "--draft-vocab", str(a.draft_vocab or "8192"),
+            "--pool-workers", "6",
+            "--vram-reserve-mib", "1536",
+            "--resident-budget-gib", "9",
+        ]
+        cfg = {
+            "exe": str(exe),
+            "args": args,
+            "cwd": str(ROOT),
+            "tokenizer": str(pack / "tokenizer"),
+            "model_name": f"Qwen3.6-35B-A3B ({model} MTP)",
+            "backend": "metal",
+            "log": str(data / f"strata-{tag.lower()}.log"),
+            "port": port,
+            "env": {
+                "STRATA_METAL_STREAM": "1",
+                "STRATA_Q36M_PREFILL": "1",
+                "STRATA_Q36M_ATTN_GQA": "1",
+                "STRATA_Q36M_GDN_WY": "1",
+                "STRATA_Q36M_DENSE_MMA": "1",
+                "STRATA_RESIDENT_HEADROOM_GIB": "5",
+            },
+            "vram_reserve_mib": 1536,
+            "ui_resource_baseline": {
+                "workers": 0,
+                "reserve": 0,
+                "ramBudget": True,
+                "ramHeadroom": True,
+            },
+            "ui_resource_profile": "work",
+        }
+    else:
+        cfg = mac_config(exe, engine_args(pack, shards, rt, ctx, stream, info["ram_gb"]), pack, f"{fam['name']}-{model.lower()}", tag, port)
+        cfg["env"] = {"STRATA_METAL_STREAM": "1" if stream else "0"}   # the engine follows setup's measured choice
     if vision == "yes":
         cfg["args"] += ["--vision"]
         cfg["vision"] = {"exe": str(vexe), "mmproj": str(mmproj), "model": str(files[0]), "gpu": True,
@@ -531,6 +631,8 @@ def main(argv=None) -> int:
         cfg["open_browser"] = a.browser
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     S.write_config(cfg_path, cfg)
+    if family == "qwen36" and model == "UD-Q2_K_XL":
+        S.write_config(ROOT / "strata-q36_q2.json", cfg)
     script = S.write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     S.ok(f"start script: {script.name}")
     S.say()

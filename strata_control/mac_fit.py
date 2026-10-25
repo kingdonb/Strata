@@ -17,6 +17,7 @@ MIN_MACOS = (15, 0)        # MTLResidencySet (the engine keeps every buffer resi
 # The Mac's packs.  shard1_gb: the file the GPU maps (resident in unified memory while the model runs); the n-gram
 # table (shard 2, 28.8 GB) is read from the SSD a few rows at a time.  tested: measured on the M5 Max (docs/MAC.md).
 MAC_MODELS = {
+    "UD-Q2_K_XL": {"shard1_gb": 12.0, "tested": True, "family": "qwen36", "shards": 1},
     "Q2_0": {"shard1_gb": 37.6, "tested": True},
     "IQ3_XXS": {"shard1_gb": 47.0, "tested": True},
     "IQ3_S": {"shard1_gb": 54.8, "tested": True},
@@ -54,7 +55,8 @@ RESIDENT_LEAVE_SHARE = 0.30
 BIG_MAC_GB = 64.0
 GIB_GB = 1.073741824    # a GiB in GB: ram_gb is binary, the model sizes are decimal
 CONTEXTS = [8192, 32768, 65536, 131072]
-MAC_ABOUT = {"Q2_0": "2-bit, the fastest", "IQ3_XXS": "3-bit i-quant, better quality",
+MAC_ABOUT = {"UD-Q2_K_XL": "2-bit (Unsloth Dynamic) Qwen3.6 with MTP",
+             "Q2_0": "2-bit, the fastest", "IQ3_XXS": "3-bit i-quant, better quality",
              "IQ3_S": "3.5-bit i-quant, the best quality (matches the full model), the slowest",
              "UD-Q4_K_XL": "Unsloth ~4.5-bit (111 GB download)", "UD-Q5_K_XL": "Unsloth ~5.5-bit (158 GB download)",
              "UD-Q6_K_XL": "Unsloth ~6.5-bit (169 GB download)"}
