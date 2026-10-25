@@ -172,8 +172,8 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
 
   /** The agent's profile now, plus where its shaped routes really lead (read by the forwarding endpoint). */
   let shapeTargets = {};
-  function buildProfileNow() {
-    const profile = buildProfile({ local: localInstances(), connections: connections(), gate, tools: tools(), skillsDir: skillsDir(), proxyBase, searchMock, defaultLocalId: defaultLocalId() });
+  function buildProfileNow(turn) {
+    const profile = buildProfile({ local: localInstances(), connections: connections(), gate, tools: tools(), skillsDir: skillsDir(), proxyBase, searchMock, defaultLocalId: defaultLocalId(), connectMcp: turn?.connectMcp });
     shapeTargets = profile.shapeTargets ?? {};
     return profile;
   }
@@ -240,11 +240,12 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     return turnEngineSpeed({ baseUrl: inst.baseUrl, key: inst.key, since: projector.startedAt, attempts: projector.streams.size, timeoutMs: 800 });
   }
 
-  /** Make sure a runtime exists that knows the route this turn needs. */
-  async function ensureRuntime(choice, signal) {
+  /** Make sure a runtime exists that knows the route this turn needs. `turn` carries the chat's tools
+      decision (connectMcp), so toggling the Tools button restarts the agent with (or without) the rows. */
+  async function ensureRuntime(choice, signal, turn = {}) {
     for (;;) {
       if (starting) { await starting.catch(() => {}); continue; }
-      const profile = buildProfileNow();
+      const profile = buildProfileNow(turn);
       const route = routeFor(profile, choice);
       if (!route) {
         throw new AgentUnavailable(choice?.connectionId
@@ -341,7 +342,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     try { return await runTurnInner(c, options); } finally { c.starting = false; }
   }
 
-  async function runTurnInner(c, { chatId, message, workspacePath, choice = null, mode = null, history = [], onFrame, requestId = `req-${randomUUID()}`, signal, goal = null, thinking = null, thinkingBudget = 0, images = [], planTask = null, planRun = null, researchTopic = null }) {
+  async function runTurnInner(c, { chatId, message, workspacePath, choice = null, mode = null, history = [], onFrame, requestId = `req-${randomUUID()}`, signal, goal = null, thinking = null, thinkingBudget = 0, images = [], planTask = null, planRun = null, researchTopic = null, useTools = false }) {
     let send = onFrame; let attached = true;
     // A research run gathers first; what the assistant writes while gathering is notes, not the answer, so it is not shown.
     let hideDeltas = !!researchTopic;
@@ -379,7 +380,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
 
     emit({ type: 'queued', requestId });
     reporter.set({ phase: 'starting', code: 'starting', text: 'Starting…' });
-    const { rt: runtime, route } = await ensureRuntime(choice, signal);
+    const { rt: runtime, route } = await ensureRuntime(choice, signal, { connectMcp: useTools === true });
     const made = await sessionFor(c, workspacePath, runtime, { onWait: () => reporter.set({ phase: 'starting', code: 'assistant-starting', text: 'Starting the assistant…' }) });
     const { sessionId, fresh } = made ?? {};
     const cancelled = () => { reporter.clear(); emit({ type: 'done', finishReason: 'aborted', cancelled: true, tokensIn: null, tokensOut: null, usageSource: 'unavailable', durationMs: 0, model: route.name, contextMax: route.contextWindow }); return { cancelled: true }; };

@@ -336,6 +336,26 @@ class ToolLoop(unittest.TestCase):
             self.post(req)
             self.assertNotIn("fake__echo", self.engine.prompt_text(-1))
 
+    def test_toggling_tools_off_disconnects_for_the_next_turn(self):
+        """Kingdon's M2 report (task 000712): after a chat toggles tools off, the model must not see
+        tools any more. The host's own shape after an auto-run turn: the empty-content tool-call turn
+        and the tool result never enter the client's history, so the toggle-off request is plain.
+        (Recorded, not asserted here: a client that keeps the whole OpenAI history — past exchange
+        included — DOES see the tools re-armed by the template for a request that offers none; the
+        host never sends that shape.)"""
+        self.start(call_script("fake__add", a=1234, b=5678), "</think>\n\nThe result of 1234 + 5678 is 6912.")
+        code, text = self.post({"strata_mcp": True})
+        self.assertEqual(code, 200, text)
+        self.assertIn("fake__add", self.engine.prompt_text(0))         # the first turn offered the tools
+        user1 = {"role": "user", "content": "What is 1234 + 5678? Use your add tool."}
+        answer = {"role": "assistant", "content": "The result of 1234 + 5678 is 6912."}
+        code, text = self.post({"model": "m", "messages": [user1, answer, {"role": "user", "content": "What tools do you have now?"}], "stream": False})
+        self.assertEqual(code, 200, text)
+        prompt = self.engine.prompt_text(-1)
+        self.assertNotIn("fake__add", prompt, "the toggle-off turn must offer no tools")
+        self.assertNotIn("# Tools", prompt)
+        self.assertNotIn("<function=", prompt)
+
     def test_own_tools_still_go_to_the_client(self):
         own = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {
             "q": {"type": "string"}}}}}]

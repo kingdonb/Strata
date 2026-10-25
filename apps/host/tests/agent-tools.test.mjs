@@ -232,7 +232,7 @@ test('a tool server set up for the model is connected to the agent: its tools ar
   const bridge = createAgentBridge({ dataDir: dir, localInstances: () => local, connections: () => [], env: process.env, startTimeoutMs: 90_000 });
   t.after(async () => { await bridge.close(); await worker.close(); cleanup(dir); });
   const frames = [];
-  await bridge.runTurn({ chatId: 'mcp-bypass', message: `SCRIPT:call mcp__demo__shout ${JSON.stringify({ text: 'hello' })}`, workspacePath: ws, mode: 'bypass', onFrame: f => frames.push(f) });
+  await bridge.runTurn({ chatId: 'mcp-bypass', message: `SCRIPT:call mcp__demo__shout ${JSON.stringify({ text: 'hello' })}`, workspacePath: ws, mode: 'bypass', useTools: true, onFrame: f => frames.push(f) });
   assert.ok([...worker.requests].reverse().find(q => q.toolNames.length).toolNames.includes('mcp__demo__shout'));
   assert.ok(![...worker.requests].some(q => q.toolNames.some(n => n.startsWith('mcp__off'))), 'a disabled server is not connected');
   const card = cards(frames).at(-1);
@@ -241,7 +241,7 @@ test('a tool server set up for the model is connected to the agent: its tools ar
   // Manual: a connected tool has unknown effects, so it asks first
   const manual = [];
   await bridge.runTurn({
-    chatId: 'mcp-manual', message: `SCRIPT:call mcp__demo__shout ${JSON.stringify({ text: 'ask me' })}`, workspacePath: ws, mode: 'manual',
+    chatId: 'mcp-manual', message: `SCRIPT:call mcp__demo__shout ${JSON.stringify({ text: 'ask me' })}`, workspacePath: ws, mode: 'manual', useTools: true,
     onFrame: f => { manual.push(f); if (f.type === 'agent-tool' && f.tool.state === 'proposed') void bridge.approve({ chatId: 'mcp-manual', callId: f.tool.id, decision: 'approve' }); },
   });
   assert.deepEqual(cards(manual).map(c => c.state), ['running', 'proposed', 'running', 'done']);
