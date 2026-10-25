@@ -17,6 +17,7 @@ import { tuningDir } from './platform-paths.mjs';
 import { createAgentBridge, plainTurnFailure } from './agent/agent-bridge.mjs';
 import { createAgentTools } from './agent/tools-settings.mjs';
 import { withPlainStatus } from './agent/status.mjs';
+import { prepareOversized } from './oversize.mjs';
 import { findBrowser, findPlaywrightMcp } from './agent/browser-probe.mjs';
 /**
  * Strata engine host.
@@ -1723,6 +1724,15 @@ async function api(req, res, path, method, url) {
     const body = await readBody(req); const id = String(body.sessionId ?? '');
     try { const file = resolveChatFile(chatRoot(id), body.path); return json(res, 200, { files: body.remove === true ? chatAttachments.remove(id, file) : chatAttachments.add(id, file) }); }
     catch (e) { return error(res, e.code === 'outside' ? 403 : 400, e.message); }
+  }
+  /* A message too large for the window, made small enough to send (the error card's two choices: the text as a file in the chat's folder, or a shortened preview). */
+  if (path === '/api/chat/oversize' && method === 'POST') {
+    const body = await readBody(req);
+    if (body.mode !== 'file' && body.mode !== 'preview') return error(res, 400, 'Choose how to send it: the text saved as a file in the chat folder, or a shortened preview.');
+    try {
+      const prepared = await prepareOversized({ mode: body.mode, text: String(body.text ?? ''), root: chatRoot(String(body.sessionId ?? '')), instance: native.resolveInstance(body.nativeModelId) });
+      return json(res, 200, { message: prepared.message });
+    } catch (e) { return error(res, 400, e.message); }
   }
   if (path === '/api/files/path' && method === 'GET') {
     try { const p = resolveChatFile(chatRoot(url.searchParams.get('sessionId') ?? ''), url.searchParams.get('path')); return json(res, 200, { path: p }); }
