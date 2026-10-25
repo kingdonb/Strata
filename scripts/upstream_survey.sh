@@ -119,8 +119,8 @@ fi
 
 # ---- ledger row -----------------------------------------------------------------
 if [ "$LEDGER" -eq 1 ]; then
-    tosha=$(git rev-parse --short "$TO")
-    fromsha=$(git rev-parse --short "$FROM")
+    tosha=$(git rev-parse --short "$TO^{commit}")
+    fromsha=$(git rev-parse --short "$FROM^{commit}")
     commits=$(git rev-list --count "$FROM..$TO")
     files=$(printf '%s\n' "$ALL_FILES" | wc -l)
     shortstat=$(git diff --shortstat "$FROM" "$TO")
