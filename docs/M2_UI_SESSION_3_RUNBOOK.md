@@ -235,8 +235,9 @@ removed (or the next one set) and a fresh Load — the session never leaves a kn
 One paste (S0's fields, after): date/time, swap after, a hot temperature reading
 (`sudo powermetrics --samplers smc -n 1 -i 1000 | grep -i 'die'` — a machine-state capture, not an engine
 command), Chrome state. Fill the results table (§6). Capture the evidence: Diagnostics → View logs →
-**Save logs** (the app-side record) and `cp /Users/yebyen/w/Strata-data/strata-q2_0.log
-docs/m2-sessions/<this-session>/` (the engine-side record) — the session folder is the in-repo
+**Save logs** (the app-side record) and `mkdir -p docs/m2-sessions/<this-session>/ &&
+cp /Users/yebyen/w/Strata-data/strata-q2_0.log docs/m2-sessions/<this-session>/` (the engine-side
+record) — the session folder is the in-repo
 archive (docs/m2-sessions/README.md); gzip the log there when it is over ~256 KiB. Hard-stop check
 against start + 150 min.
 
