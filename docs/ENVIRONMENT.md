@@ -111,8 +111,12 @@ curl -sSL -H "Authorization: Bearer $GITHUB_TOKEN" \
 # 3. paste the failing section into the ticket record — the diagnosis lives with the ticket
 ```
 
-- Status: **verified** 2026-10-25 (the reachability and the anonymous 403); the token path itself
-  verifies the first time a secret-backed fetch succeeds — recorded here when it does.
+- Status: **verified** 2026-10-25 (the reachability, the anonymous 403, and the token path — the
+  first secret-backed fetch succeeded that day: run 40210736015's job list read, failing job
+  121221201459's log fetched with the token, HTTP 200, the failure signature
+  `test_the_portable_watcher_ends_the_child_when_the_server_is_killed` present in the log). The
+  token stays read-only (Actions: read + Metadata: read) and expires ~90 days from 2026-10-25 —
+  after that, log fetches 403 again until the operator rotates the secret.
 - Source: probe on this repo; the lesson from the post-merge red diagnosed in
   helix-specs `design/tasks/000709_upstream-ci-bundled/`.
 
