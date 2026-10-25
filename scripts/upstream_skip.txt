@@ -1,0 +1,51 @@
+# scripts/upstream_skip.txt — the machine-readable form of docs/FORK.md's skip-list table.
+#
+# One path (or shell glob) per line; the text after '#' on the same line is the reason.
+# docs/FORK.md's table is the ledger of record — update the two in the same PR when a
+# sync changes either. scripts/upstream_survey.sh --apply consumes the non-comment
+# lines of this file (or of a per-sync file passed with --skip-file).
+#
+# ---- Standing list (as of the v0.2.2 sync) — applied to every sync ---------------
+strata_control/feed.py              # the signed update feed / `strata update` rework — the fork keeps the 0.2.0 update behavior (pending standalone decision)
+strata_cli/update_cmd.py            # the `strata update` rework — same FORK.md row
+strata_cli/bench_facts.py           # benchmarks stay gated (Benchmark Day); the plain serving-bench commands keep working
+strata_cli/bench_standard.py        # the `standard-v1` suite — same FORK.md row
+strata_control/calibration_jobs.py  # bench-gated measurement machinery
+strata_control/autotune.py          # bench-gated measurement machinery
+strata_control/benchmarking.py      # bench-gated measurement machinery
+tools/test_setup_*.py               # upstream's source-installer tests (the fork builds the Metal engine)
+setup.py                            # upstream's source-installer machinery
+START-HERE.bat                      # upstream's source-installer machinery
+cmake/                              # engine-package machinery (CUDA/HIP/SYCL selection, gfx lists)
+CMakeLists.txt                      # root build for upstream's engine packaging
+src/                                # the CUDA/HIP engine — the fork builds no CUDA/HIP engine (include/strata/ stays synced as one block with them, never piecemeal)
+sycl/                               # the Intel SYCL engine — same FORK.md row
+metal/                              # upstream metal changes (Gyro trellis kernels, dense tiles) — deferred behind an owner decision; the fork's own metal/ line is untouched by this list's spirit: only upstream-side deltas since <from> are reverted
+packaging/                          # upstream release/CI/image machinery the fork does not run
+docker/                             # upstream image machinery the fork does not run
+.github/                            # upstream CI the fork does not run
+Dockerfile                          # upstream image machinery
+installer.nsi                       # upstream Windows installer machinery
+tools/dflash2/                      # the DFlash2 drafter — surveyed, not adopted (targets Qwen3.8-Flash-Next CUDA/SYCL)
+strata_control/drafting_fetch.py    # the DFlash2 drafter — same FORK.md row
+bench/                              # reference material only — no claims, no measurement scope
+bench.sh                            # reference material only
+BENCH.bat                           # reference material only
+README.de.md                        # translations advertise features the fork does not take
+README.es.md                        # translations
+README.fr.md                        # translations
+README.ja.md                        # translations
+README.pt-BR.md                     # translations
+README.zh-CN.md                     # translations
+AGENTS.md                           # upstream AGENTS changes — the fork's stays fork-specific
+#
+# ---- Per-sync amendments — commented out by default ------------------------------
+# A sync that skips more than the standing list uncomments its lines here (or passes a
+# per-sync file with --skip-file) and records the decision in FORK.md's ledger row.
+# Example — the v0.2.3.1 sync (serve/ was TAKEN in v0.2.2, skipped in v0.2.3.1):
+# serve/                             # v0.2.3.1: serve/ deltas skipped — gated on upstream's 0.1.48 engine packaging, version gates, DFlash2 routing; the fork runs 0.1.45.3-metal (TLS trust ported via strata_control/tls.py)
+#
+# ---- No-path notes (hand-check per sync; nothing for --apply to consume) ---------
+# Gyro/RX-6000 model entries — paths not enumerated in FORK.md; the Metal engine does
+#   not load Gyro yet (host references are engine-report-guarded); hand-check model
+#   catalog files per sync.

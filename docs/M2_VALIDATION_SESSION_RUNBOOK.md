@@ -177,7 +177,11 @@ itself.
 ### S8 — State capture (after) + results table fill — ~10 min
 
 One paste (same as S0's minus the export): date/time, swap after, temperature (hot reading), Chrome state.
-Then fill the results table below. Hard-stop check: if the projected end passes start + 90 min, drop the
+Then fill the results table below. Capture the evidence: `mkdir -p
+docs/m2-sessions/<this-session>/ && cp` the engine log (the run config's `log` file)
+and the gate outputs (the solo/cmp gate JSONs, the chunk-parity output) into
+`docs/m2-sessions/<this-session>/` — the in-repo archive (docs/m2-sessions/README.md). Hard-stop check: if
+the projected end passes start + 90 min, drop the
 remaining steps in the order S2d → S6 → S5 → S4 → S3 (the A/B and this table are never dropped; gate-2 S3
 survives longest — if even it must drop, record "gate-2 parity deferred" explicitly, never silently).
 
