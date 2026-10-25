@@ -1,0 +1,17 @@
+# Pre-gate (recorded 2026-10-25, Helix Linux sandbox, CPython 3.13.7, checkout af38e089):
+# H3 unit gate — the PR #25 stabilized lifeline watcher, the portable-watcher path
+# (the mechanism macOS uses in production; forced here on Linux). The M2 hardware
+# demonstration (hard server kill mid-decode) is the runbook's S4.
+
+$ python3 -m unittest serve.test_lifeline -v
+test_an_engine_that_ignores_everything_is_killed (serve.test_lifeline.HardFallback.test_an_engine_that_ignores_everything_is_killed) ... ok
+ok
+test_a_child_started_on_a_request_thread_outlives_that_thread_but_not_the_server (serve.test_lifeline.Lifeline.test_a_child_started_on_a_request_thread_outlives_that_thread_but_not_the_server) ... ok
+test_a_server_that_exits_normally_leaves_nothing_behind (serve.test_lifeline.Lifeline.test_a_server_that_exits_normally_leaves_nothing_behind) ... ok
+test_the_child_is_recorded_while_it_runs_and_forgotten_after (serve.test_lifeline.Lifeline.test_the_child_is_recorded_while_it_runs_and_forgotten_after) ... ok
+test_the_portable_watcher_ends_the_child_when_the_server_is_killed (serve.test_lifeline.Lifeline.test_the_portable_watcher_ends_the_child_when_the_server_is_killed) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 3.382s
+
+OK
