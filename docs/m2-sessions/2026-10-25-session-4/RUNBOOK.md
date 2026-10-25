@@ -123,8 +123,10 @@ curl -sN "$URL/v1/chat/completions" -H "Authorization: Bearer $STRATA_KEY" -H 'C
 ```
 
 While it streams, in the monitor: press `5` (Hardware) — the Metal card row shows `temp <N> C` — then `1`
-(Overview) — the GPU-temperature tile and its sparkline move. Screenshot both (task chat). Capture the
-telemetry lines (third terminal, one paste; run during the decode):
+(Overview) — the GPU-temperature tile and its sparkline move. Screenshot both (task chat); if the monitor
+runs inside tmux, also take the text form (the paste below records which method carried the rendering —
+the CoS addition: the artifact traceable to how it was taken). Capture the telemetry lines (third
+terminal, one paste; run during the decode):
 
 ```bash
 mkdir -p $REPO/docs/m2-sessions/2026-10-25-session-4
@@ -146,6 +148,15 @@ curl -s -H "Authorization: Bearer $STRATA_KEY" "$URL/metrics" | python3 -c '
 import json, sys
 print("gpu_note:", (json.load(sys.stdin).get("hardware_static") or {}).get("gpu_note"))' \
   | tee -a $REPO/docs/m2-sessions/2026-10-25-session-4/telemetry.txt
+```
+
+And the capture-method line (one paste, after the screenshots; it lands the rendering's provenance with
+the artifact):
+
+```bash
+tmux capture-pane -p | tail -30 >> $REPO/docs/m2-sessions/2026-10-25-session-4/telemetry.txt \
+  && echo "capture method: tmux capture-pane + task-chat screenshots" >> $REPO/docs/m2-sessions/2026-10-25-session-4/telemetry.txt \
+  || echo "capture method: task-chat screenshots only (tmux not available)" >> $REPO/docs/m2-sessions/2026-10-25-session-4/telemetry.txt
 ```
 
 Expected: ≥ 3 `temp=` lines inside the decode window with a number (10–125 °C is the reader's plausibility
@@ -233,7 +244,7 @@ to a file in the session dir.
 |---|---|---|---|
 | 1 | S0/S1 | base SHA, dirty count, STRATA_LIFELINE, fix-in-tree grep, build + compile test | |
 | 2 | S2 (H1) | the round line verbatim: ttft (prefill seconds), prompt tok/s, decode tok/s; the four grep counts; PASS/FAIL | |
-| 3 | S3 (H2) | the decode driver's tok/s glance; the count of temp-bearing samples in the decode window; the min–max °C; the gpu_note line verbatim; rendered-in-monitor (screenshot yes/no); PASS/FAIL | |
+| 3 | S3 (H2) | the decode driver's tok/s glance; the count of temp-bearing samples in the decode window; the min–max °C; the gpu_note line verbatim; rendered-in-monitor — with the capture method recorded (screenshot and/or tmux capture-pane, the CoS addition); PASS/FAIL | |
 | 4 | S4 (H3) | before/after pgrep blocks; time-to-engine-gone; watcher gone (yes/no); orphan found (yes/no); host state + port state; PASS/FAIL | |
 | 5 | S5 | machine state after (swap, temp), artifacts landed (list), key sweep result | |
 

@@ -11,7 +11,7 @@ stop; the diagnosis is a follow-up ticket.
 |---|---|---|---|
 | 1 | S0/S1 | base SHA, dirty count, STRATA_LIFELINE, fix-in-tree grep, build + compile test | base SHA `af38e089…`, dirty 0, STRATA_LIFELINE unset, fix-in-tree count 1 (static; `gates/pregate-h1-fix-in-tree-static.txt`) — build + compile test: **fill at session time (S5)** |
 | 2 | S2 (H1) | the round line verbatim: ttft (prefill seconds), prompt tok/s, decode tok/s; the four grep counts; PASS/FAIL | **fill at session time (S5)** |
-| 3 | S3 (H2) | the decode driver's tok/s glance; count of temp-bearing samples in the decode window; min–max °C; the gpu_note line verbatim; rendered-in-monitor (screenshot yes/no); PASS/FAIL | **fill at session time (S5)** |
+| 3 | S3 (H2) | the decode driver's tok/s glance; count of temp-bearing samples in the decode window; min–max °C; the gpu_note line verbatim; rendered-in-monitor, with the capture method recorded (screenshot and/or tmux capture-pane — the CoS addition, the artifact traceable to how it was taken); PASS/FAIL | **fill at session time (S5)** |
 | 4 | S4 (H3) | before/after pgrep blocks; time-to-engine-gone; watcher gone (yes/no); orphan found (yes/no); host state + port state; PASS/FAIL | **fill at session time (S5)** |
 | 5 | S5 | machine state after (swap, temp), artifacts landed (list), key sweep result | **fill at session time (S5)** |
 
@@ -35,7 +35,8 @@ gates (S2–S4 are); recorded here so the sitting starts from a known-green main
   present).
 - `gates/h1-bench.json` — the bench tool's raw run JSON.
 - `gates/h3-hard-kill.txt` — the before / kill / after pastes with timestamps.
-- `telemetry.txt` — the H2 sample lines, the `gpu_note` line, and the S0/S5 machine-state pastes.
+- `telemetry.txt` — the H2 sample lines, the `gpu_note` line, the capture-method line (the CoS addition:
+  the rendering's provenance), and the S0/S5 machine-state pastes.
 - `app-diagnostics.txt` — not captured in this session (Terminal seat only; the app was not used — recorded
   here instead of creating an empty file).
 - No API key in any artifact (S5's sweep proves it).
