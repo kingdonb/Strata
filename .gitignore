@@ -73,6 +73,7 @@ dist-hip/
 .terminal-venv/
 .terminal-test-venv/
 .scratch/
+.venv-parity/
 node_modules/
 *.dmg
 /release/artifacts/
