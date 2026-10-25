@@ -1,0 +1,25 @@
+# Pre-gate (recorded 2026-10-25, Helix Linux sandbox, no Metal/Apple Silicon):
+# H1 static check — PR #22's Metal loan fix is in the tree at the session base.
+# Base commit and PR #22 fix commit quoted below; STATIC ANALYSIS ONLY (no run) —
+# the live >4,096-token gate is the runbook's S2 on the M2.
+
+$ git rev-parse HEAD
+af38e089afb493920516051aa712c42803c409bb
+$ git --no-pager log --oneline -n 1 986064ec
+986064ec metal: no expert-cache loan in the CLI prompt path either (the 4K+ prompt of a plain strata run aborted in ExpertCache::fill_slot_queued)
+$ grep -n -B10 -A2 "no loan of expert-cache slots" src/program/generate.cpp
+15380-                if (!o.prefill_auto) o.prefill_chunk = chunk;
+15381-            }
+15382-            if (o.prefill_auto) {
+15383-                o.prefill_chunk = k > 0 ? chunk : request_chunk(n_batched, 1024);
+15384-                std::fprintf(stderr, "strata generate: prompt chunk auto: %lld tokens\n", (long long) o.prefill_chunk);
+15385-            } else if (chunk != o.prefill_chunk) {
+15386-                k = 0;                                 // a fixed chunk that does not fit: its own buffers, as before
+15387-            }
+15388-            const int64_t blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
+15389-#if defined(STRATA_GPU_METAL)
+15390:            k = 0;   // Metal: no loan of expert-cache slots (the prompt buffers are the Metal window's own); the refill after it copied into given-back allocations
+15391-#endif
+15392-            if (k > 0) {   // the lent slots are refilled after the prompt
+$ grep -c "prompt path borrows" src/program/generate.cpp  (source, not a log — informational)
+7

@@ -1,0 +1,45 @@
+{
+ "exe": "./build-metal/strata",
+ "args": "--native /Users/yebyen/Documents/Strata/models/qwen36/Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf --ctx 16384",
+ "sizes": [
+  4201
+ ],
+ "chunks": [
+  512
+ ],
+ "rounds": 1,
+ "gen": 128,
+ "gate": 5.0,
+ "date": "2026-10-25",
+ "rows": [
+  {
+   "produced": 119,
+   "prompt_len": 4201,
+   "prompt_ms": 240877.9,
+   "decode_ms": 12100.2,
+   "finish": "stop",
+   "reuse": 0,
+   "fresh": 4201,
+   "ttft_s": 240.93,
+   "pp": [
+    "PP 512 4201 19590 26.1",
+    "PP 1024 4201 41260 24.8",
+    "PP 1536 4201 66061 23.3",
+    "PP 2048 4201 93961 21.8",
+    "PP 2560 4201 124617 20.5",
+    "PP 3072 4201 157942 19.5",
+    "PP 3584 4201 193507 18.5",
+    "PP 4096 4201 232374 17.6",
+    "PP 4200 4201 240763 17.4"
+   ],
+   "chunk": 512,
+   "size": 4201,
+   "round": 0,
+   "prompt_tok_s": 17.440371242027602,
+   "decode_tok_s": 9.834548189286126
+  }
+ ],
+ "table_md": "| Prompt tokens | --prefill | TTFT ms | prompt tok/s | vs token-by-token |\n|---:|---:|---:|---:|---:|\n| 4201 | 512 | 240930 | 17.4 | - |\n| 4201 | (baseline refused/absent) | - | - | - |",
+ "chunk_ratios": {},
+ "gate_verdict": "chunk 512: incomplete (a row is missing, its start was refused, or the baseline is absent) - not a flip candidate this run"
+}

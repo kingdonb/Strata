@@ -1,0 +1,635 @@
+[strata] 2026-10-13 17:27:22 engine started: /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 32768 --mmap-experts
+strata generate: memory guard: the available RAM cannot be read; parking and session save/restore are refused
+strata generate: PCIe probe failed -> pcie_frac default 0.55
+strata generate: this CPU has no AVX-512: the expert kernels run on ggml-cpu vec_dot (no AVX2: the older-CPU build) (multi-token for the i-quant gate/up rows)
+strata generate: native pack: /Users/yebyen/w/Strata-data/packs/q2_0 experts (largest blob 1.38 MB), token embedding Q3_K in mapped host memory (260 MiB, 0.5 s)
+strata generate: 1416 MiB of weights loaded from /Users/yebyen/w/Strata-data/packs/q2_0 in 1.0 s (303 canonical tensors skipped: served natively)
+strata generate: 301 native projection matrices, 1376.20 MiB of weights, in 2.6 s
+strata generate: PLE direct read probe: 90121 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: profile /Users/yebyen/w/Strata/data/expert-profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: PLE on, table 320001536 rows of /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf
+strata generate: experimental native Q5_K head, 437043200 bytes, in 0.8 s
+strata generate: GPU 0: Apple M2, compute capability 0.0
+strata generate: experts via mmap (--mmap-experts; the GGUF shards in place, no experts.bin)
+strata generate: CPU pool tasks/phase: 24 (automatic), participating threads: 8
+strata generate: 7 pool workers on logical processors 1,2,3,4,5,6,7, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: not available on this system
+strata generate: expert cache 64 slots, 0.08 GiB of VRAM; policy is
+strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,
+                 so a reply can differ slightly from a run without the cache (same quality:
+                 bench/results/2026-09-27-cache-parity).
+                 PROFILE, ranked by routing frequency, no eviction.
+strata generate: the profile fill asks for 256 pairs ahead (STRATA_FILL_AHEAD)
+strata generate: pre-filled 64 of 64 slots from the profile in 0.0 s (3084 MB/s); slot 0 verified
+strata generate: routing-aware prefetch on (the next layer's router, file tier)
+strata generate: R4 hit path ON - resident experts are computed on the GPU
+strata generate: 7 expert-pool workers + the host thread
+strata generate: session is up (engine 0.1.44-metal)
+strata generate: token graph hit path: 64 resident experts, decided on the device
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)
+strata metal stream: experts read from /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf.experts (one request per expert)
+strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): 290 matrices, 680 MB, made in 1026 ms
+strata metal stream: 789 dense tensors read into memory (2.36 GB, 1.5 s; 290 left out)
+strata metal: decode window on Apple M2: /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf streamed from the SSD (experts) (37.6 GB), 32896 cells, PLE on, ready in 9761 ms
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off (STRATA_ADAPT_OVERLAP=1 turns it on)
+strata serve: 10164 MiB of VRAM free with everything loaded
+strata metal stream: 3.00 GB of the host code's device weight copies given back (unused by the Metal window)
+strata metal stream: only 1.0 GB left for the expert arena (the GPU working set 19.1 GB, RAM 25.8 GB, 3.7 GB allocated): expect a low hit rate
+strata metal stream: 3.69 GB allocated before the arena (the process holds 5.94 GB, 0.88 GB resident); RAM 25.8 GB (6.2 GB available, 7.0 GB kept for macOS), GPU working set 19.1 GB
+strata metal stream: planned resident footprint 7.4 GB = arena 1.0 + 5.9 held before it + 0.5 reserved for the n-gram table; cap 18.8 GB = the lesser of the GPU working set 19.1 GB and the RAM 25.8 GB less 7.0 GB left to macOS and its file cache
+strata metal stream: the arena's fill stopped after 0.00 GB: macOS's free memory reached what it keeps; 0.20 GB of the arena (142 slots) stay unused
+strata metal stream: expert arena 0.80 GB, 576 slots in 1 size classes, 0 experts read from the profile's top (24576 ranked) in 0.0 s (0.00 GB/s); 6 I/O threads, read-ahead top 10; 1 buffers
+mtl: compile failed:
+In module 'monolithic_metal' imported from <built-in>:1:
+/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/lib/clang/32023.886/include/metal/metal_cooperative_tensor:389:62: error: cannot initialize a parameter of type 'void *' with an rvalue of type 'const void *'
+    Layout::copy_construct(static_cast<thread void *>(this), static_cast<const thread void *>(&other));
+                                                             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+qsa_prompt.metal:234:16: note: in instantiation of member function 'metal::cooperative_tensor<float, metal::extents<int, 18446744073709551615, 18446744073709551615>, mpp::tensor_ops::__mutmul2d_detail::__operand_layout<{16, 64, 32, false, true, false, 1}, mpp::tensor_ops::__mutmul2d_detail::__matmul2d_cooperative_operand_index::destination, metal::execution_simdgroups<1>, half, half, float, int>>::cooperative_tensor' requested here
+    auto tot = acc;   // the running output; acc takes one chunk (fresh each chunk: on the M4 a run does not accumulate
+               ^
+/System/Library/Frameworks/MetalPerformancePrimitives.framework/Headers/__impl/MPPTensorOpsMatMul2dImpl.h:2574:63: note: passing argument to parameter 'other' here
+  static void copy_construct(thread void *this_, thread void *other)
+                                                              ^
+
+[strata] 2026-10-13 17:35:37 engine started: /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 32768 --mmap-experts
+strata generate: memory guard: the available RAM cannot be read; parking and session save/restore are refused
+strata generate: PCIe probe failed -> pcie_frac default 0.55
+strata generate: this CPU has no AVX-512: the expert kernels run on ggml-cpu vec_dot (no AVX2: the older-CPU build) (multi-token for the i-quant gate/up rows)
+strata generate: native pack: /Users/yebyen/w/Strata-data/packs/q2_0 experts (largest blob 1.38 MB), token embedding Q3_K in mapped host memory (260 MiB, 0.4 s)
+strata generate: 1416 MiB of weights loaded from /Users/yebyen/w/Strata-data/packs/q2_0 in 0.7 s (303 canonical tensors skipped: served natively)
+strata generate: 301 native projection matrices, 1376.20 MiB of weights, in 0.4 s
+strata generate: PLE direct read probe: 98135 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: profile /Users/yebyen/w/Strata/data/expert-profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: PLE on, table 320001536 rows of /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf
+strata generate: experimental native Q5_K head, 437043200 bytes, in 0.4 s
+strata generate: GPU 0: Apple M2, compute capability 0.0
+strata generate: experts via mmap (--mmap-experts; the GGUF shards in place, no experts.bin)
+strata generate: CPU pool tasks/phase: 24 (automatic), participating threads: 8
+strata generate: 7 pool workers on logical processors 1,2,3,4,5,6,7, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: not available on this system
+strata generate: expert cache 64 slots, 0.08 GiB of VRAM; policy is
+strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,
+                 so a reply can differ slightly from a run without the cache (same quality:
+                 bench/results/2026-09-27-cache-parity).
+                 PROFILE, ranked by routing frequency, no eviction.
+strata generate: the profile fill asks for 256 pairs ahead (STRATA_FILL_AHEAD)
+strata generate: pre-filled 64 of 64 slots from the profile in 0.0 s (3797 MB/s); slot 0 verified
+strata generate: routing-aware prefetch on (the next layer's router, file tier)
+strata generate: R4 hit path ON - resident experts are computed on the GPU
+strata generate: 7 expert-pool workers + the host thread
+strata generate: session is up (engine 0.1.44-metal)
+strata generate: token graph hit path: 64 resident experts, decided on the device
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)
+strata metal stream: experts read from /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf.experts (one request per expert)
+strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): 290 matrices, 680 MB, made in 508 ms
+strata metal stream: 789 dense tensors read into memory (2.36 GB, 1.0 s; 290 left out)
+strata metal: decode window on Apple M2: /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf streamed from the SSD (experts) (37.6 GB), 32896 cells, PLE on, ready in 1734 ms
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off (STRATA_ADAPT_OVERLAP=1 turns it on)
+strata serve: 10164 MiB of VRAM free with everything loaded
+strata metal stream: 3.00 GB of the host code's device weight copies given back (unused by the Metal window)
+strata metal stream: only 1.7 GB left for the expert arena (the GPU working set 19.1 GB, RAM 25.8 GB, 3.7 GB allocated): expect a low hit rate
+strata metal stream: 3.69 GB allocated before the arena (the process holds 5.93 GB, 4.96 GB resident); RAM 25.8 GB (9.2 GB available, 7.0 GB kept for macOS), GPU working set 19.1 GB
+strata metal stream: planned resident footprint 8.2 GB = arena 1.7 + 5.9 held before it + 0.5 reserved for the n-gram table; cap 18.8 GB = the lesser of the GPU working set 19.1 GB and the RAM 25.8 GB less 7.0 GB left to macOS and its file cache
+strata metal stream: expert arena 1.74 GB, 1253 slots in 1 size classes, 1253 experts read from the profile's top (24576 ranked) in 0.5 s (3.29 GB/s); 6 I/O threads, read-ahead top 10; 1 buffers
+strata metal stream: the arena is small: the prompt's 1.60 GB of buffers are their own allocation, not a region of its slots
+strata metal: prompts on the matrix units in chunks of 1024 (experts v2, QSA v1, matmul2d layout other; 1.60 GB of buffers, in the expert arena while a prompt runs)
+strata metal stream: resident footprint after the fill: the process holds 7.7 GB (6.7 GB resident), planned 8.2 GB, cap 18.8 GB
+strata serve: prompt 64 tokens = 0 reused + 64 read in 15553 ms (4.1 tok/s), 34 generated in 7110 ms (4.8 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 73 tokens = 59 reused + 14 read in 4683 ms (3.0 tok/s), 37 generated in 7372 ms (5.0 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 103 tokens = 68 reused + 35 read in 9358 ms (3.7 tok/s), 46 generated in 9169 ms (5.0 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 57 tokens = 0 reused + 57 read in 16905 ms (3.4 tok/s), 462 generated in 104764 ms (4.4 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 146 tokens = 52 reused + 94 read in 7680 ms (12.2 tok/s), 1013 generated in 217445 ms (4.7 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 975 tokens = 141 reused + 834 read in 10435 ms (79.9 tok/s), 1 generated in 249 ms (4.0 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 953 tokens = 0 reused + 953 read in 12050 ms (79.1 tok/s), 1 generated in 333 ms (3.0 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 1045 tokens = 0 reused + 1045 read in 13805 ms (75.7 tok/s), 2 generated in 555 ms (3.6 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 1081 tokens = 1040 reused + 41 read in 11871 ms (3.5 tok/s), 2 generated in 552 ms (3.6 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+[strata] 2026-10-13 18:27:49 engine started: /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 32768 --mmap-experts
+strata generate: memory guard: the available RAM cannot be read; parking and session save/restore are refused
+strata generate: PCIe probe failed -> pcie_frac default 0.55
+strata generate: this CPU has no AVX-512: the expert kernels run on ggml-cpu vec_dot (no AVX2: the older-CPU build) (multi-token for the i-quant gate/up rows)
+strata generate: native pack: /Users/yebyen/w/Strata-data/packs/q2_0 experts (largest blob 1.38 MB), token embedding Q3_K in mapped host memory (260 MiB, 0.4 s)
+strata generate: 1416 MiB of weights loaded from /Users/yebyen/w/Strata-data/packs/q2_0 in 0.7 s (303 canonical tensors skipped: served natively)
+strata generate: 301 native projection matrices, 1376.20 MiB of weights, in 2.3 s
+strata generate: PLE direct read probe: 104622 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: profile /Users/yebyen/w/Strata/data/expert-profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: PLE on, table 320001536 rows of /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf
+strata generate: experimental native Q5_K head, 437043200 bytes, in 0.7 s
+strata generate: GPU 0: Apple M2, compute capability 0.0
+strata generate: experts via mmap (--mmap-experts; the GGUF shards in place, no experts.bin)
+strata generate: CPU pool tasks/phase: 24 (automatic), participating threads: 8
+strata generate: 7 pool workers on logical processors 1,2,3,4,5,6,7, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: not available on this system
+strata generate: expert cache 64 slots, 0.08 GiB of VRAM; policy is
+strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,
+                 so a reply can differ slightly from a run without the cache (same quality:
+                 bench/results/2026-09-27-cache-parity).
+                 PROFILE, ranked by routing frequency, no eviction.
+strata generate: the profile fill asks for 256 pairs ahead (STRATA_FILL_AHEAD)
+strata generate: pre-filled 64 of 64 slots from the profile in 0.0 s (5114 MB/s); slot 0 verified
+strata generate: routing-aware prefetch on (the next layer's router, file tier)
+strata generate: R4 hit path ON - resident experts are computed on the GPU
+strata generate: 7 expert-pool workers + the host thread
+strata generate: session is up (engine 0.1.44-metal)
+strata generate: token graph hit path: 64 resident experts, decided on the device
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)
+strata metal stream: experts read from /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf.experts (one request per expert)
+strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): 290 matrices, 680 MB, made in 557 ms
+strata metal stream: 789 dense tensors read into memory (2.36 GB, 0.9 s; 290 left out)
+strata metal: decode window on Apple M2: /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf streamed from the SSD (experts) (37.6 GB), 32896 cells, PLE on, ready in 1665 ms
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off (STRATA_ADAPT_OVERLAP=1 turns it on)
+strata serve: 10164 MiB of VRAM free with everything loaded
+strata metal stream: 3.00 GB of the host code's device weight copies given back (unused by the Metal window)
+strata metal stream: only 1.0 GB left for the expert arena (the GPU working set 19.1 GB, RAM 25.8 GB, 3.7 GB allocated): expect a low hit rate
+strata metal stream: 3.69 GB allocated before the arena (the process holds 5.93 GB, 0.27 GB resident); RAM 25.8 GB (6.0 GB available, 7.0 GB kept for macOS), GPU working set 19.1 GB
+strata metal stream: planned resident footprint 7.4 GB = arena 1.0 + 5.9 held before it + 0.5 reserved for the n-gram table; cap 18.8 GB = the lesser of the GPU working set 19.1 GB and the RAM 25.8 GB less 7.0 GB left to macOS and its file cache
+strata metal stream: the arena's fill stopped after 0.00 GB: macOS's free memory reached what it keeps; 0.20 GB of the arena (142 slots) stay unused
+strata metal stream: expert arena 0.80 GB, 576 slots in 1 size classes, 0 experts read from the profile's top (24576 ranked) in 0.0 s (0.00 GB/s); 6 I/O threads, read-ahead top 10; 1 buffers
+strata serve: metal prompt: no arena region for the prompt buffers
+[strata] 2026-10-13 18:49:08 engine started: /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 32768 --mmap-experts
+strata generate: memory guard: the available RAM cannot be read; parking and session save/restore are refused
+strata generate: PCIe probe failed -> pcie_frac default 0.55
+strata generate: this CPU has no AVX-512: the expert kernels run on ggml-cpu vec_dot (no AVX2: the older-CPU build) (multi-token for the i-quant gate/up rows)
+strata generate: native pack: /Users/yebyen/w/Strata-data/packs/q2_0 experts (largest blob 1.38 MB), token embedding Q3_K in mapped host memory (260 MiB, 0.4 s)
+strata generate: 1416 MiB of weights loaded from /Users/yebyen/w/Strata-data/packs/q2_0 in 0.8 s (303 canonical tensors skipped: served natively)
+strata generate: 301 native projection matrices, 1376.20 MiB of weights, in 2.5 s
+strata generate: PLE direct read probe: 107244 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: profile /Users/yebyen/w/Strata/data/expert-profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: PLE on, table 320001536 rows of /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf
+strata generate: experimental native Q5_K head, 437043200 bytes, in 0.8 s
+strata generate: GPU 0: Apple M2, compute capability 0.0
+strata generate: experts via mmap (--mmap-experts; the GGUF shards in place, no experts.bin)
+strata generate: CPU pool tasks/phase: 24 (automatic), participating threads: 8
+strata generate: 7 pool workers on logical processors 1,2,3,4,5,6,7, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: not available on this system
+strata generate: expert cache 64 slots, 0.08 GiB of VRAM; policy is
+strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,
+                 so a reply can differ slightly from a run without the cache (same quality:
+                 bench/results/2026-09-27-cache-parity).
+                 PROFILE, ranked by routing frequency, no eviction.
+strata generate: the profile fill asks for 256 pairs ahead (STRATA_FILL_AHEAD)
+strata generate: pre-filled 64 of 64 slots from the profile in 0.0 s (2135 MB/s); slot 0 verified
+strata generate: routing-aware prefetch on (the next layer's router, file tier)
+strata generate: R4 hit path ON - resident experts are computed on the GPU
+strata generate: 7 expert-pool workers + the host thread
+strata generate: session is up (engine 0.1.44-metal)
+strata generate: token graph hit path: 64 resident experts, decided on the device
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)
+strata metal stream: experts read from /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf.experts (one request per expert)
+strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): 290 matrices, 680 MB, made in 561 ms
+strata metal stream: 789 dense tensors read into memory (2.36 GB, 0.9 s; 290 left out)
+strata metal: decode window on Apple M2: /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf streamed from the SSD (experts) (37.6 GB), 32896 cells, PLE on, ready in 1624 ms
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off (STRATA_ADAPT_OVERLAP=1 turns it on)
+strata serve: 10164 MiB of VRAM free with everything loaded
+strata metal stream: 3.00 GB of the host code's device weight copies given back (unused by the Metal window)
+strata metal stream: only 1.0 GB left for the expert arena (the GPU working set 19.1 GB, RAM 25.8 GB, 3.7 GB allocated): expect a low hit rate
+strata metal stream: 3.69 GB allocated before the arena (the process holds 5.93 GB, 3.33 GB resident); RAM 25.8 GB (7.4 GB available, 7.0 GB kept for macOS), GPU working set 19.1 GB
+strata metal stream: planned resident footprint 7.4 GB = arena 1.0 + 5.9 held before it + 0.5 reserved for the n-gram table; cap 18.8 GB = the lesser of the GPU working set 19.1 GB and the RAM 25.8 GB less 7.0 GB left to macOS and its file cache
+strata metal stream: the arena's fill stopped after 0.00 GB: macOS's free memory reached what it keeps; 0.20 GB of the arena (142 slots) stay unused
+strata metal stream: expert arena 0.80 GB, 576 slots in 1 size classes, 0 experts read from the profile's top (24576 ranked) in 0.0 s (0.00 GB/s); 6 I/O threads, read-ahead top 10; 1 buffers
+strata metal stream: the arena is small: the prompt's 1.60 GB of buffers are their own allocation, not a region of its slots
+strata metal: prompts on the matrix units in chunks of 1024 (experts v2, QSA v1, matmul2d layout other; 1.60 GB of buffers, in the expert arena while a prompt runs)
+strata metal stream: resident footprint after the fill: the process holds 6.0 GB (3.4 GB resident), planned 7.2 GB, cap 18.8 GB
+strata serve: prompt 51 tokens = 0 reused + 51 read in 12144 ms (4.2 tok/s), 103 generated in 28746 ms (3.6 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 52 tokens = 0 reused + 52 read in 15205 ms (3.4 tok/s), 24 generated in 6482 ms (3.7 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 147 tokens = 47 reused + 100 read in 6234 ms (16.0 tok/s), 239 generated in 65038 ms (3.7 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 291 tokens = 142 reused + 149 read in 7869 ms (18.9 tok/s), 385 generated in 105379 ms (3.7 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 395 tokens = 286 reused + 109 read in 6417 ms (17.0 tok/s), 149 generated in 41910 ms (3.6 tok/s), drafts accepted 0 of 0, 4 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 602 tokens = 390 reused + 212 read in 9027 ms (23.5 tok/s), 2 generated in 580 ms (3.5 tok/s), drafts accepted 0 of 0, 5 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 623 tokens = 597 reused + 26 read in 6700 ms (3.9 tok/s), 218 generated in 59118 ms (3.7 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 929 tokens = 618 reused + 311 read in 7948 ms (39.1 tok/s), 170 generated in 45472 ms (3.7 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 56 tokens = 0 reused + 56 read in 15903 ms (3.5 tok/s), 189 generated in 52841 ms (3.6 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+[strata] 2026-10-13 22:48:13 engine started: /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 32768 --mmap-experts
+strata generate: memory guard: the available RAM cannot be read; parking and session save/restore are refused
+strata generate: PCIe probe failed -> pcie_frac default 0.55
+strata generate: this CPU has no AVX-512: the expert kernels run on ggml-cpu vec_dot (no AVX2: the older-CPU build) (multi-token for the i-quant gate/up rows)
+strata generate: native pack: /Users/yebyen/w/Strata-data/packs/q2_0 experts (largest blob 1.38 MB), token embedding Q3_K in mapped host memory (260 MiB, 0.4 s)
+strata generate: 1416 MiB of weights loaded from /Users/yebyen/w/Strata-data/packs/q2_0 in 0.7 s (303 canonical tensors skipped: served natively)
+strata generate: 301 native projection matrices, 1376.20 MiB of weights, in 2.3 s
+strata generate: PLE direct read probe: 100032 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: profile /Users/yebyen/w/Strata/data/expert-profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: PLE on, table 320001536 rows of /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf
+strata generate: experimental native Q5_K head, 437043200 bytes, in 0.7 s
+strata generate: GPU 0: Apple M2, compute capability 0.0
+strata generate: experts via mmap (--mmap-experts; the GGUF shards in place, no experts.bin)
+strata generate: CPU pool tasks/phase: 24 (automatic), participating threads: 8
+strata generate: 7 pool workers on logical processors 1,2,3,4,5,6,7, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: not available on this system
+strata generate: expert cache 64 slots, 0.08 GiB of VRAM; policy is
+strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,
+                 so a reply can differ slightly from a run without the cache (same quality:
+                 bench/results/2026-09-27-cache-parity).
+                 PROFILE, ranked by routing frequency, no eviction.
+strata generate: the profile fill asks for 256 pairs ahead (STRATA_FILL_AHEAD)
+strata generate: pre-filled 64 of 64 slots from the profile in 0.0 s (5136 MB/s); slot 0 verified
+strata generate: routing-aware prefetch on (the next layer's router, file tier)
+strata generate: R4 hit path ON - resident experts are computed on the GPU
+strata generate: 7 expert-pool workers + the host thread
+strata generate: session is up (engine 0.1.44.1-metal)
+strata generate: token graph hit path: 64 resident experts, decided on the device
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)
+strata metal stream: experts read from /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf.experts (one request per expert)
+strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): 290 matrices, 680 MB, made in 489 ms
+strata metal stream: 789 dense tensors read into memory (2.36 GB, 0.8 s; 290 left out)
+strata metal: decode window on Apple M2: /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf streamed from the SSD (experts) (37.6 GB), 32896 cells, PLE on, ready in 1447 ms
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off (STRATA_ADAPT_OVERLAP=1 turns it on)
+strata serve: 10164 MiB of VRAM free with everything loaded
+strata metal stream: 3.00 GB of the host code's device weight copies given back (unused by the Metal window)
+strata metal stream: 3.69 GB allocated before the arena (the process holds 5.93 GB, 5.18 GB resident); RAM 25.8 GB (11.8 GB available, 7.0 GB kept for macOS), GPU working set 19.1 GB
+strata metal stream: planned resident footprint 10.7 GB = arena 4.3 + 5.9 held before it + 0.5 reserved for the n-gram table; cap 18.8 GB = the lesser of the GPU working set 19.1 GB and the RAM 25.8 GB less 7.0 GB left to macOS and its file cache
+strata metal stream: expert arena 4.29 GB, 3079 slots in 1 size classes, 3079 experts read from the profile's top (24576 ranked) in 1.3 s (3.28 GB/s); 6 I/O threads, read-ahead top 10; 1 buffers
+strata metal stream: 1.60 GB of the arena (1147 slots) hold a prompt's buffers while it runs
+strata metal: prompts on the matrix units in chunks of 1024 (experts v2, QSA v1, matmul2d layout other; 1.60 GB of buffers, in the expert arena while a prompt runs)
+strata metal stream: resident footprint after the fill: the process holds 10.2 GB (9.5 GB resident), planned 10.7 GB, cap 18.8 GB
+strata serve: prompt 83 tokens = 0 reused + 83 read in 7433 ms (11.2 tok/s), 80 generated in 15505 ms (5.2 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 69 tokens = 0 reused + 69 read in 10242 ms (6.7 tok/s), 138 generated in 25713 ms (5.4 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 57 tokens = 0 reused + 57 read in 9076 ms (6.3 tok/s), 148 generated in 25991 ms (5.7 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 129 tokens = 52 reused + 77 read in 4562 ms (16.9 tok/s), 127 generated in 21426 ms (5.9 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 226 tokens = 124 reused + 102 read in 4380 ms (23.3 tok/s), 210 generated in 35785 ms (5.9 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 48 tokens = 0 reused + 48 read in 7696 ms (6.2 tok/s), 177 generated in 28064 ms (6.3 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 193 tokens = 43 reused + 150 read in 6258 ms (24.0 tok/s), 204 generated in 35271 ms (5.8 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 57 tokens = 0 reused + 57 read in 8010 ms (7.1 tok/s), 45 generated in 7581 ms (5.9 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5027 tokens = 0 reused + 5027 read in 52377 ms (96.0 tok/s), 16 generated in 3124 ms (5.1 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5030 tokens = 5009 reused + 21 read in 3597 ms (5.8 tok/s), 195 generated in 40683 ms (4.8 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5037 tokens = 5009 reused + 28 read in 5201 ms (5.4 tok/s), 31 generated in 6288 ms (4.9 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5170 tokens = 5067 reused + 103 read in 5373 ms (19.2 tok/s), 47 generated in 9787 ms (4.8 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5314 tokens = 5216 reused + 98 read in 5289 ms (18.5 tok/s), 227 generated in 44752 ms (5.1 tok/s), drafts accepted 0 of 0, 4 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5030 tokens = 5009 reused + 21 read in 3458 ms (6.1 tok/s), 626 generated in 112039 ms (5.6 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5688 tokens = 5655 reused + 33 read in 4995 ms (6.6 tok/s), 124 generated in 24289 ms (5.1 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 6051 tokens = 5811 reused + 240 read in 6936 ms (34.6 tok/s), 79 generated in 15640 ms (5.1 tok/s), drafts accepted 0 of 0, 4 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 6331 tokens = 6129 reused + 202 read in 6319 ms (32.0 tok/s), 591 generated in 118258 ms (5.0 tok/s), drafts accepted 0 of 0, 5 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 6951 tokens = 6921 reused + 30 read in 6823 ms (4.4 tok/s), 76 generated in 15771 ms (4.8 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 7320 tokens = 7026 reused + 294 read in 7607 ms (38.6 tok/s), 189 generated in 35019 ms (5.4 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 8009 tokens = 7508 reused + 501 read in 8155 ms (61.4 tok/s), 186 generated in 34582 ms (5.4 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 9486 tokens = 8194 reused + 1292 read in 16473 ms (78.4 tok/s), 85 generated in 16337 ms (5.2 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 10065 tokens = 9570 reused + 495 read in 8200 ms (60.4 tok/s), 217 generated in 40875 ms (5.3 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 11148 tokens = 10281 reused + 867 read in 9853 ms (88.0 tok/s), 373 generated in 70072 ms (5.3 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 11845 tokens = 11520 reused + 325 read in 7623 ms (42.6 tok/s), 151 generated in 28198 ms (5.4 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 12182 tokens = 11995 reused + 187 read in 5856 ms (31.9 tok/s), 473 generated in 92936 ms (5.1 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 12789 tokens = 12654 reused + 135 read in 5813 ms (23.2 tok/s), 557 generated in 112563 ms (4.9 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 13450 tokens = 13345 reused + 105 read in 5596 ms (18.8 tok/s), 129 generated in 24900 ms (5.2 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 14287 tokens = 13578 reused + 709 read in 8716 ms (81.3 tok/s), 211 generated in 42526 ms (5.0 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 15691 tokens = 14497 reused + 1194 read in 16193 ms (73.7 tok/s), 95 generated in 19724 ms (4.8 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 17063 tokens = 15785 reused + 1278 read in 16724 ms (76.4 tok/s), 259 generated in 51321 ms (5.0 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 17088 tokens = 17058 reused + 30 read in 4775 ms (6.3 tok/s), 273 generated in 52254 ms (5.2 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 17815 tokens = 17360 reused + 455 read in 8079 ms (56.3 tok/s), 155 generated in 30229 ms (5.1 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: cancelled request keeps its conversation: 17773 tokens live
+strata serve: prompt 17778 tokens = 0 reused + 17773 of 17778 read in 176752 ms (100.6 tok/s), 0 generated in 0 ms (0.0 tok/s), drafts accepted 0 of 0, 3 checkpoints (cancelled)
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 17857 tokens = 17773 reused + 84 read in 4927 ms (17.0 tok/s), 45 generated in 9179 ms (4.9 tok/s), drafts accepted 0 of 0, 4 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 17927 tokens = 17901 reused + 26 read in 4872 ms (5.3 tok/s), 130 generated in 25321 ms (5.1 tok/s), drafts accepted 0 of 0, 5 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 18159 tokens = 18056 reused + 103 read in 4890 ms (21.1 tok/s), 311 generated in 59124 ms (5.3 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5032 tokens = 0 reused + 5032 read in 51324 ms (98.0 tok/s), 37 generated in 7855 ms (4.7 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: cancelled request keeps its conversation: 18933 tokens live
+strata serve: prompt 18938 tokens = 5009 reused + 13924 of 13929 read in 138037 ms (100.9 tok/s), 0 generated in 0 ms (0.0 tok/s), drafts accepted 0 of 0, 2 checkpoints (cancelled)
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5209 tokens = 5009 reused + 200 read in 6383 ms (31.3 tok/s), 217 generated in 42542 ms (5.1 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5033 tokens = 5009 reused + 24 read in 4217 ms (5.7 tok/s), 31 generated in 6549 ms (4.7 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5204 tokens = 5063 reused + 141 read in 5405 ms (26.1 tok/s), 110 generated in 21355 ms (5.2 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 19013 tokens = 5009 reused + 14004 read in 135500 ms (103.4 tok/s), 100 generated in 19431 ms (5.1 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 19194 tokens = 19112 reused + 82 read in 5298 ms (15.5 tok/s), 28 generated in 6014 ms (4.7 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 19362 tokens = 19221 reused + 141 read in 5975 ms (23.6 tok/s), 256 generated in 55881 ms (4.6 tok/s), drafts accepted 0 of 0, 4 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 19959 tokens = 19617 reused + 342 read in 7502 ms (45.6 tok/s), 554 generated in 104969 ms (5.3 tok/s), drafts accepted 0 of 0, 5 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 20701 tokens = 20512 reused + 189 read in 6726 ms (28.1 tok/s), 230 generated in 45433 ms (5.1 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 90 tokens = 0 reused + 90 read in 4607 ms (19.5 tok/s), 47 generated in 8074 ms (5.8 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 26951 tokens = 0 reused + 26951 read in 260743 ms (103.4 tok/s), 782 generated in 149374 ms (5.2 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 218 tokens = 0 reused + 218 read in 5989 ms (36.4 tok/s), 202 generated in 36394 ms (5.6 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 27987 tokens = 0 reused + 27987 read in 268987 ms (104.0 tok/s), 95 generated in 18522 ms (5.1 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 28156 tokens = 28081 reused + 75 read in 4956 ms (15.1 tok/s), 89 generated in 19151 ms (4.6 tok/s), drafts accepted 0 of 0, 4 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 28319 tokens = 28244 reused + 75 read in 4498 ms (16.7 tok/s), 382 generated in 69950 ms (5.5 tok/s), drafts accepted 0 of 0, 5 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 28760 tokens = 28700 reused + 60 read in 11055 ms (5.4 tok/s), 1 generated in 162 ms (6.2 tok/s), drafts accepted 0 of 0, 6 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+[strata] 2026-10-15 20:36:14 engine started: /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 32768 --mmap-experts
+strata generate: memory guard: the available RAM cannot be read; parking and session save/restore are refused
+strata generate: PCIe probe failed -> pcie_frac default 0.55
+strata generate: this CPU has no AVX-512: the expert kernels run on ggml-cpu vec_dot (no AVX2: the older-CPU build) (multi-token for the i-quant gate/up rows)
+strata generate: native pack: /Users/yebyen/w/Strata-data/packs/q2_0 experts (largest blob 1.38 MB), token embedding Q3_K in mapped host memory (260 MiB, 0.4 s)
+strata generate: 1416 MiB of weights loaded from /Users/yebyen/w/Strata-data/packs/q2_0 in 0.7 s (303 canonical tensors skipped: served natively)
+strata generate: 301 native projection matrices, 1376.20 MiB of weights, in 2.3 s
+strata generate: PLE direct read probe: 106074 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: profile /Users/yebyen/w/Strata/data/expert-profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: PLE on, table 320001536 rows of /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf
+strata generate: experimental native Q5_K head, 437043200 bytes, in 0.7 s
+strata generate: GPU 0: Apple M2, compute capability 0.0
+strata generate: experts via mmap (--mmap-experts; the GGUF shards in place, no experts.bin)
+strata generate: CPU pool tasks/phase: 24 (automatic), participating threads: 8
+strata generate: 7 pool workers on logical processors 1,2,3,4,5,6,7, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: not available on this system
+strata generate: expert cache 64 slots, 0.08 GiB of VRAM; policy is
+strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,
+                 so a reply can differ slightly from a run without the cache (same quality:
+                 bench/results/2026-09-27-cache-parity).
+                 PROFILE, ranked by routing frequency, no eviction.
+strata generate: the profile fill asks for 256 pairs ahead (STRATA_FILL_AHEAD)
+strata generate: pre-filled 64 of 64 slots from the profile in 0.0 s (5656 MB/s); slot 0 verified
+strata generate: routing-aware prefetch on (the next layer's router, file tier)
+strata generate: R4 hit path ON - resident experts are computed on the GPU
+strata generate: 7 expert-pool workers + the host thread
+strata generate: session is up (engine 0.1.44.1-metal)
+strata generate: token graph hit path: 64 resident experts, decided on the device
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)
+strata metal stream: experts read from /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf.experts (one request per expert)
+strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): 290 matrices, 680 MB, made in 420 ms
+strata metal stream: 789 dense tensors read into memory (2.36 GB, 0.3 s; 290 left out)
+strata metal: decode window on Apple M2: /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf streamed from the SSD (experts) (37.6 GB), 32896 cells, PLE on, ready in 839 ms
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off (STRATA_ADAPT_OVERLAP=1 turns it on)
+strata serve: 10164 MiB of VRAM free with everything loaded
+strata metal stream: 3.00 GB of the host code's device weight copies given back (unused by the Metal window)
+strata metal stream: only 1.4 GB left for the expert arena (the GPU working set 19.1 GB, RAM 25.8 GB, 3.7 GB allocated): expect a low hit rate
+strata metal stream: 3.69 GB allocated before the arena (the process holds 5.93 GB, 1.36 GB resident); RAM 25.8 GB (8.9 GB available, 7.0 GB kept for macOS), GPU working set 19.1 GB
+strata metal stream: planned resident footprint 7.9 GB = arena 1.4 + 5.9 held before it + 0.5 reserved for the n-gram table; cap 18.8 GB = the lesser of the GPU working set 19.1 GB and the RAM 25.8 GB less 7.0 GB left to macOS and its file cache
+strata metal stream: the arena's fill stopped after 0.00 GB: macOS's free memory reached what it keeps; 0.62 GB of the arena (444 slots) stay unused
+strata metal stream: expert arena 0.80 GB, 576 slots in 1 size classes, 0 experts read from the profile's top (24576 ranked) in 0.0 s (0.00 GB/s); 6 I/O threads, read-ahead top 10; 1 buffers
+strata metal stream: the arena is small: the prompt's 1.60 GB of buffers are their own allocation, not a region of its slots
+strata metal: prompts on the matrix units in chunks of 1024 (experts v2, QSA v1, matmul2d layout other; 1.60 GB of buffers, in the expert arena while a prompt runs)
+strata metal stream: resident footprint after the fill: the process holds 6.0 GB (1.4 GB resident), planned 7.2 GB, cap 18.8 GB
+strata serve: prompt 135 tokens = 0 reused + 135 read in 6796 ms (19.9 tok/s), 116 generated in 32764 ms (3.5 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 199 tokens = 130 reused + 69 read in 15222 ms (4.5 tok/s), 449 generated in 126757 ms (3.5 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 495 tokens = 194 reused + 301 read in 7521 ms (40.0 tok/s), 1404 generated in 395838 ms (3.5 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 539 tokens = 490 reused + 49 read in 11179 ms (4.4 tok/s), 1413 generated in 412680 ms (3.4 tok/s), drafts accepted 0 of 0, 4 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 5680 tokens = 534 reused + 5146 read in 65621 ms (78.4 tok/s), 6723 generated in 1970335 ms (3.4 tok/s), drafts accepted 0 of 0, 5 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 7361 tokens = 0 reused + 7361 read in 93475 ms (78.7 tok/s), 1073 generated in 309689 ms (3.5 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+[strata] 2026-10-17 14:01:59 engine started: /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 32768 --mmap-experts
+strata generate: memory guard: the available RAM cannot be read; parking and session save/restore are refused
+strata generate: PCIe probe failed -> pcie_frac default 0.55
+strata generate: this CPU has no AVX-512: the expert kernels run on ggml-cpu vec_dot (no AVX2: the older-CPU build) (multi-token for the i-quant gate/up rows)
+strata generate: native pack: /Users/yebyen/w/Strata-data/packs/q2_0 experts (largest blob 1.38 MB), token embedding Q3_K in mapped host memory (260 MiB, 0.5 s)
+strata generate: 1416 MiB of weights loaded from /Users/yebyen/w/Strata-data/packs/q2_0 in 0.9 s (303 canonical tensors skipped: served natively)
+strata generate: 301 native projection matrices, 1376.20 MiB of weights, in 3.3 s
+strata generate: PLE direct read probe: 27192 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: profile /Users/yebyen/w/Strata/data/expert-profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: PLE on, table 320001536 rows of /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf
+strata generate: experimental native Q5_K head, 437043200 bytes, in 0.9 s
+strata generate: GPU 0: Apple M2, compute capability 0.0
+strata generate: experts via mmap (--mmap-experts; the GGUF shards in place, no experts.bin)
+strata generate: CPU pool tasks/phase: 24 (automatic), participating threads: 8
+strata generate: 7 pool workers on logical processors 1,2,3,4,5,6,7, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: not available on this system
+strata generate: expert cache 64 slots, 0.08 GiB of VRAM; policy is
+strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,
+                 so a reply can differ slightly from a run without the cache (same quality:
+                 bench/results/2026-09-27-cache-parity).
+                 PROFILE, ranked by routing frequency, no eviction.
+strata generate: the profile fill asks for 256 pairs ahead (STRATA_FILL_AHEAD)
+strata generate: pre-filled 64 of 64 slots from the profile in 0.0 s (2968 MB/s); slot 0 verified
+strata generate: routing-aware prefetch on (the next layer's router, file tier)
+strata generate: R4 hit path ON - resident experts are computed on the GPU
+strata generate: 7 expert-pool workers + the host thread
+strata generate: session is up (engine 0.1.45-metal)
+strata generate: token graph hit path: 64 resident experts, decided on the device
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)
+strata metal stream: experts read from /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf.experts (one request per expert)
+strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): 290 matrices, 680 MB, made in 549 ms
+strata metal stream: 789 dense tensors read into memory (2.36 GB, 1.2 s; 290 left out)
+strata metal: decode window on Apple M2: /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf streamed from the SSD (experts) (37.6 GB), 32896 cells, PLE on, ready in 1904 ms
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off (STRATA_ADAPT_OVERLAP=1 turns it on)
+strata serve: 10164 MiB of VRAM free with everything loaded
+strata metal stream: 3.00 GB of the host code's device weight copies given back (unused by the Metal window)
+strata metal stream: only 1.0 GB left for the expert arena (the GPU working set 19.1 GB, RAM 25.8 GB, 3.7 GB allocated): expect a low hit rate
+strata metal stream: 3.69 GB allocated before the arena (the process holds 5.93 GB, 0.19 GB resident); RAM 25.8 GB (5.5 GB available, 7.0 GB kept for macOS), GPU working set 19.1 GB
+strata metal stream: planned resident footprint 7.4 GB = arena 1.0 + 5.9 held before it + 0.5 reserved for the n-gram table; cap 18.8 GB = the lesser of the GPU working set 19.1 GB and the RAM 25.8 GB less 7.0 GB left to macOS and its file cache
+strata metal stream: the arena's fill stopped after 0.00 GB: macOS's free memory reached what it keeps; 0.20 GB of the arena (142 slots) stay unused
+strata metal stream: expert arena 0.80 GB, 576 slots in 1 size classes, 0 experts read from the profile's top (24576 ranked) in 0.0 s (0.00 GB/s); 6 I/O threads, read-ahead top 10; 1 buffers
+strata metal stream: the arena is small: the prompt's 1.60 GB of buffers are their own allocation, not a region of its slots
+strata metal: prompts on the matrix units in chunks of 1024 (experts v2, QSA v1, matmul2d layout other; 1.60 GB of buffers, in the expert arena while a prompt runs)
+strata metal stream: resident footprint after the fill: the process holds 6.0 GB (0.2 GB resident), planned 7.2 GB, cap 18.8 GB
+strata serve: prompt 8497 tokens = 0 reused + 8497 read in 113711 ms (74.7 tok/s), 427 generated in 121701 ms (3.5 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+[strata] 2026-10-17 14:08:24 engine started: /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 16384 --mmap-experts
+strata generate: memory guard: the available RAM cannot be read; parking and session save/restore are refused
+strata generate: PCIe probe failed -> pcie_frac default 0.55
+strata generate: this CPU has no AVX-512: the expert kernels run on ggml-cpu vec_dot (no AVX2: the older-CPU build) (multi-token for the i-quant gate/up rows)
+strata generate: native pack: /Users/yebyen/w/Strata-data/packs/q2_0 experts (largest blob 1.38 MB), token embedding Q3_K in mapped host memory (260 MiB, 0.2 s)
+strata generate: 1416 MiB of weights loaded from /Users/yebyen/w/Strata-data/packs/q2_0 in 0.7 s (303 canonical tensors skipped: served natively)
+strata generate: 301 native projection matrices, 1376.20 MiB of weights, in 2.3 s
+strata generate: PLE direct read probe: 107530 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: profile /Users/yebyen/w/Strata/data/expert-profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: PLE on, table 320001536 rows of /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf
+strata generate: experimental native Q5_K head, 437043200 bytes, in 0.7 s
+strata generate: GPU 0: Apple M2, compute capability 0.0
+strata generate: experts via mmap (--mmap-experts; the GGUF shards in place, no experts.bin)
+strata generate: CPU pool tasks/phase: 24 (automatic), participating threads: 8
+strata generate: 7 pool workers on logical processors 1,2,3,4,5,6,7, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: not available on this system
+strata generate: expert cache 64 slots, 0.08 GiB of VRAM; policy is
+strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,
+                 so a reply can differ slightly from a run without the cache (same quality:
+                 bench/results/2026-09-27-cache-parity).
+                 PROFILE, ranked by routing frequency, no eviction.
+strata generate: the profile fill asks for 256 pairs ahead (STRATA_FILL_AHEAD)
+strata generate: pre-filled 64 of 64 slots from the profile in 0.0 s (4340 MB/s); slot 0 verified
+strata generate: routing-aware prefetch on (the next layer's router, file tier)
+strata generate: R4 hit path ON - resident experts are computed on the GPU
+strata generate: 7 expert-pool workers + the host thread
+strata generate: session is up (engine 0.1.45-metal)
+strata generate: token graph hit path: 64 resident experts, decided on the device
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)
+strata metal stream: experts read from /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf.experts (one request per expert)
+strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): 290 matrices, 680 MB, made in 497 ms
+strata metal stream: 789 dense tensors read into memory (2.36 GB, 1.1 s; 290 left out)
+strata metal: decode window on Apple M2: /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf streamed from the SSD (experts) (37.6 GB), 16512 cells, PLE on, ready in 1658 ms
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off (STRATA_ADAPT_OVERLAP=1 turns it on)
+strata serve: 10803 MiB of VRAM free with everything loaded
+strata metal stream: 2.57 GB of the host code's device weight copies given back (unused by the Metal window)
+strata metal stream: only 1.0 GB left for the expert arena (the GPU working set 19.1 GB, RAM 25.8 GB, 3.4 GB allocated): expect a low hit rate
+strata metal stream: 3.45 GB allocated before the arena (the process holds 5.69 GB, 1.89 GB resident); RAM 25.8 GB (6.3 GB available, 7.0 GB kept for macOS), GPU working set 19.1 GB
+strata metal stream: planned resident footprint 7.2 GB = arena 1.0 + 5.7 held before it + 0.5 reserved for the n-gram table; cap 18.8 GB = the lesser of the GPU working set 19.1 GB and the RAM 25.8 GB less 7.0 GB left to macOS and its file cache
+strata metal stream: the arena's fill stopped after 0.00 GB: macOS's free memory reached what it keeps; 0.20 GB of the arena (142 slots) stay unused
+strata metal stream: expert arena 0.80 GB, 576 slots in 1 size classes, 0 experts read from the profile's top (24576 ranked) in 0.0 s (0.00 GB/s); 6 I/O threads, read-ahead top 10; 1 buffers
+strata metal stream: the arena is small: the prompt's 1.58 GB of buffers are their own allocation, not a region of its slots
+strata metal: prompts on the matrix units in chunks of 1024 (experts v2, QSA v1, matmul2d layout other; 1.58 GB of buffers, in the expert arena while a prompt runs)
+strata metal stream: resident footprint after the fill: the process holds 5.7 GB (1.9 GB resident), planned 7.0 GB, cap 18.8 GB
+strata serve: prompt 50 tokens = 0 reused + 50 read in 11613 ms (4.3 tok/s), 189 generated in 54184 ms (3.5 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 308 tokens = 238 reused + 70 read in 16348 ms (4.3 tok/s), 761 generated in 220458 ms (3.5 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 1140 tokens = 1068 reused + 72 read in 5705 ms (12.6 tok/s), 1014 generated in 286257 ms (3.5 tok/s), drafts accepted 0 of 0, 3 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 55 tokens = 0 reused + 55 read in 26308 ms (2.1 tok/s), 53 generated in 14662 ms (3.6 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+[strata] 2026-10-24 23:30:13 engine started: /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 32768 --mmap-experts --pool-workers 6 --vram-reserve-mib 1536
+strata generate: memory guard: the available RAM cannot be read; parking and session save/restore are refused
+strata generate: PCIe probe failed -> pcie_frac default 0.55
+strata generate: this CPU has no AVX-512: the expert kernels run on ggml-cpu vec_dot (no AVX2: the older-CPU build) (multi-token for the i-quant gate/up rows)
+strata generate: native pack: /Users/yebyen/w/Strata-data/packs/q2_0 experts (largest blob 1.38 MB), token embedding Q3_K in mapped host memory (260 MiB, 0.5 s)
+strata generate: 1416 MiB of weights loaded from /Users/yebyen/w/Strata-data/packs/q2_0 in 0.9 s (303 canonical tensors skipped: served natively)
+strata generate: 301 native projection matrices, 1376.20 MiB of weights, in 3.4 s
+strata generate: PLE direct read probe: 51219 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: profile /Users/yebyen/w/Strata/data/expert-profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: PLE on, table 320001536 rows of /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf
+strata generate: experimental native Q5_K head, 437043200 bytes, in 0.8 s
+strata generate: GPU 0: Apple M2, compute capability 0.0
+strata generate: experts via mmap (--mmap-experts; the GGUF shards in place, no experts.bin)
+strata generate: CPU pool tasks/phase: 21 (automatic), participating threads: 7
+strata generate: 6 pool workers on logical processors 1,2,3,4,5,6, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: not available on this system
+strata generate: expert cache 64 slots, 0.08 GiB of VRAM; policy is
+strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,
+                 so a reply can differ slightly from a run without the cache (same quality:
+                 bench/results/2026-09-27-cache-parity).
+                 PROFILE, ranked by routing frequency, no eviction.
+strata generate: the profile fill asks for 256 pairs ahead (STRATA_FILL_AHEAD)
+strata generate: pre-filled 64 of 64 slots from the profile in 0.0 s (2716 MB/s); slot 0 verified
+strata generate: routing-aware prefetch on (the next layer's router, file tier)
+strata generate: R4 hit path ON - resident experts are computed on the GPU
+strata generate: 6 expert-pool workers + the host thread
+strata generate: session is up (engine 0.1.45.3-metal)
+strata generate: token graph hit path: 64 resident experts, decided on the device
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)
+strata metal stream: experts read from /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf.experts (one request per expert)
+strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): 290 matrices, 680 MB, made in 955 ms
+strata metal stream: 789 dense tensors read into memory (2.36 GB, 1.1 s; 290 left out)
+strata metal: decode window on Apple M2: /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf streamed from the SSD (experts) (37.6 GB), 32896 cells, PLE on, ready in 8299 ms
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off (STRATA_ADAPT_OVERLAP=1 turns it on)
+strata serve: 10164 MiB of VRAM free with everything loaded
+[strata] 2026-10-24 23:31:24 engine started: /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 32768 --mmap-experts --pool-workers 6 --vram-reserve-mib 1536
+strata generate: memory guard: the available RAM cannot be read; parking and session save/restore are refused
+strata generate: PCIe probe failed -> pcie_frac default 0.55
+strata generate: this CPU has no AVX-512: the expert kernels run on ggml-cpu vec_dot (no AVX2: the older-CPU build) (multi-token for the i-quant gate/up rows)
+strata generate: native pack: /Users/yebyen/w/Strata-data/packs/q2_0 experts (largest blob 1.38 MB), token embedding Q3_K in mapped host memory (260 MiB, 0.1 s)
+strata generate: 1416 MiB of weights loaded from /Users/yebyen/w/Strata-data/packs/q2_0 in 0.7 s (303 canonical tensors skipped: served natively)
+strata generate: 301 native projection matrices, 1376.20 MiB of weights, in 2.5 s
+strata generate: PLE direct read probe: 100868 rows/s (fine)
+strata generate: the SSD is kept awake while rows are read: one page of the table after 100 ms without a read, until 60 s after the last request (STRATA_SSD_KEEPALIVE=0 turns it off)
+strata generate: profile /Users/yebyen/w/Strata/data/expert-profile.bin: 24576 ranked pairs, built for 24576 slots
+strata generate: PLE on, table 320001536 rows of /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf
+strata generate: experimental native Q5_K head, 437043200 bytes, in 0.2 s
+strata generate: GPU 0: Apple M2, compute capability 0.0
+strata generate: experts via mmap (--mmap-experts; the GGUF shards in place, no experts.bin)
+strata generate: CPU pool tasks/phase: 21 (automatic), participating threads: 7
+strata generate: 6 pool workers on logical processors 1,2,3,4,5,6, the host thread on 0 (draining too) (--host-core first)
+strata aux cpus: not available on this system
+strata generate: expert cache 64 slots, 0.08 GiB of VRAM; policy is
+strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,
+                 so a reply can differ slightly from a run without the cache (same quality:
+                 bench/results/2026-09-27-cache-parity).
+                 PROFILE, ranked by routing frequency, no eviction.
+strata generate: the profile fill asks for 256 pairs ahead (STRATA_FILL_AHEAD)
+strata generate: pre-filled 64 of 64 slots from the profile in 0.0 s (3312 MB/s); slot 0 verified
+strata generate: routing-aware prefetch on (the next layer's router, file tier)
+strata generate: R4 hit path ON - resident experts are computed on the GPU
+strata generate: 6 expert-pool workers + the host thread
+strata generate: session is up (engine 0.1.45.3-metal)
+strata generate: token graph hit path: 64 resident experts, decided on the device
+prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, mean KL ~0.004). STRATA_PREFILL_CPU_SHARE=0 turns it off.
+strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)
+strata metal stream: experts read from /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf.experts (one request per expert)
+strata metal: HC read in Q8_0 (STRATA_HC_Q8=0: BF16): 290 matrices, 680 MB, made in 641 ms
+strata metal stream: 789 dense tensors read into memory (2.36 GB, 1.1 s; 290 left out)
+strata metal: decode window on Apple M2: /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf streamed from the SSD (experts) (37.6 GB), 32896 cells, PLE on, ready in 1921 ms
+strata serve: STRATA_ROUTE_TAIL_SKIP=7 is ON (default): a missed expert that every token of a verify window routes at rank 7 or lower is skipped (+10..20% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); STRATA_ROUTE_TAIL_SKIP=0 turns it off
+strata serve: adaptive overlap: off (STRATA_ADAPT_OVERLAP=1 turns it on)
+strata serve: 10164 MiB of VRAM free with everything loaded
+strata metal stream: 3.00 GB of the host code's device weight copies given back (unused by the Metal window)
+strata metal stream: only 1.0 GB left for the expert arena (the GPU working set 19.1 GB, RAM 25.8 GB, 3.7 GB allocated): expect a low hit rate
+strata metal stream: 3.69 GB allocated before the arena (the process holds 5.78 GB, 0.25 GB resident); RAM 25.8 GB (5.3 GB available, 7.0 GB kept for macOS), GPU working set 19.1 GB
+strata metal stream: planned resident footprint 7.3 GB = arena 1.0 + 5.8 held before it + 0.5 reserved for the n-gram table; cap 18.8 GB = the lesser of the GPU working set 19.1 GB and the RAM 25.8 GB less 7.0 GB left to macOS and its file cache
+strata metal stream: the arena's fill stopped after 0.00 GB: macOS's free memory reached what it keeps; 0.20 GB of the arena (142 slots) stay unused
+strata metal stream: expert arena 0.80 GB, 576 slots in 1 size classes, 0 experts read from the profile's top (24576 ranked) in 0.0 s (0.00 GB/s); 6 I/O threads, read-ahead top 10; 1 buffers
+strata metal stream: the arena is small: the prompt's 1.60 GB of buffers are their own allocation, not a region of its slots
+strata metal: prompts on the matrix units in chunks of 1024 (experts v2, QSA v1, matmul2d layout other; 1.60 GB of buffers, in the expert arena while a prompt runs)
+strata metal stream: resident footprint after the fill: the process holds 5.8 GB (0.3 GB resident), planned 7.1 GB, cap 18.8 GB
+strata serve: prompt 110 tokens = 0 reused + 110 read in 15597 ms (7.1 tok/s), 229 generated in 65234 ms (3.5 tok/s), drafts accepted 0 of 0, 1 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)
+strata serve: prompt 216 tokens = 105 reused + 111 read in 6279 ms (17.7 tok/s), 103 generated in 29059 ms (3.5 tok/s), drafts accepted 0 of 0, 2 checkpoints
+strata serve: expert tiers: GPU 0 hits this request; since the start RAM 0 blobs, files 0 blobs 88.5 MB read (the GGUF in place)

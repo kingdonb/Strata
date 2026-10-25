@@ -1,0 +1,57 @@
+=== S4 H3 Hard Kill Gate Evidence ===
+Date: 2026-10-25
+Base Commit: 74137519 (main 7a0ce2bf)
+Target PIDs:
+  Server PID: 22537
+  Engine PID: 22538
+  Watcher PID: 22540
+
+--- BEFORE BLOCK (Server, Engine, Watcher running) ---
+22537 /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python -m serve.server --engine strata --config /Users/yebyen/.local/state/strata/launch/q2_0-32k.json --host 127.0.0.1 --port 18500 --parallel 1 --ready-file /Users/yebyen/.local/state/strata/runtime/launch-q2_0-32k-bea5614d78cf4f4bbf1d99b2fb6fe220.ready.json --shutdown-timeout 30.0 --owner-fd 7
+22538 /Users/yebyen/w/Strata/build-metal/strata --serve --pack /Users/yebyen/w/Strata-data/packs/q2_0 --native /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --ple-gguf /Users/yebyen/w/Strata-data/models/Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf --expert-profile /Users/yebyen/w/Strata/data/expert-profile.bin --expert-cache 64 --prefill auto --spec 2 --suffix-draft 0 --max-context 32768 --mmap-experts --pool-workers 6 --vram-reserve-mib 1536
+22540 /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python -S -c 
+import os, signal, subprocess, sys, time
+pid, token = int(sys.argv[1]), sys.argv[2]
+for s in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
+    signal.signal(s, signal.SIG_IGN)               # it ends with its pipe, not with the terminal
+def start_of(p):
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(p)], capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return None
+    return None if not out else "s:" + out
+os.set_blocking(0, True)
+data = b""
+while True:
+    chunk = os.read(0, 16)
+    if not chunk:
+        break
+    data += chunk
+    if b"x" in data:                                # released: the child is gone or was ended on purpose
+        sys.exit(0)
+if token and start_of(pid) == token:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        sys.exit(0)
+    for _ in range(40):
+        time.sleep(0.25)
+        if start_of(pid) != token:
+            sys.exit(0)
+    if start_of(pid) == token:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+ 22538 s:Sun Oct 25 15:05:37 2026
+--- KILL TIMESTAMP: 2026-10-25 15:07:14 EDT ---
+--- AFTER +5s CHECK (2026-10-25 15:07:19 EDT) ---
+serve.server: GONE
+build-metal/strata: GONE
+import os, signal (watcher): GONE
+--- AFTER +15s CHECK (2026-10-25 15:07:29 EDT) ---
+serve.server: GONE
+build-metal/strata: GONE
+import os, signal (watcher): GONE
+port 18500: closed
+strata launch --status: Nothing from strata launch is running.

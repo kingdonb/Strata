@@ -1,0 +1,16 @@
+# Pre-gate (recorded 2026-10-25, Helix Linux sandbox, CPython 3.13.7, checkout af38e089):
+# H2 unit gate — the PR #24 ride-along telemetry plumbing (fake reader + IOREG fixture).
+# Proves the wiring on current main, NOT the real sensor: the live rootless capture
+# is the runbook's S3 on the M2.
+
+$ python3 -m unittest serve.test_server.MacTelemetry -v
+  f = [int(x) for x in open("/proc/stat").readline().split()[1:]]
+  return line.split(":", 1)[1].strip()
+ok
+test_readings (serve.test_server.MacTelemetry.test_readings) ... ok
+test_thermal_reading_apple_silicon (serve.test_server.MacTelemetry.test_thermal_reading_apple_silicon) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.018s
+
+OK
