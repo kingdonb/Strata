@@ -446,5 +446,89 @@ class NoServers(unittest.TestCase):
             httpd.server_close()
 
 
+# ------------------------------------------------------------------------------------------------ the endpoints
+class Endpoints(unittest.TestCase):
+    """GET /v1/mcp/tools and POST /v1/mcp/call: the host chat's ask mode - the schemas it offers the model and the
+    executor for a call its user approved.  The same hub the web app's loop runs, guarded like /settings."""
+
+    def setUp(self):
+        self.log = tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl")
+        self.log.close()
+        os.environ["FAKE_MCP_LOG"] = self.log.name
+        self.hub = McpHub({"fake": stdio()}, {"timeout_s": 10, "max_result_chars": 500, "max_rounds": 2})
+        self.hub.start(wait=True)
+        tok = ByteTokenizer()
+        self.svc = Service(MockEngine(tok, ["\n\nhi"], max_context=CTX), tok,
+                           ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc.mcp = self.hub
+        self.httpd = serve(self.svc, port=0)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.hub.close()
+        del os.environ["FAKE_MCP_LOG"]
+        os.unlink(self.log.name)
+
+    def get(self, path):
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=30) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, json.loads(e.read().decode())
+
+    def post(self, path, body, headers=None):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, json.loads(e.read().decode())
+
+    def test_tools_schemas(self):
+        code, tools = self.get("/v1/mcp/tools")
+        self.assertEqual(code, 200)
+        echo = next(t for t in tools if t["function"]["name"] == "fake__echo")
+        self.assertEqual(echo["type"], "function")
+        self.assertEqual(echo["function"]["parameters"]["properties"]["text"]["type"], "string")
+
+    def test_call_runs_the_tool(self):
+        code, r = self.post("/v1/mcp/call", {"name": "fake__echo", "arguments": {"text": "approved"}})
+        self.assertEqual(code, 200, r)
+        self.assertEqual((r["ok"], r["text"], r["server"], r["tool"]), (True, "approved", "fake", "echo"))
+        code, r = self.post("/v1/mcp/call", {"name": "fake__add", "arguments": {"a": 20, "b": 22}})
+        self.assertEqual((code, r["text"]), (200, "42"))
+
+    def test_call_reports_a_failing_tool_as_a_result(self):
+        code, r = self.post("/v1/mcp/call", {"name": "fake__fail", "arguments": {}})
+        self.assertEqual((code, r["ok"], r["text"]), (200, False, "error: it failed on purpose"))
+
+    def test_call_answers_an_unknown_name_as_an_error_result(self):
+        code, r = self.post("/v1/mcp/call", {"name": "nope__nothing", "arguments": {}})
+        self.assertEqual(code, 200)
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["text"].startswith("error: there is no tool"))
+
+    def test_call_wants_a_name(self):
+        code, r = self.post("/v1/mcp/call", {"arguments": {}})
+        self.assertEqual(code, 400)
+        self.assertIn("name", r["error"]["message"])
+
+    def test_call_refuses_a_foreign_page(self):
+        code, r = self.post("/v1/mcp/call", {"name": "fake__echo", "arguments": {"text": "x"}},
+                            headers={"Origin": "https://else.example"})
+        self.assertEqual(code, 403)
+
+    def test_no_servers_no_tools(self):
+        self.svc.mcp = None
+        self.assertEqual(self.get("/v1/mcp/tools"), (200, []))
+        code, r = self.post("/v1/mcp/call", {"name": "fake__echo", "arguments": {}})
+        self.assertEqual(code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()
