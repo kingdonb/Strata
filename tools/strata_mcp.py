@@ -989,7 +989,22 @@ class Strata:
                           "ram_needed_gb": d["ram_gb"], "experts_gb": d.get("arena_gb"), "mem_total": False,
                           "memory_gb": round(float(d.get("arena_gb") or d["ram_gb"]) + 1.0, 1),
                           "on_this_pc": self._mac_verdict(m, ram) if ram else None, "installed": tag in have, "id": tag})
-        return [{"family": "qwen", "title": fd["title"], "about": fd.get("about"), "experimental": False, "images": False, "sizes": sizes}]
+        out = [{"family": "qwen", "title": fd["title"], "about": fd.get("about"), "experimental": False, "images": False, "sizes": sizes}]
+        q36_sizes = []
+        for c in self.configs():
+            tag = c.stem[len("strata-"):]
+            if tag in ("q36", "q36_q2"):
+                cfg = self.read_config(c)
+                name = cfg.get("model_name") or tag
+                q36_sizes.append({
+                    "model": name, "about": "Qwen3.6-35B-A3B Metal native GGUF", "download_gb": 12.0,
+                    "experimental": False, "images": False, "ram_needed_gb": 16.0, "experts_gb": 12.0,
+                    "mem_total": True, "memory_gb": 13.0, "on_this_pc": "fits",
+                    "installed": True, "id": tag, "engine_min": None
+                })
+        if q36_sizes:
+            out.append({"family": "qwen36", "title": "Qwen3.6-35B-A3B", "about": "35B MoE with Metal kernels", "experimental": False, "images": False, "sizes": q36_sizes})
+        return out
 
     def recommend(self, hw: dict) -> dict:
         """setup.py's own rules: the size it preselects (IQ3_XXS from 60 GB of RAM, else the first, Q2_0), the
