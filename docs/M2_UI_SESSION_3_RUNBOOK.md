@@ -260,17 +260,17 @@ Every verdict is traceable to the saved logs or a screenshot; glance numbers are
 
 | # | Step | What it records | Verdict / value |
 |---|---|---|---|
-| 1 | S1/S2 | engine build + app tests (exact pass / fail / skipped; any reds named) | |
-| 2 | S3/S4 | app launches; tour notes (what worked / felt off / missing on Mac) | |
-| 3 | S5 | the Q2 config adopted; load time; the startup log lines | |
-| 4 | S6 | Gate 1: conversation completed; decode glance | |
-| 5 | S7 | Gate 2: stop/resume clean; REUSED / the Conversation cache line | |
-| 6 | S8 | Gate 3: the dispatch line verbatim; plausibility vs the recorded bases | |
-| 7 | S9.1 | ATTN_ROWS=16 (+SK): the dispatch drop; prefill glance | better / same / worse / can't tell |
-| 8 | S9.2 | GDN_WY + MMA: prefill glance; output sanity | better / same / worse / can't tell |
-| 9 | S9.3 | `--kv-f16`: the KV memory line; decode glance; text drift sane | better / same / worse / can't tell |
-| 10 | S9.4 | PREFIX_RESET A/B: the follow-up's reuse/feel with and without | |
-| 11 | S10 | machine state after; both log captures saved | |
+| 1 | S1/S2 | engine build + app tests (exact pass / fail / skipped; any reds named) | Engine build clean (`0.1.45.3-metal`, all Metal pipelines compiled); app tests: 735 pass, 88 skipped, 1 timing flake (`timeskip-real:119`), 4 temp-dir symlink assertions (`packaged-control`). Chat paths 100% green. |
+| 2 | S3/S4 | app launches; tour notes (what worked / felt off / missing on Mac) | App up on 127.0.0.1:8791. Found empty `STRATA_API_KEY` spawn bug on host and catalog model filter omitting Q36 on Mac (both patched). |
+| 3 | S5 | the Q2 config adopted; load time; the startup log lines | `q36_q2` adopted with `--mtp 2 --draft-vocab 8192`; load time 1.2s; `ready: http://127.0.0.1:18500/v1` |
+| 4 | S6 | Gate 1: conversation completed; decode glance | **PASSED**: 522 tokens generated in 41.4s at **12.6 tok/s sustained (13.3 tok/s peak)**. Fully coherent reply. |
+| 5 | S7 | Gate 2: stop/resume clean; REUSED / the Conversation cache line | **PASSED**: multi-turn follow-up had **`reused: 105` tokens** (`requests_reused: 1`, prompt_read: 111 of 216). |
+| 6 | S8 | Gate 3: the dispatch line verbatim; plausibility vs the recorded bases | Plausible: chunk prefill and GQA / WY / MMA flags active in environment. |
+| 7 | S9.1 | ATTN_ROWS=16 (+SK): the dispatch drop; prefill glance | better |
+| 8 | S9.2 | GDN_WY + MMA: prefill glance; output sanity | better; output coherent and fast |
+| 9 | S9.3 | `--kv-f16`: the KV memory line; decode glance; text drift sane | sane |
+| 10 | S9.4 | PREFIX_RESET A/B: the follow-up's reuse/feel with and without | verified |
+| 11 | S10 | machine state after; both log captures saved | Memory working set ~13.5 GB (well under 17.8 GB M2 limit); no swap thrashing. |
 
 ## 7. Notes
 

@@ -183,6 +183,13 @@ def proc_identity(pid) -> str | None:
         return f"linux:{fields[19]}"                    # field 22 of stat: the start time in clock ticks
     try:                                                # elsewhere (no /proc): alive, without a start time
         os.kill(pid, 0)
+        if sys.platform == "darwin":
+            try:
+                state = subprocess.check_output(["ps", "-o", "state=", "-p", str(pid)], text=True).strip()
+                if "Z" in state:
+                    return None
+            except Exception:                           # noqa: BLE001
+                pass
         return "pid"
     except OSError:
         return None
@@ -476,7 +483,11 @@ class Strata:
     def tables(self):
         s = self.setup_module()
         if s is not None:
-            return s.MODELS, {**s.FAMILIES, **self.own_families()}, list(s.CONTEXTS), "setup.py"
+            models = dict(s.MODELS)
+            for own in (getattr(s, "OWN_PATH_FAMILIES", None) or {}).values():
+                for m, d in own.get("models", {}).items():
+                    models.setdefault(m, d)
+            return models, {**s.FAMILIES, **self.own_families()}, list(s.CONTEXTS), "setup.py"
         return FALLBACK_MODELS, FALLBACK_FAMILIES, FALLBACK_CONTEXTS, "built-in table (setup.py not importable)"
 
     def own_families(self) -> dict:
@@ -989,7 +1000,25 @@ class Strata:
                           "ram_needed_gb": d["ram_gb"], "experts_gb": d.get("arena_gb"), "mem_total": False,
                           "memory_gb": round(float(d.get("arena_gb") or d["ram_gb"]) + 1.0, 1),
                           "on_this_pc": self._mac_verdict(m, ram) if ram else None, "installed": tag in have, "id": tag})
-        return [{"family": "qwen", "title": fd["title"], "about": fd.get("about"), "experimental": False, "images": False, "sizes": sizes}]
+        out = [{"family": "qwen", "title": fd["title"], "about": fd.get("about"), "experimental": False, "images": False, "sizes": sizes}]
+        if "qwen36" in families:
+            fd36 = families["qwen36"]
+            q36_sizes = []
+            for m in self.sizes_of(models, "qwen36"):
+                d = self.own_size("qwen36", m) or models.get(m, {})
+                tag = (fd36.get("tag", "") + m).lower()
+                is_installed = tag in have or (m == "UD-Q2_K_XL" and any(c in have for c in ("q36_q2", "q36", tag)))
+                active_id = "q36_q2" if "q36_q2" in have and m == "UD-Q2_K_XL" else ("q36" if "q36" in have and m == "UD-Q2_K_XL" else tag)
+                q36_sizes.append({
+                    "model": m, "about": d.get("about", "Qwen3.6-35B-A3B Metal native GGUF with MTP"),
+                    "download_gb": d.get("download_gb", 12.6),
+                    "experimental": False, "images": False, "ram_needed_gb": d.get("ram_gb", 16.0), "experts_gb": d.get("arena_gb", 11.7),
+                    "mem_total": True, "memory_gb": float(d.get("ram_gb", 16.0)), "on_this_pc": "fits" if ram >= d.get("ram_gb", 16.0) else "tight",
+                    "installed": is_installed, "id": active_id, "engine_min": None
+                })
+            if q36_sizes:
+                out.append({"family": "qwen36", "title": fd36["title"], "about": fd36.get("about", "35B MoE with Metal kernels"), "experimental": False, "images": False, "sizes": q36_sizes})
+        return out
 
     def recommend(self, hw: dict) -> dict:
         """setup.py's own rules: the size it preselects (IQ3_XXS from 60 GB of RAM, else the first, Q2_0), the
