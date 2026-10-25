@@ -5643,6 +5643,8 @@ textarea.config-editor.st-input {
 .composer-choice { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--st-ink-muted); padding: 7px 4px; border-radius: 8px; font: inherit; font-size: 12px; cursor: pointer; max-width: 100%; }
 .composer-choice:hover { background: var(--st-surface-2); color: var(--st-ink); }
 .composer-choice:disabled { opacity: .5; cursor: default; }
+.composer-tools[aria-pressed='true'], .composer-tools.is-active { color: var(--st-accent-text); background: var(--st-accent-tint); font-weight: 500; padding: 6px 8px; }
+.composer-tools[aria-pressed='true']:hover, .composer-tools.is-active:hover { color: var(--st-accent-text); background: color-mix(in srgb, var(--st-accent-tint) 80%, var(--st-surface-2)); }
 .composer-model span { max-width: 180px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .composer-file-error { border: 0; background: transparent; color: var(--st-danger-text); font: inherit; font-size: 12px; }
 .model-choice-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px 0; border-bottom: 1px solid var(--st-line); }

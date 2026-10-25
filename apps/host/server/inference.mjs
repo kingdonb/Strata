@@ -241,8 +241,17 @@ export async function proxyCompletion({ baseUrl, message, history = [], systemPr
   engine?.beginReading(0, engine.variantId);
   const messages = [
     ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-    ...history.filter((m) => ['system', 'user', 'assistant'].includes(m.role)).map((m) => ({ role: m.role, content: m.content })),
-    { role: 'user', content:images.length?[{type:'text',text:message},...images.map(i=>({type:'image_url',image_url:{url:i.url}}))]:message },
+    /* Tool exchanges pass through in the shape the engine itself writes (an assistant turn that called tools,
+       then each result): without this, a continued conversation would lose what its tools answered. */
+    ...history.flatMap((m) => {
+      if (m.role === 'tool') return [{ role: 'tool', content: m.content }];
+      if (!['system', 'user', 'assistant'].includes(m.role)) return [];
+      const out = { role: m.role, content: m.content };
+      if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) out.tool_calls = m.tool_calls;
+      return [out];
+    }),
+    /* A continuation turn (ask mode: the model answers from a tool result) brings no user message. */
+    ...(message || images.length ? [{ role: 'user', content:images.length?[{type:'text',text:message},...images.map(i=>({type:'image_url',image_url:{url:i.url}}))]:message }] : []),
   ];
 
   const defaults = getStore().expert ?? {};
@@ -278,6 +287,7 @@ export async function proxyCompletion({ baseUrl, message, history = [], systemPr
   let streaming = true;
   let writing = false;
   let timings=null,finishReason=null;
+  const toolCalls = [];   // streamed tool-call pieces by index (the OpenAI shape): assembled into proposals at the end
   /* The speed shown while it streams is the decode speed of everything generated, reasoning included, from the first token: tokens
      (one per streamed chunk, or characters / 4 when the server batches) over the time since the first token, never the visible
      answer over the whole wall time. The engine's own numbers replace it when the answer is done. */
@@ -327,6 +337,14 @@ export async function proxyCompletion({ baseUrl, message, history = [], systemPr
         const delta = parsed.choices?.[0]?.delta;
         if (!delta) continue;
 
+        if (Array.isArray(delta.tool_calls)) for (const f of delta.tool_calls) {
+          const i = Number.isInteger(f.index) ? f.index : toolCalls.length;
+          const piece = toolCalls[i] ?? (toolCalls[i] = { id: '', name: '', args: '' });
+          if (typeof f.id === 'string' && f.id) piece.id = f.id;
+          if (typeof f.function?.name === 'string' && f.function.name) piece.name = f.function.name;
+          if (typeof f.function?.arguments === 'string') piece.args += f.function.arguments;
+        }
+
         // Qwen3-style thinking models stream reasoning separately.
         if (delta.reasoning_content) {
           if (firstTokenAt === null) engine?.beginThinking();
@@ -352,6 +370,14 @@ export async function proxyCompletion({ baseUrl, message, history = [], systemPr
   }
 
   signal?.throwIfAborted();
+  /* Ask mode: a turn that ends in tool calls proposes them (the chat asks before anything runs). The store's
+     `tool` handler files them as proposal cards; approval runs them through the engine's MCP hub. */
+  for (const piece of toolCalls.filter(Boolean)) {
+    let args = {};
+    try { args = JSON.parse(piece.args || '{}'); } catch { args = { raw: piece.args.slice(0, 500) }; }
+    onFrame({ type: 'tool', tool: { id: piece.id || `call_${toolCalls.indexOf(piece)}_${started}`, name: piece.name, args,
+      preview: piece.args.slice(0, 300) || piece.name, effect: 'Connected tool. It runs when you approve it.', scope: 'connected' } });
+  }
   const durationMs = Date.now() - started;
   const decodeMs = firstTokenAt ? Date.now() - firstTokenAt : durationMs;
   const tps = Number.isFinite(timings?.predicted_per_second)?timings.predicted_per_second:out !== null && decodeMs > 0 ? Number((out / (decodeMs / 1000)).toFixed(1)) : null;

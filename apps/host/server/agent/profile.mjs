@@ -193,7 +193,7 @@ export function outputBudget(context, maxOutput = null) {
 /** What a local model, or an OpenAI-style server on this network, takes for the thinking level (see the comment where a local route is built). */
 const THINKING_COMPAT = { supportsStore: false, thinkingFormat: 'chat-template', chatTemplateKwargs: { enable_thinking: { $var: 'thinking.enabled' }, reasoning_effort: { $var: 'thinking.effort', omitWhenOff: true } } };
 
-export function buildProfile({ local = [], connections = [], gate = true, tools = NO_TOOLS_SETTINGS, skillsDir = null, proxyBase = null, searchMock = null, defaultLocalId = null }) {
+export function buildProfile({ local = [], connections = [], gate = true, tools = NO_TOOLS_SETTINGS, skillsDir = null, proxyBase = null, searchMock = null, defaultLocalId = null, connectMcp }) {
   const providers = {};
   const env = {};
   const routes = [];
@@ -291,10 +291,14 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
   // first one were wired to a chat on the second).
   const defaultInstance = local.find(i => i.id === defaultLocalId) ?? local[0] ?? null;
   const defaultRoute = routes.find(r => r.kind === 'local' && r.instanceId === defaultInstance?.id) ?? routes.find(r => r.kind === 'local') ?? null;
-  // One Harness, one set of tool servers: the default local model's.
+  // One Harness, one set of tool servers: the default local model's. The chat's Tools toggle governs the
+  // CONNECTED MCP tools (the model's own servers and the person's own tool servers alike): off connects
+  // none, so toggling off really disconnects (Kingdon's M2 report, task 000712). The person's own
+  // instruction and command tools are Settings -> Tools' to govern, not this toggle's. Flipping the toggle
+  // changes the signature, so the agent restarts with (or without) the rows.
   const mcpSkipped = [];
-  const mcp = mcpRows({ ...(defaultInstance?.mcpServers ?? {}), ...(tools.servers ?? {}) }, mcpEnv, mcpSkipped);
-  Object.assign(env, mcpEnv);
+  const mcp = connectMcp === false ? [] : mcpRows({ ...(defaultInstance?.mcpServers ?? {}), ...(tools.servers ?? {}) }, mcpEnv, mcpSkipped);
+  if (connectMcp !== false) Object.assign(env, mcpEnv);
   // The person's own instruction and command tools come from the app's tool server; a command tool asks in Manual like any connected tool.
   const own = (kind, on) => on && tools.toolFile ? [{ id: `mcp-strata-${kind}`, name: '@deepseek-ai/dsh-mcp-client', config: { serverName: `strata-${kind}`, transport: 'stdio', command: process.execPath, args: [CUSTOM_TOOLS_SCRIPT, kind, tools.toolFile] } }] : [];
   // The browser: Playwright's tool server on the person's own Chrome or Edge, in a separate empty profile (what the Harness's own browser provider does). Every action asks in Manual.

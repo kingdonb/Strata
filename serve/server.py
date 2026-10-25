@@ -6412,6 +6412,10 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, svc.mcp.status() if svc.mcp else {"servers": [], "tools": 0})
                 return
+            if path == "/v1/mcp/tools":                      # the chat's ask mode: the same tools as OpenAI schemas
+                if self._authorized():
+                    self._json(200, svc.mcp.openai_tools() if svc.mcp else [])
+                return
             if path == "" or (path == "/api-monitor" and svc.api_monitor):
                 body = (ROOT / "serve" / "web" / ("monitor.html" if path else "index.html")).read_bytes()
                 self.send_response(200)
@@ -6564,6 +6568,27 @@ def make_handler(svc: Service):
                 req = json.loads(self._body() or b"{}")
                 if not isinstance(req, dict):
                     raise ValueError("send a JSON object")
+                if path == "/v1/mcp/call":                   # the chat's ask mode: run one approved tool call
+                    if not self._own_page("MCP tools can be run"):
+                        return
+                    if svc.mcp is None:
+                        self._json(404, {"error": {"message": "no MCP servers are configured on this server"}})
+                        return
+                    name = req.get("name")
+                    if not isinstance(name, str) or not name:
+                        raise ValueError("name: the MCP tool's name (server__tool)")
+                    arguments = req.get("arguments")
+                    if arguments is None:
+                        arguments = {}
+                    if not isinstance(arguments, dict):
+                        raise ValueError("arguments: a JSON object")
+                    cancel = threading.Event()
+                    self._watch_client(cancel)
+                    try:
+                        self._json(200, svc.mcp.call(name, arguments, cancel))
+                    except McpCancelled:
+                        self._json(499, {"error": {"message": "the tool call was cancelled"}})
+                    return
                 if path.startswith("/v1/responses/"):        # retrieve/delete/cancel/compact: nothing is stored
                     self._json(404, responses_error_body("this server keeps no responses (stateless); send the "
                                                          "whole conversation to POST /v1/responses", code="not_found"))
