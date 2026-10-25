@@ -279,21 +279,116 @@ def metal_working_set():
         return None
 
 
+class _AppleSiliconThermal:
+    """Read Apple Silicon SoC die and GPU thermal sensors via IOHIDEventSystemClient (no root required)."""
+
+    def __init__(self):
+        self._client = None
+        self._cf = None
+        self._iokit = None
+        self._matching = None
+        self._prop_key = None
+        if sys.platform != "darwin":
+            return
+        try:
+            self._cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+            self._iokit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+
+            CFIndex = ctypes.c_long
+            CFTypeRef = ctypes.c_void_p
+
+            self._cf.CFDictionaryCreate.restype = CFTypeRef
+            self._cf.CFDictionaryCreate.argtypes = [CFTypeRef, ctypes.POINTER(CFTypeRef), ctypes.POINTER(CFTypeRef), CFIndex, ctypes.c_void_p, ctypes.c_void_p]
+            self._cf.CFNumberCreate.restype = CFTypeRef
+            self._cf.CFNumberCreate.argtypes = [CFTypeRef, ctypes.c_int, ctypes.c_void_p]
+            self._cf.CFStringCreateWithCString.restype = CFTypeRef
+            self._cf.CFStringCreateWithCString.argtypes = [CFTypeRef, ctypes.c_char_p, ctypes.c_uint32]
+            self._cf.CFStringGetCString.restype = ctypes.c_bool
+            self._cf.CFStringGetCString.argtypes = [CFTypeRef, ctypes.c_char_p, CFIndex, ctypes.c_uint32]
+            self._cf.CFArrayGetCount.restype = CFIndex
+            self._cf.CFArrayGetCount.argtypes = [CFTypeRef]
+            self._cf.CFArrayGetValueAtIndex.restype = CFTypeRef
+            self._cf.CFArrayGetValueAtIndex.argtypes = [CFTypeRef, CFIndex]
+            self._cf.CFRelease.argtypes = [CFTypeRef]
+
+            self._iokit.IOHIDEventSystemClientCreate.restype = ctypes.c_void_p
+            self._iokit.IOHIDEventSystemClientCreate.argtypes = [CFTypeRef]
+            self._iokit.IOHIDEventSystemClientSetMatching.restype = ctypes.c_bool
+            self._iokit.IOHIDEventSystemClientSetMatching.argtypes = [ctypes.c_void_p, CFTypeRef]
+            self._iokit.IOHIDEventSystemClientCopyServices.restype = CFTypeRef
+            self._iokit.IOHIDEventSystemClientCopyServices.argtypes = [ctypes.c_void_p]
+            self._iokit.IOHIDServiceClientCopyProperty.restype = CFTypeRef
+            self._iokit.IOHIDServiceClientCopyProperty.argtypes = [ctypes.c_void_p, CFTypeRef]
+            self._iokit.IOHIDServiceClientCopyEvent.restype = ctypes.c_void_p
+            self._iokit.IOHIDServiceClientCopyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64, ctypes.c_int32]
+            self._iokit.IOHIDEventGetFloatValue.restype = ctypes.c_double
+            self._iokit.IOHIDEventGetFloatValue.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+
+            self._client = self._iokit.IOHIDEventSystemClientCreate(None)
+            if not self._client:
+                return
+            k1 = self._cf.CFStringCreateWithCString(None, b"PrimaryUsagePage", 0x08000100)
+            k2 = self._cf.CFStringCreateWithCString(None, b"PrimaryUsage", 0x08000100)
+            v1_val, v2_val = ctypes.c_int(0xff00), ctypes.c_int(5)
+            v1 = self._cf.CFNumberCreate(None, 9, ctypes.byref(v1_val))
+            v2 = self._cf.CFNumberCreate(None, 9, ctypes.byref(v2_val))
+            keys = (CFTypeRef * 2)(k1, k2)
+            vals = (CFTypeRef * 2)(v1, v2)
+            self._matching = self._cf.CFDictionaryCreate(None, keys, vals, 2, None, None)
+            self._iokit.IOHIDEventSystemClientSetMatching(self._client, self._matching)
+            self._prop_key = self._cf.CFStringCreateWithCString(None, b"Product", 0x08000100)
+            for ref in (k1, k2, v1, v2):
+                self._cf.CFRelease(ref)
+        except Exception:
+            self._client = None
+
+    def read_temperature(self) -> float | None:
+        if not self._client:
+            return None
+        try:
+            services = self._iokit.IOHIDEventSystemClientCopyServices(self._client)
+            if not services:
+                return None
+            count = self._cf.CFArrayGetCount(services)
+            temps = []
+            buf = ctypes.create_string_buffer(64)
+            for i in range(count):
+                srv = self._cf.CFArrayGetValueAtIndex(services, i)
+                prop_val = self._iokit.IOHIDServiceClientCopyProperty(srv, self._prop_key)
+                name = ""
+                if prop_val:
+                    if self._cf.CFStringGetCString(prop_val, buf, 64, 0x08000100):
+                        name = buf.value.decode("utf-8")
+                    self._cf.CFRelease(prop_val)
+                if "tdie" not in name and "tdev" not in name:
+                    continue
+                event = self._iokit.IOHIDServiceClientCopyEvent(srv, 15, 0, 0)
+                if event:
+                    val = self._iokit.IOHIDEventGetFloatValue(event, (15 << 16))
+                    self._cf.CFRelease(event)
+                    if 10.0 < val < 125.0:
+                        temps.append(val)
+            self._cf.CFRelease(services)
+            return round(max(temps), 1) if temps else None
+        except Exception:
+            return None
+
+
 class _Metal:
     """macOS: an Apple GPU's readings from the IOKit registry (`ioreg -l -w0 -r -c IOAccelerator`, 22 ms), with
     _Nvml's interface: the load and the memory are the driver's PerformanceStatistics of the index'th accelerator
     node - Device Utilization % and the in-use system memory in bytes.  The total is the device's Metal working set,
-    the budget one app gets of the unified memory.  No temperature or power reading exists without root
-    (`powermetrics`), and an Apple Silicon GPU sits on the die, so the PCIe cards have nothing to show."""
+    the budget one app gets of the unified memory.  Temperature is read via IOHID thermal sensors without root."""
     note = ("no GPU temperature or power reading without root (powermetrics), and an Apple Silicon GPU sits on the "
             "die, so there is no PCIe link to show; the engine's own figures are in its log")
     cmd = ("ioreg", "-l", "-w0", "-r", "-c", "IOAccelerator")
 
-    def __init__(self, index=0, run=None):
+    def __init__(self, index=0, run=None, thermal=None):
         self.index = index
         self._run = run or self._ioreg
         self.nodes = len(self._blocks())
         self._name = None
+        self._thermal = thermal or (_AppleSiliconThermal() if run is None else None)
         b = self._block()
         if b:
             m = re.search(r'"model" = "([^"]+)"', b)
@@ -342,6 +437,10 @@ class _Metal:
         used = num("In use system memory")
         out["mem_used"] = int(used) if used is not None else None
         out["mem_total"] = metal_working_set()
+        if self._thermal:
+            t = self._thermal.read_temperature()
+            if t is not None:
+                out["temp"] = t
         return out
 
 
