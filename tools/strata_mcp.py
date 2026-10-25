@@ -476,7 +476,11 @@ class Strata:
     def tables(self):
         s = self.setup_module()
         if s is not None:
-            return s.MODELS, {**s.FAMILIES, **self.own_families()}, list(s.CONTEXTS), "setup.py"
+            models = dict(s.MODELS)
+            for own in (getattr(s, "OWN_PATH_FAMILIES", None) or {}).values():
+                for m, d in own.get("models", {}).items():
+                    models.setdefault(m, d)
+            return models, {**s.FAMILIES, **self.own_families()}, list(s.CONTEXTS), "setup.py"
         return FALLBACK_MODELS, FALLBACK_FAMILIES, FALLBACK_CONTEXTS, "built-in table (setup.py not importable)"
 
     def own_families(self) -> dict:
@@ -997,8 +1001,8 @@ class Strata:
                 cfg = self.read_config(c)
                 name = cfg.get("model_name") or tag
                 q36_sizes.append({
-                    "model": name, "about": "Qwen3.6-35B-A3B Metal native GGUF", "download_gb": 12.0,
-                    "experimental": False, "images": False, "ram_needed_gb": 16.0, "experts_gb": 12.0,
+                    "model": "UD-Q2_K_XL", "about": f"{name} (Metal native GGUF with MTP)", "download_gb": 12.6,
+                    "experimental": False, "images": False, "ram_needed_gb": 16.0, "experts_gb": 11.7,
                     "mem_total": True, "memory_gb": 13.0, "on_this_pc": "fits",
                     "installed": True, "id": tag, "engine_min": None
                 })
