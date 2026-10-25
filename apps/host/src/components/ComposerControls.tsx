@@ -37,8 +37,7 @@ export function ComposerControls({ session, onPreview, onAttach, onError, onSlas
 }) {
     const remoteModel = useStore(s => s.remoteModel);
     const native = useNative();
-    const nativeModel = native?.instances.find(i => i.id === native.defaultId);
-    const [toolsOpen, setToolsOpen] = useState(false);
+    const nativeModel = native?.instances.find(i => i.id === native?.defaultId);
     const library = useStore(s => s.library);
     const loaded = library?.variants.find(v => v.id === library.loaded);
     const remote = useStore(s => s.remoteModel), providers = useStore(s => s.providers);
@@ -155,8 +154,7 @@ export function ComposerControls({ session, onPreview, onAttach, onError, onSlas
         return () => window.removeEventListener('keydown', key);
     }, [preferences, session?.id]);
     return <>
-    {tr(!remoteModel && nativeModel?.metrics?.mcp?.servers?.length ? <button className="composer-choice" aria-label={tr("Use connected MCP tools")} aria-pressed={session?.preferences?.useTools === true} onClick={() => session?.preferences?.useTools ? setChatPreferences(session.id, { useTools: false }) : setToolsOpen(true)}><Icon name="skills" size={16}/>{tr("Tools")}{tr(session?.preferences?.useTools ? ' on' : '')}</button> : null)}
-    <Dialog open={toolsOpen} compact title={tr("Enable connected tools?")} onClose={() => setToolsOpen(false)} actions={<><Btn onClick={() => setToolsOpen(false)}>{tr("Keep tools off")}</Btn><Btn variant="primary" onClick={() => { setChatPreferences(session?.id, { useTools: true, mode: 'bypass' }); setToolsOpen(false); }}>{tr("Enable tools")}</Btn></>}><p>{tr("Connected servers can act on the resources you configured. Calls run automatically when the model chooses them, and their results appear in chat.")}</p><p className="small muted">{tr("This switches this conversation to Bypass permissions. Servers: ")}{tr((nativeModel?.metrics?.mcp?.servers ?? []).map((s: any) => s.name).join(', '))}.</p></Dialog>
+    {tr(!remoteModel && nativeModel?.metrics?.mcp?.servers?.length ? <button className={`composer-choice composer-tools${session?.preferences?.useTools ? ' is-active' : ''}`} aria-label={tr("Use connected MCP tools")} aria-pressed={session?.preferences?.useTools === true} onClick={() => session && setChatPreferences(session.id, { useTools: !(session.preferences?.useTools === true) })}><Icon name="skills" size={16}/>{tr("Tools")}{tr(session?.preferences?.useTools ? ' on' : '')}</button> : null)}
     <input ref={files} type="file" multiple hidden accept="image/*,.pdf,.txt,.md,.markdown,.csv,.ts,.tsx,.js,.jsx,.py,.json,.css,.rs,.go,.sh,.html,.htm,.yaml,.yml,.toml,.xml,.log" onChange={e => { void addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }}/>
     <input ref={folder} type="file" multiple hidden onChange={e => { void addFiles(Array.from(e.target.files ?? []), true); e.target.value = ''; }}/>
     <input ref={previewFile} type="file" hidden onChange={e => { void openFile(e.target.files?.[0]); e.target.value = ''; }}/>

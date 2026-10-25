@@ -90,3 +90,18 @@ test('buildProfile hands the skipped servers on for the chat to report', () => {
   assert.deepEqual(profile.mcpSkipped.map(s => s.why), ['name']);
   assert.match(profile.patch, /"serverName": "ok"/);
 });
+
+test("the chat's Tools toggle governs the connected MCP rows: off connects none, on or unset connects as before", () => {
+  const local = [{ id: 'a', modelId: 'm', baseUrl: 'http://127.0.0.1:1/v1', mcpServers: { demo: cmd } }];
+  const tools = { off: new Set(), search: { provider: 'builtin', key: '' }, servers: { mine: cmd } };
+  const names = profile => profile.patch.match(/"serverName": "([^"]+)"/g)?.map(s => s.slice(15, -1)) ?? [];
+  const on = buildProfile({ local, tools, connectMcp: true });
+  assert.deepEqual(names(on).sort(), ['demo', 'mine'], 'toggle on: every connected server is offered');
+  const off = buildProfile({ local, tools, connectMcp: false });
+  assert.deepEqual(names(off), [], 'toggle off: the connected servers are really disconnected');
+  assert.notEqual(off.toolsSignature, on.toolsSignature, 'the flip restarts the agent with the new profile');
+  assert.deepEqual(names(buildProfile({ local, tools })), ['demo', 'mine'], 'unset connects, as every existing caller expects');
+  // the person's own instruction tools are Settings -> Tools' to govern, not the composer toggle's
+  const own = buildProfile({ local, tools: { ...tools, toolFile: '/tools.json', hasInstructionTools: true }, connectMcp: false });
+  assert.deepEqual(names(own), ['strata-instructions'], 'toggle off still leaves the person\'s own tools in place');
+});

@@ -336,6 +336,26 @@ class ToolLoop(unittest.TestCase):
             self.post(req)
             self.assertNotIn("fake__echo", self.engine.prompt_text(-1))
 
+    def test_toggling_tools_off_disconnects_for_the_next_turn(self):
+        """Kingdon's M2 report (task 000712): after a chat toggles tools off, the model must not see
+        tools any more. The host's own shape after an auto-run turn: the empty-content tool-call turn
+        and the tool result never enter the client's history, so the toggle-off request is plain.
+        (Recorded, not asserted here: a client that keeps the whole OpenAI history — past exchange
+        included — DOES see the tools re-armed by the template for a request that offers none; the
+        host never sends that shape.)"""
+        self.start(call_script("fake__add", a=1234, b=5678), "</think>\n\nThe result of 1234 + 5678 is 6912.")
+        code, text = self.post({"strata_mcp": True})
+        self.assertEqual(code, 200, text)
+        self.assertIn("fake__add", self.engine.prompt_text(0))         # the first turn offered the tools
+        user1 = {"role": "user", "content": "What is 1234 + 5678? Use your add tool."}
+        answer = {"role": "assistant", "content": "The result of 1234 + 5678 is 6912."}
+        code, text = self.post({"model": "m", "messages": [user1, answer, {"role": "user", "content": "What tools do you have now?"}], "stream": False})
+        self.assertEqual(code, 200, text)
+        prompt = self.engine.prompt_text(-1)
+        self.assertNotIn("fake__add", prompt, "the toggle-off turn must offer no tools")
+        self.assertNotIn("# Tools", prompt)
+        self.assertNotIn("<function=", prompt)
+
     def test_own_tools_still_go_to_the_client(self):
         own = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {
             "q": {"type": "string"}}}}}]
@@ -444,6 +464,90 @@ class NoServers(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+# ------------------------------------------------------------------------------------------------ the endpoints
+class Endpoints(unittest.TestCase):
+    """GET /v1/mcp/tools and POST /v1/mcp/call: the host chat's ask mode - the schemas it offers the model and the
+    executor for a call its user approved.  The same hub the web app's loop runs, guarded like /settings."""
+
+    def setUp(self):
+        self.log = tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl")
+        self.log.close()
+        os.environ["FAKE_MCP_LOG"] = self.log.name
+        self.hub = McpHub({"fake": stdio()}, {"timeout_s": 10, "max_result_chars": 500, "max_rounds": 2})
+        self.hub.start(wait=True)
+        tok = ByteTokenizer()
+        self.svc = Service(MockEngine(tok, ["\n\nhi"], max_context=CTX), tok,
+                           ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc.mcp = self.hub
+        self.httpd = serve(self.svc, port=0)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.hub.close()
+        del os.environ["FAKE_MCP_LOG"]
+        os.unlink(self.log.name)
+
+    def get(self, path):
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=30) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, json.loads(e.read().decode())
+
+    def post(self, path, body, headers=None):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, json.loads(e.read().decode())
+
+    def test_tools_schemas(self):
+        code, tools = self.get("/v1/mcp/tools")
+        self.assertEqual(code, 200)
+        echo = next(t for t in tools if t["function"]["name"] == "fake__echo")
+        self.assertEqual(echo["type"], "function")
+        self.assertEqual(echo["function"]["parameters"]["properties"]["text"]["type"], "string")
+
+    def test_call_runs_the_tool(self):
+        code, r = self.post("/v1/mcp/call", {"name": "fake__echo", "arguments": {"text": "approved"}})
+        self.assertEqual(code, 200, r)
+        self.assertEqual((r["ok"], r["text"], r["server"], r["tool"]), (True, "approved", "fake", "echo"))
+        code, r = self.post("/v1/mcp/call", {"name": "fake__add", "arguments": {"a": 20, "b": 22}})
+        self.assertEqual((code, r["text"]), (200, "42"))
+
+    def test_call_reports_a_failing_tool_as_a_result(self):
+        code, r = self.post("/v1/mcp/call", {"name": "fake__fail", "arguments": {}})
+        self.assertEqual((code, r["ok"], r["text"]), (200, False, "error: it failed on purpose"))
+
+    def test_call_answers_an_unknown_name_as_an_error_result(self):
+        code, r = self.post("/v1/mcp/call", {"name": "nope__nothing", "arguments": {}})
+        self.assertEqual(code, 200)
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["text"].startswith("error: there is no tool"))
+
+    def test_call_wants_a_name(self):
+        code, r = self.post("/v1/mcp/call", {"arguments": {}})
+        self.assertEqual(code, 400)
+        self.assertIn("name", r["error"]["message"])
+
+    def test_call_refuses_a_foreign_page(self):
+        code, r = self.post("/v1/mcp/call", {"name": "fake__echo", "arguments": {"text": "x"}},
+                            headers={"Origin": "https://else.example"})
+        self.assertEqual(code, 403)
+
+    def test_no_servers_no_tools(self):
+        self.svc.mcp = None
+        self.assertEqual(self.get("/v1/mcp/tools"), (200, []))
+        code, r = self.post("/v1/mcp/call", {"name": "fake__echo", "arguments": {}})
+        self.assertEqual(code, 404)
 
 
 if __name__ == "__main__":
