@@ -63,3 +63,7 @@ Revisit only if the fork starts shipping releases.
 5. The two engine-tree overlap files (`metal/CMakeLists.txt`, `metal/kernels/quant.metal`) and
    `docs/TEST_REQUESTS.md` are the only places both sides have touched — resolve them as unions when the
    engine-adjacent slice (if approved) lands.
+6. Owner decision (2026-10-25): small bugfixes ride along inline with the story that touches them —
+   no separate patch release per fix. Each concern still gets its own commit and a line in the PR body;
+   the review of a mixed PR lands as a docs file in the same branch (see docs/PR24_REVIEW.md and its
+   punch list for the pre-release checks).

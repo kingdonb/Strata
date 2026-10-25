@@ -5069,6 +5069,17 @@ class MacTelemetry(unittest.TestCase):
         self.assertEqual(g.read(), {})
         self.assertIsNone(g.name())
 
+    def test_thermal_reading_apple_silicon(self):
+        from serve import telemetry
+        fake_thermal = mock.Mock()
+        fake_thermal.read_temperature.return_value = 42.5
+        g = telemetry._Metal(0, run=lambda: IOREG_FIXTURE, thermal=fake_thermal)
+        self.assertTrue(g.ok())
+        with mock.patch("serve.telemetry.metal_working_set", lambda: WORKING_SET):
+            reading = g.read()
+            self.assertEqual(reading["temp"], 42.5)
+            self.assertEqual(reading["util"], 76)
+
     def test_bad_process(self):
         from serve import telemetry
         g = telemetry._Metal(0, run=lambda: (_ for _ in ()).throw(OSError("no ioreg")))
