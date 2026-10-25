@@ -36,9 +36,11 @@ export function ContextPanel({ session, open, inline = false, onClose }: {
     const inventory = nativeModel?.metrics?.mcp;
     const toolsOn = session?.preferences?.useTools === true;
     const demoCalls = calls.some(c => c.scope !== 'connected');
+    const posture = session?.preferences?.mode ?? 'manual';
     const toolsLine = inventory?.servers?.length
       ? (!toolsOn ? 'This conversation has tools off. The Tools button in the composer turns them on.'
-        : session?.preferences?.toolPolicy === 'ask' ? 'The model proposes each call and waits for your approval.'
+        : posture === 'plan' ? 'Plan keeps this conversation read-only; connected tools stay off for its turns.'
+        : posture === 'manual' ? 'The model proposes each call and waits for your approval.'
         : 'Calls run automatically when the model chooses them.')
       : demoCalls ? 'Recorded proposals and approvals are examples.' : '';
     function change(key: string, value: boolean) {

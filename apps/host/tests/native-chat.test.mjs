@@ -41,7 +41,11 @@ test('streamed tool_calls fragments assemble into one proposal frame',async()=>{
 test('the plain chat default stays byte-identical and the demo proposals stay demo-only',async()=>{
  const fs=await import('node:fs');
  const route=fs.readFileSync(new URL('../server/index.mjs',import.meta.url),'utf8');
- assert.match(route,/\.\.\.\(ask\?\{tools\}:\{strata_mcp:useTools===true\}\)/,'auto keeps the exact opt-in the plain chat always sent');
+ assert.match(route,/\.\.\.\(ask\?\{tools\}:\{strata_mcp:useTools===true&&posture!=='plan'\}\)/,'auto keeps the exact opt-in the plain chat always sent; Plan alone turns tools inert');
+ assert.match(route,/const ask=useTools===true&&posture==='manual'/,'the Mode selector governs the posture: Manual asks');
+ assert.match(route,/mode:typeof body\.mode==='string'\?body\.mode:null/,'the turn carries the chat\'s Mode choice');
+ const composer=fs.readFileSync(new URL('../src/components/ComposerControls.tsx',import.meta.url),'utf8');
+ assert.ok(!composer.includes('Enable connected tools?'),'the tools toggle opens no dialog');
  const inference=fs.readFileSync(new URL('../server/inference.mjs',import.meta.url),'utf8');
  const proposeAt=inference.indexOf('function proposeTools');
  const demoAt=inference.indexOf('async function demoCompletion');

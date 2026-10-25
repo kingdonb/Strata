@@ -1735,7 +1735,6 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
         nativeModelId:nativeState()?.instances.length?nativeState()?.defaultId:undefined,
         ...(pictures.length ? { imageIds: await uploadChatPhotos(pictures, sessionId) } : {}),
         useTools:state.sessions.find(s=>s.id===sessionId)?.preferences?.useTools===true,
-        toolPolicy:state.sessions.find(s=>s.id===sessionId)?.preferences?.mode==='bypass'?'auto':state.sessions.find(s=>s.id===sessionId)?.preferences?.toolPolicy,
         // A chat set to plain talk (preferences.agent === false) never runs a tool: the host answers it directly.
         ...(state.sessions.find(s=>s.id===sessionId)?.preferences?.agent===false?{agent:false}:{}),
         thinking:state.sessions.find(s=>s.id===sessionId)?.preferences?.thinking??'Medium',

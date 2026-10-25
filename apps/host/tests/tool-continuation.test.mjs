@@ -52,7 +52,7 @@ test('a tool continuation sends the exchange in the engine shape, with no user w
     remoteModel: null,
     library: { mode: 'real', variants: [], loaded: 'fixture' },
     sessions: [{
-      id: 's1', title: 'Tools', updatedAt: '1', preferences: { useTools: true, toolPolicy: 'ask' },
+      id: 's1', title: 'Tools', updatedAt: '1', preferences: { useTools: true, mode: 'manual' },
       messages: [
         { id: 'u1', role: 'user', content: 'add 20 and 22', at: '2026-10-25T00:00:00Z' },
         { id: 'a1', role: 'assistant', content: 'Let me check.', at: '2026-10-25T00:00:01Z', tools: [{ id: 'c9', name: 'fake__add', args: { a: 20, b: 22 }, preview: '{"a":20,"b":22}', effect: 'Connected tool. It runs when you approve it.', scope: 'connected', state: 'done', result: '42', approved: true }] },
@@ -68,7 +68,8 @@ test('a tool continuation sends the exchange in the engine shape, with no user w
   assert.equal(body.toolContinuation, true);
   assert.equal(body.agent, false, 'the agent path does not take a plain-chat continuation');
   assert.equal(body.useTools, true);
-  assert.equal(body.toolPolicy, 'ask');
+  assert.equal(body.toolPolicy, undefined, 'the separate policy preference is retired');
+  assert.equal(body.mode, 'manual', 'the Mode selector governs the posture');
   assert.deepEqual(body.history, [
     { role: 'user', content: 'add 20 and 22' },
     { role: 'assistant', content: 'Let me check.', tool_calls: [{ function: { name: 'fake__add', arguments: '{"a":20,"b":22}' } }] },
