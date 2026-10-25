@@ -154,7 +154,7 @@ export function ComposerControls({ session, onPreview, onAttach, onError, onSlas
         return () => window.removeEventListener('keydown', key);
     }, [preferences, session?.id]);
     return <>
-    {tr(!remoteModel && nativeModel?.metrics?.mcp?.servers?.length ? <button className="composer-choice" aria-label={tr("Use connected MCP tools")} aria-pressed={session?.preferences?.useTools === true} onClick={() => session && setChatPreferences(session.id, { useTools: !(session.preferences?.useTools === true) })}><Icon name="skills" size={16}/>{tr("Tools")}{tr(session?.preferences?.useTools ? ' on' : '')}</button> : null)}
+    {tr(!remoteModel && nativeModel?.metrics?.mcp?.servers?.length ? <button className={`composer-choice composer-tools${session?.preferences?.useTools ? ' is-active' : ''}`} aria-label={tr("Use connected MCP tools")} aria-pressed={session?.preferences?.useTools === true} onClick={() => session && setChatPreferences(session.id, { useTools: !(session.preferences?.useTools === true) })}><Icon name="skills" size={16}/>{tr("Tools")}{tr(session?.preferences?.useTools ? ' on' : '')}</button> : null)}
     <input ref={files} type="file" multiple hidden accept="image/*,.pdf,.txt,.md,.markdown,.csv,.ts,.tsx,.js,.jsx,.py,.json,.css,.rs,.go,.sh,.html,.htm,.yaml,.yml,.toml,.xml,.log" onChange={e => { void addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }}/>
     <input ref={folder} type="file" multiple hidden onChange={e => { void addFiles(Array.from(e.target.files ?? []), true); e.target.value = ''; }}/>
     <input ref={previewFile} type="file" hidden onChange={e => { void openFile(e.target.files?.[0]); e.target.value = ''; }}/>
