@@ -279,16 +279,20 @@ class NoLeakedSampler(unittest.TestCase):
         import threading
         import time
         tok = ByteTokenizer()
-        before = sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)"))
+        for _ in range(50):
+            if sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)") and t.is_alive()) == 0:
+                break
+            time.sleep(0.05)
+        before = sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)") and t.is_alive())
         httpd = serve(Service(MockEngine(tok, ANSWER, max_context=16384), tok, TEMPLATE), port=0)
-        self.assertEqual(sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)")), before + 1)
+        self.assertEqual(sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)") and t.is_alive()), before + 1)
         httpd.shutdown()
         httpd.server_close()
         for _ in range(50):
-            if sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)")) == before:
+            if sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)") and t.is_alive()) == before:
                 break
             time.sleep(0.1)
-        self.assertEqual(sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)")), before)
+        self.assertEqual(sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)") and t.is_alive()), before)
 
 
 # ------------------------------------------------------------------------------------------------ over HTTP
