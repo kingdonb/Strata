@@ -144,12 +144,12 @@ export function timeskipRevisionMessage(request) {
   ].join('\n');
 }
 
-/** End a process and everything it started (the job, the Python it runs, the revision command and its Node). */
+/** End a process and everything it started (the job, the Python it runs, the revision command and its Node). The job is spawned detached, so on POSIX one negative-pid signal reaches its whole process group; Windows walks the parent-child tree with taskkill /T. */
 function killTree(child) {
   try {
     if (process.platform === 'win32' && child.pid) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-    else child.kill('SIGTERM');
-  } catch { /* already gone */ }
+    else if (child.pid) process.kill(-child.pid, 'SIGTERM');
+  } catch { /* already gone (ESRCH lands here too) */ }
 }
 
 /** How big a folder is, stopping early once it is clearly too big to copy for a trial. */
@@ -305,6 +305,7 @@ export function createTimeSkip({ repoRoot, python, pythonArgs = [], timeoutMs = 
       const child = spawn(python, [...pythonArgs, cli, ...args, '--output', 'json'], {
         cwd: repoRoot,
         windowsHide: true,
+        detached: true,
         env: { ...env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', STRATA_TIMESKIP_DIR: root },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -313,18 +314,10 @@ export function createTimeSkip({ repoRoot, python, pythonArgs = [], timeoutMs = 
       let timedOut = false;
       const timer = setTimeout(() => {
         timedOut = true;
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          /* already gone */
-        }
+        killTree(child);
       }, timeoutMs);
       const onAbort = () => {
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          /* already gone */
-        }
+        killTree(child);
       };
       signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -452,7 +445,7 @@ export function createTimeSkip({ repoRoot, python, pythonArgs = [], timeoutMs = 
         '--attempts', String(Math.max(0, Math.min(10, Number(attempts) || 0))), '--output', 'json'];
       if (reviseCommand) args.push('--revise-command', reviseCommand);
       const child = spawn(python, [...pythonArgs, cli, ...args], {
-        cwd: repoRoot, windowsHide: true, env: { ...env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', ...extraEnv, STRATA_TIMESKIP_DIR: root }, stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: repoRoot, windowsHide: true, detached: true, env: { ...env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', ...extraEnv, STRATA_TIMESKIP_DIR: root }, stdio: ['ignore', 'pipe', 'pipe'],
       });
       let out = '', err = '', closed = null;
       child.stdout.on('data', b => { out += b.toString(); });
@@ -475,7 +468,7 @@ export function createTimeSkip({ repoRoot, python, pythonArgs = [], timeoutMs = 
         await new Promise(r => setTimeout(r, 100));
       }
       if (!id) {
-        if (!closed) { try { child.kill('SIGTERM'); } catch { /* gone */ } return { ok: false, code: 6, error: 'the Time-skip job did not start in time' }; }
+        if (!closed) { killTree(child); return { ok: false, code: 6, error: 'the Time-skip job did not start in time' }; }
         let message = closed.error ?? '';
         try { const parsed = JSON.parse(out.trim().split('\n').filter(Boolean).pop() ?? ''); message = message || parsed?.error?.message || parsed?.error || ''; } catch { /* not JSON */ }
         return { ok: false, code: closed.code ?? 6, error: String(message || err.trim() || out.trim() || 'the Time-skip command ended without a run').slice(0, 600) };
