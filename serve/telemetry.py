@@ -337,8 +337,9 @@ class _AppleSiliconThermal:
             self._matching = self._cf.CFDictionaryCreate(None, keys, vals, 2, None, None)
             self._iokit.IOHIDEventSystemClientSetMatching(self._client, self._matching)
             self._prop_key = self._cf.CFStringCreateWithCString(None, b"Product", 0x08000100)
-            for ref in (k1, k2, v1, v2):
-                self._cf.CFRelease(ref)
+            # NULL callbacks: the dictionary does not retain its keys/values, so the four CF objects must
+            # outlive it (SetMatching/CopyServices read them on every poll; releasing would dangle them).
+            self._matching_refs = (k1, k2, v1, v2)
         except Exception:
             self._client = None
 
