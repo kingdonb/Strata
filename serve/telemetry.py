@@ -380,8 +380,9 @@ class _Metal:
     _Nvml's interface: the load and the memory are the driver's PerformanceStatistics of the index'th accelerator
     node - Device Utilization % and the in-use system memory in bytes.  The total is the device's Metal working set,
     the budget one app gets of the unified memory.  Temperature is read via IOHID thermal sensors without root."""
-    note = ("no GPU temperature or power reading without root (powermetrics), and an Apple Silicon GPU sits on the "
-            "die, so there is no PCIe link to show; the engine's own figures are in its log")
+    note = ("no power reading without root (powermetrics), and an Apple Silicon GPU sits on the die, so there is "
+            "no PCIe link to show; temperature comes from the rootless HID thermal sensors when they answer; "
+            "the engine's own figures are in its log")
     cmd = ("ioreg", "-l", "-w0", "-r", "-c", "IOAccelerator")
 
     def __init__(self, index=0, run=None, thermal=None):
