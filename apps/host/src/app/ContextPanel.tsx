@@ -1,10 +1,11 @@
-import {sessionTitle} from '../lib/session-title';
+import { sessionTitle} from '../lib/session-title';
 import { tr } from '../lib/i18n';
 /** Conversation statistics are deliberately separate from engine telemetry. */
 import { useState } from 'react';
 import { Btn, Dialog, IconBtn } from '../components/ui';
 import { tokens } from '../lib/format';
 import { go, useStore } from '../lib/store';
+import { useNative } from '../lib/native';
 import type { Session } from '../lib/types';
 export function ContextPanel({ session, open, inline = false, onClose }: {
     session: Session | null;
@@ -28,6 +29,18 @@ export function ContextPanel({ session, open, inline = false, onClose }: {
     const usageLabel = replies.some(m => m.usageSource === 'demo') ? 'Tokens in / out (example)' : 'Recorded tokens in / out';
     const requestSize = lastRequest?.inputTokens !== undefined && lastRequest.tokens !== undefined ? lastRequest.inputTokens + lastRequest.tokens : null;
     const model = library?.variants.find(v => v.id === library.loaded);
+    /* What the chat really has: the engine's MCP inventory (polled from the engine's /mcp), this
+       conversation's tools switch, and whether its cards are the demo engine's examples. */
+    const native = useNative();
+    const nativeModel = native?.instances.find(i => i.id === native?.defaultId);
+    const inventory = nativeModel?.metrics?.mcp;
+    const toolsOn = session?.preferences?.useTools === true;
+    const demoCalls = calls.some(c => c.scope !== 'connected');
+    const toolsLine = inventory?.servers?.length
+      ? (!toolsOn ? 'This conversation has tools off. The Tools button in the composer turns them on.'
+        : session?.preferences?.toolPolicy === 'ask' ? 'The model proposes each call and waits for your approval.'
+        : 'Calls run automatically when the model chooses them.')
+      : demoCalls ? 'Recorded proposals and approvals are examples.' : '';
     function change(key: string, value: boolean) {
         const next = { ...expanded, [key]: value };
         setExpanded(next);
@@ -41,7 +54,7 @@ export function ContextPanel({ session, open, inline = false, onClose }: {
         <p className="xs muted">{tr("Request size is input plus output at completion. It is not a live reading of the model cache. Older messages may have no recorded usage.")}</p>
         {tr(lastRequest?.skillsUsed?.length ? <p className="small">{tr("Instructions sent: ")}{tr(lastRequest.skillsUsed.join(', '))}.</p> : null)}
       </div></details>
-      <details className="disclosure" open={!!expanded.tools} onToggle={e => change('tools', e.currentTarget.open)}><summary>{tr("Tool activity \u00B7 ")}{tr(calls.length)}</summary><div>{tr(calls.length ? calls.map(c => <div className="small" key={c.id}>{c.name} · {tr(c.state)}</div>) : <p className="small muted">{tr("No tool calls in this conversation.")}</p>)}<p className="xs muted">{tr("Tool execution is not connected in this build. Recorded proposals and approvals are examples. Availability does not grant permission.")}</p></div></details>
+      <details className="disclosure" open={!!expanded.tools} onToggle={e => change('tools', e.currentTarget.open)}><summary>{tr("Tool activity \u00B7 ")}{tr(calls.length)}</summary><div>{tr(calls.length ? calls.map(c => <div className="small" key={c.id}>{c.name} · {tr(c.state)}</div>) : <p className="small muted">{tr("No tool calls in this conversation.")}</p>)}<p className="small">{tr(inventory?.servers?.length ? `Connected: ${inventory.servers.map((s: { name?: string; tools?: unknown[] }) => `${s.name ?? '?'} (${s.tools?.length ?? 0})`).join(', ')}.` : 'No tools are connected to this model. MCP servers configured for the model give it tools.')}</p>{tr(toolsLine ? <p className="xs muted">{tr(toolsLine)}</p> : null)}</div></details>
       <details className="disclosure" open={!!expanded.engine} onToggle={e => change('engine', e.currentTarget.open)}><summary>{tr("Current engine")}</summary><div><p className="small">{tr(model?.label ?? 'No model loaded')}{tr(library?.mode === 'simulated' ? ' · Example' : '')}</p><p className="xs muted">{tr("The currently loaded model may differ from the model that answered earlier messages.")}</p><div className="row"><Btn size="sm" onClick={() => go('monitor')}>{tr("Monitor")}</Btn><Btn size="sm" onClick={() => go('tuning')}>{tr("Engine")}</Btn></div></div></details>
     </div>
   </aside>;

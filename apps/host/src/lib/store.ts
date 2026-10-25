@@ -1619,7 +1619,7 @@ export async function approvePlan(sessionId: string, planId: string) {
 /** "Start as goal" (and Resume on a paused plan): the host streams the run like any chat turn. */
 export async function startPlanGoal(planId: string) { await sendMessage('', { planId }); }
 
-export async function sendMessage(text: string, options: { fromLoop?: boolean; goalAction?: 'resume'; planId?: string; shown?: string; title?: string; markdown?: boolean } = {}) {
+export async function sendMessage(text: string, options: { fromLoop?: boolean; goalAction?: 'resume'; planId?: string; shown?: string; title?: string; markdown?: boolean; toolContinuation?: { assistantId: string } } = {}) {
   if (state.streaming) {
     // Typed while the assistant works: behind a running goal it waits in the queue; otherwise there is nothing to do but wait.
     const waiting = state.activeSession, line = text.trim();
@@ -1629,7 +1629,7 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
     }
     return;
   }
-  const resume = options.goalAction === 'resume';
+  const resume = options.goalAction === 'resume' || !!options.toolContinuation;   // a tool continuation also goes out with no words of its own
   const planStart = options.planId;
   const loopCommand = options.fromLoop || resume || planStart ? null : parseLoop(text.trim());
   if (loopCommand) { await runLoopCommand(loopCommand); return; }
@@ -1677,13 +1677,27 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
 
      The context meter was reading the same empty array, which is why it sat at
      ~350 tokens however long the conversation grew. */
+  const toolCont = options.toolContinuation;
   const prior = (state.sessions.find((s) => s.id === sessionId)?.messages ?? [])
     .filter(m => !m.timeSkipId && !m.local)
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .filter((m) => m.content.trim())
+    .filter((m) => !toolCont || m.id !== toolCont.assistantId)   // the tool turn enters whole, with its calls
     .map((m) => ({ role: m.role, content: m.content,photos:m.photos }))
     // Bounded so a long conversation cannot send an unbounded body.
     .slice(-40);
+  /* The turn that called tools enters as the OpenAI shape the engine writes itself: the assistant message
+     with its calls, then one result per resolved call. A denied call reads "denied by the user". It is
+     appended after the photo mapping below, which keeps only {role, content}. */
+  const toolExchange: { role: string; content: string; tool_calls?: { function: { name: string; arguments: string } }[] }[] = [];
+  if (toolCont) {
+    const turn = state.sessions.find((s) => s.id === sessionId)?.messages.find((m) => m.id === toolCont.assistantId);
+    const calls = (turn?.tools ?? []).filter((t) => t.scope === 'connected' && t.state !== 'proposed');
+    if (calls.length) {
+      toolExchange.push({ role: 'assistant', content: turn?.content?.trim() ?? '', tool_calls: calls.map((t) => ({ function: { name: t.name, arguments: JSON.stringify(t.args ?? {}) } })) });
+      for (const t of calls) toolExchange.push({ role: 'tool', content: t.state === 'denied' ? 'denied by the user' : String(t.result ?? '') });
+    }
+  }
 
   patchSession(sessionId, (s) => ({
     ...s,
@@ -1714,13 +1728,14 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
       {
         sessionId,
         ...(planStart ? { planId: planStart } : {}),
-        ...(resume ? { goalAction: 'resume' } : planStart ? {} : { message: options.shown ? body : body }),
-        history:await Promise.all(prior.map(async(m,index)=>{const included=pictureCheck.ok?(m.photos??[]).filter((_,p)=>imageSlots.has(`${index}:${p}`)):[];const omitted=(m.photos??[]).filter(p=>!included.includes(p));const text=m.content+(omitted.length?`\n[Earlier pictures: ${omitted.map(p=>p.name).join(', ')}. Their pixels are outside this model's image context; ask to reattach them if needed.]`:'');return {role:m.role,content:included.length?[{type:'text',text},...await Promise.all(included.map(async photo=>({type:'image_url',image_url:{url:(await photoData(photo)).url}})))]:text};})),
+        ...(toolCont ? { message: '', agent: false, toolContinuation: true } : resume ? { goalAction: 'resume' } : planStart ? {} : { message: options.shown ? body : body }),
+        history:[...(await Promise.all(prior.map(async(m,index)=>{const included=pictureCheck.ok?(m.photos??[]).filter((_,p)=>imageSlots.has(`${index}:${p}`)):[];const omitted=(m.photos??[]).filter(p=>!included.includes(p));const text=m.content+(omitted.length?`\n[Earlier pictures: ${omitted.map(p=>p.name).join(', ')}. Their pixels are outside this model's image context; ask to reattach them if needed.]`:'');return {role:m.role,content:included.length?[{type:'text',text},...await Promise.all(included.map(async photo=>({type:'image_url',image_url:{url:(await photoData(photo)).url}})))]:text};}))),...toolExchange],
         model: state.library?.loaded ?? state.library?.current ?? null,
         remoteModel: state.remoteModel,
         nativeModelId:nativeState()?.instances.length?nativeState()?.defaultId:undefined,
         ...(pictures.length ? { imageIds: await uploadChatPhotos(pictures, sessionId) } : {}),
         useTools:state.sessions.find(s=>s.id===sessionId)?.preferences?.useTools===true,
+        toolPolicy:state.sessions.find(s=>s.id===sessionId)?.preferences?.toolPolicy,
         // A chat set to plain talk (preferences.agent === false) never runs a tool: the host answers it directly.
         ...(state.sessions.find(s=>s.id===sessionId)?.preferences?.agent===false?{agent:false}:{}),
         thinking:state.sessions.find(s=>s.id===sessionId)?.preferences?.thinking??'Medium',
@@ -1893,6 +1908,9 @@ export function resolveTool(messageId: string, toolId: string, approved: boolean
   if (!sessionId) return;
   const tool = state.sessions.find(s => s.id === sessionId)?.messages.find(m => m.id === messageId)?.tools?.find(t => t.id === toolId);
   if (tool?.live) { answerAgentTool(sessionId, messageId, tool, approved); return; }
+  /* A connected tool (ask mode) resolves for real: approval runs it through the engine's MCP hub and the
+     model continues from the result; a denial is told to the model the same way. */
+  if (tool?.scope === 'connected' && tool.state === 'proposed') { void resolveConnectedTool(sessionId, messageId, toolId, approved); return; }
 
   patchSession(sessionId, (s) => ({
     ...s,
@@ -1915,6 +1933,32 @@ export function resolveTool(messageId: string, toolId: string, approved: boolean
     ),
   }));
 
+}
+
+/** The chat's ask mode: run an approved connected-tool call through the engine's MCP hub, show the result on
+    its card, and let the model continue from it. A denied call is told to the model the same way, as the
+    result it reads. The cards of this turn carry what the model is told. */
+async function resolveConnectedTool(sessionId: string, messageId: string, toolId: string, approved: boolean) {
+  const patchTool = (fn: (t: ToolCall) => ToolCall) =>
+    patchSession(sessionId, (s) => ({
+      ...s,
+      messages: s.messages.map((m) => m.id === messageId ? { ...m, tools: (m.tools ?? []).map((t) => t.id === toolId ? fn(t) : t) } : m),
+    }));
+  patchTool((t) => ({ ...t, state: approved ? 'running' : 'denied', ...(approved ? {} : { result: 'Denied. Nothing ran.' }) }));
+  if (approved) {
+    const tool = state.sessions.find(s => s.id === sessionId)?.messages.find(m => m.id === messageId)?.tools?.find(t => t.id === toolId);
+    try {
+      const r = await api.post<{ ok: boolean; text?: string; ms?: number }>('/api/tools/run', {
+        name: tool?.name, arguments: tool?.args ?? {},
+        nativeModelId: nativeState()?.instances.length ? nativeState()?.defaultId : undefined,
+      });
+      const text = String(r?.text ?? (r?.ok ? '' : 'error: the tool call did not finish'));
+      patchTool((t) => ({ ...t, state: r?.ok ? 'done' : 'error', result: text, durationMs: Number(r?.ms) || undefined, approved: true }));
+    } catch (e) {
+      patchTool((t) => ({ ...t, state: 'error', result: `error: ${e instanceof Error ? e.message : String(e)}`, approved: true }));
+    }
+  }
+  await sendMessage('', { toolContinuation: { assistantId: messageId } });
 }
 
 /* ------------------------------------------------------------------- routes */
