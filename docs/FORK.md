@@ -14,6 +14,7 @@ from source on the owner's Mac; it ships no installers, no engine packages and n
 
 | Date | Upstream synced through | Merge-base | Slices |
 | --- | --- | --- | --- |
+| 2026-10-25 | **v0.2.3.1** (`7ddc17a3`), range `011c9e60..7ddc17a3` (131 commits, 294 files, +14,913/−661) | `011c9e60` ("Release notes 0.2.2") | Host context handling, Terminal steadiness, safe drafting wiring |
 | 2026-10-23 | **v0.2.2** (`011c9e60`), range `3d1fb480..011c9e60` (404 commits, 590 files, +52,967/−2,271) | `3d1fb480` ("Release notes 0.2.0") | Terminal/Control/serve; host app; docs + this file |
 
 Syncs are **path-scoped and deliberate**, one PR per slice — never a blind merge:
@@ -38,6 +39,7 @@ suites, and record what was skipped and why in the PR.
 | `src/` (CUDA/HIP engine), `sycl/` (Intel) | The fork builds no CUDA/HIP/SYCL engine; keeping them unsynced keeps the fork's delta small. The shared `include/strata/` headers stay synced as one block with them, never piecemeal (deferred engine-adjacent slice, interactive per the working agreement) |
 | `metal/` upstream changes (Gyro trellis kernels, dense tiles) | Engine behavior — deferred behind an owner decision (a Metal Gyro port would let the fork's engine load Gyro files); the overlap with our `quant.metal` is section-disjoint and mergeable later |
 | `packaging/`, `docker/` (except nothing), `.github/`, `Dockerfile`, `installer.nsi` | Upstream release/CI/image machinery the fork does not run |
+| `tools/dflash2/`, `strata_control/drafting_fetch.py` (DFlash2 drafter) | Surveyed, not adopted — targets Qwen3.8-Flash-Next (CUDA/SYCL); the fork's q36 line uses its own native MTP speculative decoding |
 | `bench/**`, `bench.sh`, `BENCH.bat` | Reference material only — no claims, no measurement scope |
 | README translations, `AGENTS.md` upstream changes | They advertise features the fork does not take; the fork's README/AGENTS stay fork-specific |
 | Gyro/RX-6000 model entries | The fork's Metal engine does not load Gyro yet (host references are engine-report-guarded and stay graceful) |
