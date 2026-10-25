@@ -39,9 +39,9 @@ export function ContextPanel({ session, open, inline = false, onClose }: {
     const posture = session?.preferences?.mode ?? 'manual';
     const toolsLine = inventory?.servers?.length
       ? (!toolsOn ? 'This conversation has tools off. The Tools button in the composer turns them on.'
-        : posture === 'plan' ? 'Plan keeps this conversation read-only; connected tools stay off for its turns.'
-        : posture === 'manual' ? 'The model proposes each call and waits for your approval.'
-        : 'Calls run automatically when the model chooses them.')
+        : posture === 'bypass' ? 'Calls run automatically — Bypass.'
+        : posture === 'plan' ? 'Calls ask first — Plan; nothing runs until you approve.'
+        : 'Calls ask first — Manual. The model proposes each call and waits for your approval.')
       : demoCalls ? 'Recorded proposals and approvals are examples.' : '';
     function change(key: string, value: boolean) {
         const next = { ...expanded, [key]: value };
