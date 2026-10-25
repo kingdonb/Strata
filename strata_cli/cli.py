@@ -169,6 +169,8 @@ def parser() -> argparse.ArgumentParser:
     models_move.add_argument("--plan", action="store_true", help="say what would happen and change nothing")
     models_move.add_argument("--cancel-file", metavar="PATH", help="stop (safely) when this file appears")
     models_move.add_argument("--output", choices=("human", "json", "jsonl"), default="human")
+    from strata_cli import drafting_cmd
+    drafting_cmd.add_parser(sp)
     engine = sp.add_parser("engine", help="engine tuning and component actions")
     engine_sp = engine.add_subparsers(dest="engine_command", required=True)
     calibrate = engine_sp.add_parser("calibrate", help="measure, review and apply engine tuning")
@@ -604,7 +606,7 @@ def _models(a: argparse.Namespace) -> int:
 def _import_problem(plan: dict) -> str:
     """Why `models import --plan` refused, in plain words (the codes stay in --output json)."""
     from strata_control import models as own_models
-    words = own_models.problem_words(plan.get("issues") or [])
+    words = own_models.problem_words(plan.get("issues") or [], missing=plan.get("missing_shards"))
     text = f"These files cannot be used as they are: {words}."
     holds = next((m for m in plan.get("messages") or [] if "holds" in m), "")
     if holds:
@@ -2141,6 +2143,9 @@ def _run(a: argparse.Namespace) -> int:
             return _models(a)
         if a.command == "engine":
             return _calibration(a)
+        if a.command == "drafting":
+            from strata_cli import drafting_cmd as _drafting_cmd
+            return _drafting_cmd.run(a)
         if a.command == "bench":
             return _bench(a)
         if a.command == "timeskip":

@@ -57,7 +57,5 @@ test('Cargo.toml, tauri.conf.json and the desktop package agree on the app versi
   const cargo = /^version\s*=\s*"([^"]+)"/m.exec(await readFile(new URL('src-tauri/Cargo.toml', root), 'utf8'))[1];
   const pkg = JSON.parse(await readFile(new URL('package.json', root), 'utf8')).version;
   assert.equal(cargo, pkg);
-  // fork: the app version stays 0.2.0-beta (approved versioning decision — no blind bumps);
-  // upstream's line expects its own 0.2.2
-  assert.equal(cargo, '0.2.0-beta');
+  assert.equal(cargo, '0.2.3');
 });
