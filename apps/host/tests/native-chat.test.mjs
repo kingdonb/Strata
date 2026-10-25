@@ -37,3 +37,22 @@ test('streamed tool_calls fragments assemble into one proposal frame',async()=>{
  assert.equal(tool.scope,'connected');assert.equal(result.finishReason,'tool_calls');
  }finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
 });
+
+test('the plain chat default stays byte-identical and the demo proposals stay demo-only',async()=>{
+ const fs=await import('node:fs');
+ const route=fs.readFileSync(new URL('../server/index.mjs',import.meta.url),'utf8');
+ assert.match(route,/\.\.\.\(ask\?\{tools\}:\{strata_mcp:useTools===true\}\)/,'auto keeps the exact opt-in the plain chat always sent');
+ const inference=fs.readFileSync(new URL('../server/inference.mjs',import.meta.url),'utf8');
+ const proposeAt=inference.indexOf('function proposeTools');
+ const demoAt=inference.indexOf('async function demoCompletion');
+ assert.ok(proposeAt>0&&demoAt>proposeAt,'proposeTools sits in the demo section, before its only caller');
+ assert.ok(!inference.slice(0,proposeAt).includes('proposeTools('),'nothing on a real-model path calls it');
+});
+
+test('a connected proposal resolves into a real run and a continuation',async()=>{
+ const fs=await import('node:fs');
+ const store=fs.readFileSync(new URL('../src/lib/store.ts',import.meta.url),'utf8');
+ assert.match(store,/resolveConnectedTool\(sessionId, messageId, toolId, approved\)/,'resolveTool hands connected proposals to the real flow');
+ assert.match(store,/\/api\/tools\/run/,'approval runs the call through the host route');
+ assert.match(store,/toolContinuation: \{ assistantId: messageId \}/,'the turn continues from the result');
+});
