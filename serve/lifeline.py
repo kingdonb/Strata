@@ -100,10 +100,10 @@ for s in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
     signal.signal(s, signal.SIG_IGN)               # it ends with its pipe, not with the terminal
 def start_of(p):
     try:
-        out = subprocess.run(["ps", "-o", "lstart=,stat=", "-p", str(p)], capture_output=True, text=True, timeout=5).stdout.strip()
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(p)], capture_output=True, text=True, timeout=5).stdout.strip()
     except Exception:
         return None
-    return None if not out or out.endswith("Z") else "s:" + out
+    return None if not out else "s:" + out
 os.set_blocking(0, True)
 data = b""
 while True:
@@ -135,11 +135,11 @@ _watchers_lock = threading.Lock()
 
 def _start_token(pid: int) -> str:
     try:
-        out = subprocess.run(["ps", "-o", "lstart=,stat=", "-p", str(pid)], capture_output=True, text=True,
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
                              timeout=5).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return ""
-    return "" if not out or out.endswith("Z") else "s:" + out
+    return "" if not out else "s:" + out
 
 
 def _watch(child: subprocess.Popen) -> None:
