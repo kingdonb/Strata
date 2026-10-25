@@ -71,6 +71,7 @@ import { forbidden as acquisitionForbidden } from './acquisition.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { nativeGateway } from './native-gateway.mjs';
 import { proxyCompletion } from './inference.mjs';
+import { connectedTools, runConnectedTool } from './tool-run.mjs';
 import { apiPath } from './api-paths.mjs';
 import { findFreePort, listenProblem } from './ports.mjs';
 import { validateChatImages } from './chat-images.mjs';
@@ -615,12 +616,16 @@ async function runAgentTurn({ res, controller, chatId, body, message, workspaceI
   }
 }
 
-async function runTurn({ message, history = [], onFrame, signal, client, workspaceId = null, sessionId = null, remoteModel = null, runtimeModelId = undefined, nativeModelId, images=[], useTools=false, thinking='medium', thinkingBudget=0 }) {
+async function runTurn({ message, history = [], onFrame, signal, client, workspaceId = null, sessionId = null, remoteModel = null, runtimeModelId = undefined, nativeModelId, images=[], useTools=false, toolPolicy=null, thinking='medium', thinkingBudget=0 }) {
   if (remoteModel) return runRemoteTurn({ selection: remoteModel, message, history, images, onFrame, signal, workspaceId });
   if(native.hasLive()||nativeModelId){
     let instance;try{instance=native.resolveInstance(nativeModelId??native.state().defaultId);}catch(e){const message=plainNoModel(e.message);onFrame({type:'error',message});return {error:message};}const started=Date.now(),cancel=new AbortController();
+    /* Ask mode: offer the engine's connected tools as schemas and let the chat approve each call; auto (the
+       default) keeps the engine's own loop byte for byte. */
+    const ask=useTools===true&&toolPolicy==='ask';
+    const tools=ask?await connectedTools({baseUrl:`http://127.0.0.1:${instance.port}/v1`,key:instance.key}):null;
     const entry=serving.open({client:client??'Strata chat',endpoint:'/chat/completions',model:instance.apiModelId,instanceId:instance.id,gpuIds:instance.gpus.map(String),cancel:()=>cancel.abort()});
-    try{serving.mark(entry.id,{state:'generating'});const applied=selectSkills(skillState,message,workspaceId);const result=await proxyCompletion({baseUrl:`http://127.0.0.1:${instance.port}/v1`,modelId:instance.apiModelId,authorization:instance.key,message,history,images,extra:{strata_mcp:useTools===true,...(thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}),reasoning_effort:({off:'none',max:'high'}[String(thinking).toLowerCase()]??String(thinking).toLowerCase())},systemPrompt:[SYSTEM_PROMPT,skillInstructions(applied)].filter(Boolean).join('\n\n'),signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame:frame=>onFrame({...frame,requestId:entry.id,model:instance.label,contextMax:instance.metrics?.engine?.max_context??instance.context,skills:applied.map(s=>s.name)})});serving.mark(entry.id,{...result,usageSource:result.usageSource});serving.finish(entry.id,{tokensOut:result.tokensOut,durationMs:Date.now()-started});return result;}catch(e){serving.finish(entry.id,{durationMs:Date.now()-started,error:e.message});onFrame({type:'error',message:e.message,requestId:entry.id});return {error:e.message};}
+    try{serving.mark(entry.id,{state:'generating'});const applied=selectSkills(skillState,message,workspaceId);const result=await proxyCompletion({baseUrl:`http://127.0.0.1:${instance.port}/v1`,modelId:instance.apiModelId,authorization:instance.key,message,history,images,extra:{...(ask?{tools}:{strata_mcp:useTools===true}),...(thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}),reasoning_effort:({off:'none',max:'high'}[String(thinking).toLowerCase()]??String(thinking).toLowerCase())},systemPrompt:[SYSTEM_PROMPT,skillInstructions(applied)].filter(Boolean).join('\n\n'),signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame:frame=>onFrame({...frame,requestId:entry.id,model:instance.label,contextMax:instance.metrics?.engine?.max_context??instance.context,skills:applied.map(s=>s.name)})});serving.mark(entry.id,{...result,usageSource:result.usageSource});serving.finish(entry.id,{tokensOut:result.tokensOut,durationMs:Date.now()-started});return result;}catch(e){serving.finish(entry.id,{durationMs:Date.now()-started,error:e.message});onFrame({type:'error',message:e.message,requestId:entry.id});return {error:e.message};}
   }
   runtimeState();
   let instance;
@@ -1901,6 +1906,19 @@ async function api(req, res, path, method, url) {
     try { return json(res, 200, await agent.stop(b.sessionId)); } catch (e) { return error(res, 502, e.message); }
   }
 
+  // --- connected tools (ask mode) ------------------------------------------
+  if (path === '/api/tools/run' && method === 'POST') {
+    const body = await readBody(req, 1024 * 1024);
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) return error(res, 400, 'name is required');
+    if (body.arguments !== undefined && (typeof body.arguments !== 'object' || body.arguments === null || Array.isArray(body.arguments))) return error(res, 400, 'arguments must be an object');
+    let instance;
+    try { instance = native.resolveInstance(typeof body.nativeModelId === 'string' && body.nativeModelId ? body.nativeModelId : native.state().defaultId); }
+    catch (e) { return error(res, 409, e.message); }
+    const result = await runConnectedTool({ baseUrl: `http://127.0.0.1:${instance.port}/v1`, key: instance.key, name, arguments: body.arguments ?? {} });
+    return json(res, 200, result);
+  }
+
   // --- chat ---------------------------------------------------------------
   if ((path === '/api/chat/stream' || path === '/api/plan/start-goal') && method === 'POST') {
     const body = await readBody(req,12*1024*1024);
@@ -1910,7 +1928,8 @@ async function api(req, res, path, method, url) {
     else if(images.length){let selected;try{selected=native.resolveInstance(body.nativeModelId??native.state().defaultId);}catch(e){return error(res,409,e.message);}if(!selected.vision)return error(res,409,'This model was started without picture reading. Open Models, turn on Read pictures and load it again, or choose a model that reads pictures.');}
     // The goal bar's Resume has no words of its own: it is the same turn as "/goal resume".
     const message = body.goalAction === 'resume' ? '/goal resume' : String(body.message ?? '').trim();
-    if (!message) return error(res, 400, 'message is required');
+    /* A tool continuation (ask mode) continues from a tool result: it brings no words of its own. */
+    if (!message && body.toolContinuation !== true) return error(res, 400, 'message is required');
     /* Which workspace the caller is in, so a skill narrowed to one project
        does not fire in another. */
     const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : null;
@@ -1931,7 +1950,7 @@ async function api(req, res, path, method, url) {
       : !chatId ? 'This request did not name a chat.'
       : !(body.remoteModel || native.hasLive()) ? 'The agent needs a loaded Strata model or an API model.'
       : null;
-    if (chatId && !agentSkip) {
+    if (chatId && !agentSkip && body.toolContinuation !== true) {
       const capability = agent.status();
       if (capability.state !== 'unavailable') {
         await runAgentTurn({ res, controller, chatId, body, message, workspaceId, images });
@@ -1957,7 +1976,7 @@ async function api(req, res, path, method, url) {
       sessionId: typeof body.sessionId === 'string' ? body.sessionId : null,
       remoteModel: body.remoteModel ?? null,
       nativeModelId:body.nativeModelId,
-      images,useTools:body.useTools===true,thinking:body.thinking??'high',thinkingBudget:Number.isInteger(body.thinkingBudget)&&body.thinkingBudget>0?Math.min(body.thinkingBudget,262144):0,
+      images,useTools:body.useTools===true,toolPolicy:body.toolPolicy==='ask'?'ask':null,thinking:body.thinking??'high',thinkingBudget:Number.isInteger(body.thinkingBudget)&&body.thinkingBudget>0?Math.min(body.thinkingBudget,262144):0,
     });
     res.end();
     return undefined;
