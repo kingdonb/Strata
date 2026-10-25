@@ -25,6 +25,10 @@ git fetch upstream --tags
 git diff 3d1fb480 v0.2.2 -- <paths> | git apply      # per slice, on a fresh branch from main
 ```
 
+`scripts/upstream_survey.sh <from> <to>` wraps this method (the survey, ledger-row generation and
+skip-list application; run it with `--help`). The skip list's machine-readable twin is
+`scripts/upstream_skip.txt` — update it in the same PR whenever this table changes.
+
 Then apply the skip-list below (revert modified files to the merge-base, delete upstream-new ones), run the
 suites, and record what was skipped and why in the PR.
 
