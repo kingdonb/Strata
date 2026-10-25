@@ -87,8 +87,16 @@ on 2026-10-25). Two rules:
 ### The token recipe (CI-log diagnosis without the owner)
 
 The project's Helix secret `GITHUB_TOKEN` is a **fine-grained personal access token with Actions:
-read and Metadata: read — nothing else** (no write scope). The operator creates and stores it (see
-the fork's secret store; the ticket that requested it is 000687).
+read and Metadata: read — nothing else** (no write scope; the optional Issues/PR-read extension is
+an owner decision, tracked as an open question in ticket 000687). The operator creates and stores
+it with the Helix CLI — values are write-only, listings return names only:
+
+```sh
+helix secret create -n GITHUB_TOKEN -v github_pat_… -p prj_01m4vp6ttsaertqw6zed8ew8vm
+```
+
+A project-scoped secret is injected into this project's spec-task sessions when the container is
+created — adding it does not reach already-running sessions; the next session picks it up.
 
 Diagnosing a red CI run, with plain curl (no `gh` in the sandboxes):
 
