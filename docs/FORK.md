@@ -71,12 +71,18 @@ Revisit only if the fork starts shipping releases.
    no separate patch release per fix. Each concern still gets its own commit and a line in the PR body;
    the review of a mixed PR lands as a docs file in the same branch (see docs/PR24_REVIEW.md and its
    punch list for the pre-release checks).
-7. **Fork-only serve additions (2026-10-25, task 000712):** `GET /v1/mcp/tools` and `POST /v1/mcp/call` in
+9. Owner decision (2026-10-25, per the 000715 spec review): the host suite gets a CI leg —
+   `.github/workflows/host-suite.yml` (paths `apps/host/**`, ubuntu, Node 24 = the engines floor,
+   `npm ci` + `npm test`). Until it existed, `apps/host` changes ran no CI at all and baseline reds
+   accumulated silently (four sat on main for weeks). The pre-push-script alternative was considered and
+   declined: only CI protects PRs from people and bots who never read docs. Owner can revert the one file
+   if they disagree on return.
+10. **Fork-only serve additions (2026-10-25, task 000712):** `GET /v1/mcp/tools` and `POST /v1/mcp/call` in
    `serve/server.py` (the host chat's ask mode: the MCP tools as OpenAI schemas, and the executor for a call
    its user approved). Both are additive wrappers over tested `McpHub` code, guarded like the other MCP-only
    endpoints (`_authorized()` / `_own_page`); upstream v0.2.3.1's skipped serve slice has no counterpart, so
    nothing collides — when serve slices resume, re-apply these two blocks (or propose them upstream first).
    Tests: `serve/test_mcp.py` class `Endpoints`.
-8. Upstream's agent-path work continues past our v0.2.3.1 base: newest known commit `ed4b4db4` (2026-10-25,
+11. Upstream's agent-path work continues past our v0.2.3.1 base: newest known commit `ed4b4db4` (2026-10-25,
    "guide set for 0.2.5"). Survey it before the next host sync — the fork's `apps/host/server/agent/` is
    already at the v0.2.2 level (a71fd347, 7d555815, 034f2fde are in main), so only the delta matters.
