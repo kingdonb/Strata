@@ -299,13 +299,17 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
   const mcpSkipped = [];
   // The built-in Strata engine tools (tools/strata_mcp.py, the same program the app's control client runs): one row of
   // the person's own, Settings-governed server rows, beside the instruction/command tool server and the browser. A
-  // model's own server named `strata` would collide with the row's id, so it is skipped and reported.
-  const strataRows = tools.strataEnabled && tools.strataSpec ? mcpRows({ strata: tools.strataSpec }, mcpEnv, mcpSkipped) : [];
+  // model's own server named `strata` would collide with the row's id, so it is skipped and reported. One mcpRows call
+  // for everything keeps the env tokens' indices unique (two calls would both start at STRATA_MCP_0).
   const modelServers = { ...(defaultInstance?.mcpServers ?? {}) };
   if (modelServers.strata) { mcpSkipped.push({ name: 'strata', why: 'duplicate' }); delete modelServers.strata; }
-  const mcp = connectMcp === false ? [] : mcpRows({ ...modelServers, ...(tools.servers ?? {}) }, mcpEnv, mcpSkipped);
+  const strataServer = tools.strataEnabled && tools.strataSpec ? { strata: tools.strataSpec } : {};
+  const rows = mcpRows({ ...(connectMcp === false ? {} : { ...modelServers, ...(tools.servers ?? {}) }), ...strataServer }, mcpEnv, mcpSkipped);
+  const mcp = rows.filter(r => r.config.serverName !== 'strata');
+  const strataRows = rows.filter(r => r.config.serverName === 'strata');
   // The strata server's env must travel even when the chat's Tools toggle is off: its row is Settings-governed, not
-  // governed by that toggle (like the browser and the person's instruction/command tools).
+  // governed by that toggle (like the browser and the person's instruction/command tools). When the toggle is off the
+  // map holds only the strata tokens, so this never leaks a disconnected server's secrets into the environment.
   Object.assign(env, mcpEnv);
   // The person's own instruction and command tools come from the app's tool server; a command tool asks in Manual like any connected tool.
   const own = (kind, on) => on && tools.toolFile ? [{ id: `mcp-strata-${kind}`, name: '@deepseek-ai/dsh-mcp-client', config: { serverName: `strata-${kind}`, transport: 'stdio', command: process.execPath, args: [CUSTOM_TOOLS_SCRIPT, kind, tools.toolFile] } }] : [];

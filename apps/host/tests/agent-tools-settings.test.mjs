@@ -422,6 +422,11 @@ test("profile: the Strata row is the person's own (not the chat toggle's), its e
   assert.equal(rows.length, 1);
   assert.deepEqual(rows[0].config.command, 'python3', 'the built-in row wins');
   assert.ok(both.mcpSkipped.some(s => s.name === 'strata' && s.why === 'duplicate'));
+  // one mcpRows call for everything: the two servers' env tokens never share an index
+  const bothEnv = buildProfile({ local: [], connections: [], tools: { ...view(true), strataSpec: { ...spec, env: { PYTHONUTF8: '1' } }, servers: { mine: { command: 'node', args: ['x.js'], env: { API_KEY: 'k' } } } } });
+  assert.ok(bothEnv.patch.includes('!!js process.env.STRATA_MCP_0_E_API_KEY'));
+  assert.ok(bothEnv.patch.includes('!!js process.env.STRATA_MCP_1_E_PYTHONUTF8'), 'a second server gets the next index, not the strata row\'s');
+  assert.equal(bothEnv.env.STRATA_MCP_1_E_PYTHONUTF8, '1');
 });
 
 test('the gate: the Strata reads run unasked in Manual and Plan; start, stop, a speed test and a confirmed install ask in Manual and are refused in Plan; a confirm-less install is a read', () => {
