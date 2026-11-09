@@ -555,6 +555,53 @@ class StartStop(FakeRoot):
             httpd.server_close()
 
 
+# -------------------------------------------------------------------------------------------- the engine's own chat
+class EngineChat(FakeRoot):
+    """The engine's own chat offers this MCP server with STRATA_MCP_OWN_PORT set (serve/mcp.py's built-in
+    "strata" entry): the state tools refuse what would end or disturb the chat's own model; reads are as always."""
+
+    def own(self):
+        """Set the guard env to a free port and return it (restored by the caller's finally)."""
+        port = free_port()
+        os.environ["STRATA_MCP_OWN_PORT"] = str(port)
+        self.write_config("q2_0", port=port)
+        return port
+
+    def test_state_tools_refuse_inside_the_engine_chat(self):
+        port = self.own()
+        try:
+            res, err = self.call("strata_start", {})
+            self.assertTrue(err)
+            self.assertIn(f"already running on port {port}", res["error"])
+            res, err = self.call("strata_install", {"model": "Q2_0", "confirm": True})
+            self.assertTrue(err)
+            self.assertIn("setup may replace", res["error"])
+            self.assertIsNone(self.strata.install_job())
+            res, err = self.call("strata_install", {"model": "Q2_0"})
+            self.assertFalse(err, res)                      # the plan-only call is still a read
+            self.assertIn("Nothing was done yet", res["summary"])
+            res, err = self.call("strata_stop", {"port": port})
+            self.assertTrue(err)
+            self.assertIn("would end this chat", res["error"])
+            res, err = self.call("strata_stop", {})         # the sweep skips its own port
+            self.assertFalse(err)
+            self.assertIn("no other Strata is running", res["summary"])
+            st, _ = self.call("strata_status", {"hardware": False})   # reads are unchanged
+            self.assertFalse(err)
+            self.assertEqual(st["running"], [])             # nothing answers /health here; the read worked
+        finally:
+            os.environ.pop("STRATA_MCP_OWN_PORT", None)
+
+    def test_without_the_env_the_tools_are_unchanged(self):
+        res, err = self.call("strata_stop", {})
+        self.assertFalse(err)
+        self.assertEqual(res["summary"], "Strata is not running")
+        self.write_config("q2_0", port=free_port(), delay=0.3)
+        res, err = self.call("strata_start", {"wait_seconds": 30})
+        self.assertFalse(err, res)                          # no guard env: the start runs, as it always did
+        self.assertIn("Strata is running", res["summary"])
+
+
 # ------------------------------------------------------------------------------------------------ helpers
 class Helpers(unittest.TestCase):
     def test_progress_from_setup_output(self):

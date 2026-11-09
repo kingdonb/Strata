@@ -63,7 +63,7 @@ sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a
 from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
                             forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages,
                             tool_choice_of, unmark_think_literals)
-from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
+from serve.mcp import McpCancelled, builtin_strata_server, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
 from strata_control import engine_component  # noqa: E402
 from strata_control import hipblaslt_tuning  # noqa: E402
@@ -8129,7 +8129,14 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
         types = json.loads((tpath / "token_type.json").read_text())
         tok = ST.Tokenizer(tokens, merges, types)
-    hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
+    # The engine's own chat gets the Strata folder's MCP server (tools/strata_mcp.py beside the config) by default:
+    # "is Strata running?" needs nothing configured. The person's own "strata" entry (even a disabled one) or
+    # "mcp": {"builtin_strata": false} suppresses it; an offline (strict) profile starts without it, and so does a
+    # trimmed runtime without the file. The env carries STRATA_MCP_OWN_PORT: there the state tools refuse what would
+    # end this chat's model.
+    strata_default = (builtin_strata_server(str(Path(a.config).parent), a.port)
+                      if not a.offline and a.config else None)
+    hub = hub_from_config(cfg, a.mcp_config, defaults={"strata": strata_default} if strata_default else None)
     if a.offline and (hub is not None or cfg.get("before_load") or a.before_load):
         ap.error("--offline requires MCP servers and before_load commands to be disabled in this profile")
     if a.offline:

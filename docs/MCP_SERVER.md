@@ -17,7 +17,9 @@ scripts do. It is one Python file that uses only the standard library, so it wor
 
 It is not the same thing as [Tools from MCP servers](DETAILS.md#tools-from-mcp-servers). That feature
 (`serve/mcp.py`) lets the *Strata model* call tools from your MCP servers in its chat page. This page is the other
-direction: *your assistant* manages Strata.
+direction: *your assistant* manages Strata. The two meet in the engine's own chat: with nothing configured, it now
+also offers this server's tools by default (the built-in `strata` entry in `serve/mcp.py`), and there the state
+tools (start, stop, confirmed install) refuse, because the chat's model runs on the engine they would touch.
 
 ## Add it
 

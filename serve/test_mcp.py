@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve import mcp_fake_server as fake  # noqa: E402
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.mcp import McpCancelled, McpHub, hub_from_config  # noqa: E402
+from serve.mcp import McpCancelled, McpHub, builtin_strata_server, hub_from_config  # noqa: E402
 from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -222,11 +222,39 @@ class Config(unittest.TestCase):
         for cfg in ({"mcp_servers": {"x": {}}}, {"mcp_servers": {"x": {"command": "a", "args": "b"}}},
                     {"mcp_servers": ["x"]}, {"mcpServers": {"x": {"url": "http://a", "type": "sse"}}},
                     {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"timeout_s": 0}},
-                    {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"max_rounds": 1.5}}):
+                    {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"max_rounds": 1.5}},
+                    {"mcp": {"builtin_strata": "off"}}):
             with self.subTest(cfg=cfg), self.assertRaises(SystemExit):
                 hub_from_config(cfg)
         with self.assertRaises(SystemExit):
             hub_from_config({}, os.path.join(tempfile.gettempdir(), "strata-no-such-mcp.json"))
+
+    def test_builtin_strata_default(self):
+        """The engine's own chat gets tools/strata_mcp.py with nothing configured; the person's own "strata" key
+        (even a disabled one) or mcp.builtin_strata: false suppresses it; no file beside the config means no entry."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "tools").mkdir()
+            (Path(d) / "tools" / "strata_mcp.py").write_text("# the real server\n", encoding="utf-8")
+            default = builtin_strata_server(d, 8080)
+            self.assertIsNotNone(default)
+            self.assertEqual(default["env"]["STRATA_MCP_OWN_PORT"], "8080")
+            self.assertEqual(default["args"], [str(Path(d) / "tools" / "strata_mcp.py"), "--root", d])
+            self.assertNotIn("STRATA_MCP_OWN_PORT", builtin_strata_server(d, None)["env"], "no port, no guard")
+            hub = hub_from_config({}, defaults={"strata": default})
+            self.assertEqual(sorted(hub.servers), ["strata"])
+            self.assertEqual(hub.servers["strata"].cfg["cwd"], d)
+            own = hub_from_config({"mcp_servers": {"strata": stdio()}}, defaults={"strata": default})
+            self.assertEqual(own.servers["strata"].cfg["args"][0], FAKE)     # the person's entry wins
+            self.assertEqual(sorted(hub_from_config({"mcp_servers": {"other": stdio()}},
+                                                    defaults={"strata": default}).servers), ["other", "strata"])
+            self.assertIsNone(hub_from_config({"mcp_servers": {"strata": {"command": "x", "disabled": True}}},
+                                              defaults={"strata": default}))
+            self.assertIsNone(hub_from_config({"mcp": {"builtin_strata": False}}, defaults={"strata": default}))
+            self.assertIsNone(hub_from_config({}, defaults={"strata": None}))
+            (Path(d) / "tools" / "strata_mcp.py").unlink()
+            self.assertIsNone(builtin_strata_server(d, 8080))
+            self.assertIsNone(hub_from_config({}, defaults={"strata": builtin_strata_server(d)}),
+                              "no tools/strata_mcp.py: no default")
 
 
 # ------------------------------------------------------------------------------------------------ the tool loop
