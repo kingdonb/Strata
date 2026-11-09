@@ -33,6 +33,9 @@ function normalize(raw) {
     off: [...new Set((Array.isArray(r.off) ? r.off : []).filter(id => GROUP_IDS.includes(id)))],
     search: { provider: SEARCH_PROVIDERS.includes(search.provider) ? search.provider : 'builtin', key: typeof search.key === 'string' ? search.key : '' },
     browser: { enabled: r.browser?.enabled === true },
+    // The Strata engine tools default ON when a Strata installation is found (ruling on the spec's Open Question 1);
+    // the screen shows found/not-found, and an installation that is missing leaves no row behind.
+    strata: { enabled: r.strata?.enabled !== false },
     // Manual mode asks once per chat before the first web search or page. This switch (off unless the person turned it on) skips that question.
     webWithoutAsking: r.webWithoutAsking === true,
     custom: (Array.isArray(r.custom) ? r.custom : []).filter(t => t && NAME.test(t.name ?? '') && KINDS.includes(t.kind)).slice(0, MAX_CUSTOM).map(t => ({
@@ -90,9 +93,9 @@ const idFor = (name, existing) => {
 };
 
 /**
- * @param {{read: () => object|undefined, write: (value: object) => void, dataDir: string, browser?: () => {found: boolean, name: string|null, path?: string|null, cli?: string|null}}} deps
+ * @param {{read: () => object|undefined, write: (value: object) => void, dataDir: string, browser?: () => {found: boolean, name: string|null, path?: string|null, cli?: string|null}, strata?: () => {found: boolean, spec?: {command: string, args: string[], cwd?: string, env?: object}}} deps
  */
-export function createAgentTools({ read, write, dataDir, browser = () => ({ found: false, name: null }) }) {
+export function createAgentTools({ read, write, dataDir, browser = () => ({ found: false, name: null }), strata = () => ({ found: false }) }) {
   const state = () => normalize(read());
   const filePath = join(dataDir, 'agent', 'custom-tools.json');
 
@@ -122,6 +125,7 @@ export function createAgentTools({ read, write, dataDir, browser = () => ({ foun
       webWithoutAsking: s.webWithoutAsking,
       // `found` means the browser tool can run: a browser on this computer AND the tool server in the agent component.
       browser: { enabled: s.browser.enabled, found: !!(probe.found && probe.cli), name: probe.name ?? null, ...(probe.found && !probe.cli ? { missing: 'component' } : {}) },
+      strata: (() => { const spec = strata(); return { enabled: s.strata.enabled, found: spec.found === true }; })(),
       custom: s.custom.map(t => ({
         id: t.id, name: t.name, about: t.about, kind: t.kind, enabled: t.enabled,
         summary: t.kind === 'instructions' ? t.instructions.slice(0, 80) : t.kind === 'command' ? t.command : t.address,
@@ -150,6 +154,8 @@ export function createAgentTools({ read, write, dataDir, browser = () => ({ foun
         browserEnabled: s.browser.enabled && !!(browser().found && browser().cli),
         browserPath: browser().path ?? null,
         browserCli: browser().cli ?? null,
+        strataEnabled: s.strata.enabled && strata().found === true,
+        strataSpec: s.strata.enabled ? strata().spec ?? null : null,
         servers,
         hasInstructionTools: custom.some(t => t.kind === 'instructions'),
         hasCommandTools: custom.some(t => t.kind === 'command'),
@@ -178,6 +184,7 @@ export function createAgentTools({ read, write, dataDir, browser = () => ({ foun
       }
       if (typeof change?.webWithoutAsking === 'boolean') s.webWithoutAsking = change.webWithoutAsking;
       if (change?.browser && typeof change.browser.enabled === 'boolean') s.browser = { enabled: change.browser.enabled };
+      if (change?.strata && typeof change.strata.enabled === 'boolean') s.strata = { enabled: change.strata.enabled };
       if (change?.custom) {
         for (const [id, on] of Object.entries(change.custom)) {
           const t = s.custom.find(x => x.id === id);

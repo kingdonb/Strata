@@ -3526,5 +3526,9 @@
   "s9034": "Das Modell wird geladen …",
   "s9035": "Diese Modelldateien fehlen: {0}.",
   "s9036": "Drücken Sie noch einmal auf „Herunterladen und laden“, um sie zu holen. Vorhandene Dateien bleiben erhalten. Werden dieselben Dateien wieder aufgelistet, öffnen Sie die Details und teilen Sie sie mit, wenn Sie um Hilfe bitten.",
-  "s9037": "Dieses Update wurde beim Neustart der App unterbrochen. Ein späteres Update ist abgeschlossen, Sie müssen nichts tun."
+  "s9037": "Dieses Update wurde beim Neustart der App unterbrochen. Ein späteres Update ist abgeschlossen, Sie müssen nichts tun.",
+  "s9038": "Strata-Engine",
+  "s9039": "Den Assistenten mit Strata arbeiten lassen",
+  "s9040": "Der Assistent kann Ihre Strata-Engine ansehen: was installiert und geladen ist, die Modellliste, die Protokolle. Starten, Stoppen, ein Geschwindigkeitstest und das Herunterladen eines neuen Modells fragen im manuellen Modus zuerst.",
+  "s9041": "Auf diesem Computer wurde keine Strata-Installation gefunden. Verbinden Sie eine (Einstellungen → Engine oder das Strata-Terminal), und die Werkzeuge erscheinen hier."
 }

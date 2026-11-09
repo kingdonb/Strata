@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve import mcp_fake_server as fake  # noqa: E402
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.mcp import McpCancelled, McpHub, hub_from_config  # noqa: E402
+from serve.mcp import McpCancelled, McpHub, builtin_strata_server, hub_from_config  # noqa: E402
 from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -222,11 +222,43 @@ class Config(unittest.TestCase):
         for cfg in ({"mcp_servers": {"x": {}}}, {"mcp_servers": {"x": {"command": "a", "args": "b"}}},
                     {"mcp_servers": ["x"]}, {"mcpServers": {"x": {"url": "http://a", "type": "sse"}}},
                     {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"timeout_s": 0}},
-                    {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"max_rounds": 1.5}}):
+                    {"mcp_servers": {"x": {"command": "a"}}, "mcp": {"max_rounds": 1.5}},
+                    {"mcp": {"builtin_strata": "off"}}):
             with self.subTest(cfg=cfg), self.assertRaises(SystemExit):
                 hub_from_config(cfg)
         with self.assertRaises(SystemExit):
             hub_from_config({}, os.path.join(tempfile.gettempdir(), "strata-no-such-mcp.json"))
+
+    def test_builtin_strata_default(self):
+        """The engine's own chat gets tools/strata_mcp.py with nothing configured; the person's own "strata" key
+        (even a disabled one) or mcp.builtin_strata: false suppresses it; no file beside serve/ means no entry."""
+        default_in_tree = builtin_strata_server()
+        self.assertIsNotNone(default_in_tree,
+                             "parameterless: derived from the serve process's own layout (this checkout is a Strata folder)")
+        self.assertTrue(default_in_tree["args"][0].endswith("tools/strata_mcp.py"))
+        self.assertEqual(default_in_tree["args"][2], str(Path(__file__).resolve().parent.parent))
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "tools").mkdir()
+            (Path(d) / "tools" / "strata_mcp.py").write_text("# the real server\n", encoding="utf-8")
+            default = builtin_strata_server(d)
+            self.assertIsNotNone(default)
+            self.assertEqual(default["args"], [str(Path(d) / "tools" / "strata_mcp.py"), "--root", d])
+            self.assertEqual(default["command"], sys.executable)
+            hub = hub_from_config({}, defaults={"strata": default})
+            self.assertEqual(sorted(hub.servers), ["strata"])
+            self.assertEqual(hub.servers["strata"].cfg["cwd"], d)
+            own = hub_from_config({"mcp_servers": {"strata": stdio()}}, defaults={"strata": default})
+            self.assertEqual(own.servers["strata"].cfg["args"][0], FAKE)     # the person's entry wins
+            self.assertEqual(sorted(hub_from_config({"mcp_servers": {"other": stdio()}},
+                                                    defaults={"strata": default}).servers), ["other", "strata"])
+            self.assertIsNone(hub_from_config({"mcp_servers": {"strata": {"command": "x", "disabled": True}}},
+                                              defaults={"strata": default}))
+            self.assertIsNone(hub_from_config({"mcp": {"builtin_strata": False}}, defaults={"strata": default}))
+            self.assertIsNone(hub_from_config({}, defaults={"strata": None}))
+            (Path(d) / "tools" / "strata_mcp.py").unlink()
+            self.assertIsNone(builtin_strata_server(d))
+            self.assertIsNone(hub_from_config({}, defaults={"strata": builtin_strata_server(d)}),
+                              "no tools/strata_mcp.py beside serve/: no default (the trimmed runtime's honest path)")
 
 
 # ------------------------------------------------------------------------------------------------ the tool loop
@@ -548,6 +580,147 @@ class Endpoints(unittest.TestCase):
         self.assertEqual(self.get("/v1/mcp/tools"), (200, []))
         code, r = self.post("/v1/mcp/call", {"name": "fake__echo", "arguments": {}})
         self.assertEqual(code, 404)
+
+
+# ----------------------------------------------------------------------------- the built-in "strata" row
+class BuiltinRow(unittest.TestCase):
+    """The engine's own chat gets the Strata folder's MCP server (tools/strata_mcp.py) with nothing configured:
+    offered only under the "strata_mcp": true opt-in like every server's tools, and a request without the opt-in is
+    byte-identical to a chat with no hub at all. A fake server plays tools/strata_mcp.py (no downloads, no engine)."""
+
+    FAKE_STRATA = r'''import json, sys
+TOOLS = [{"name": "status", "description": "fake engine status",
+          "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}}]
+for raw in sys.stdin.buffer:                       # binary lines: the pipe-safe loop (as the real server reads)
+    line = raw.strip()
+    if not line:
+        continue
+    m = json.loads(line)
+    if not isinstance(m, dict) or "id" not in m:
+        continue
+    if m.get("method") == "initialize":
+        out = {"protocolVersion": (m.get("params") or {}).get("protocolVersion"), "capabilities": {"tools": {}},
+               "serverInfo": {"name": "strata", "title": "Strata", "version": "0.0.0-fake"}}
+    elif m.get("method") == "ping":
+        out = {}
+    elif m.get("method") == "tools/list":
+        out = {"tools": TOOLS}
+    elif m.get("method") == "tools/call":
+        out = {"content": [{"type": "text", "text": "engine idle (fake strata)"}]}
+    else:
+        continue
+    sys.stdout.buffer.write((json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": out}) + "\n").encode())
+    sys.stdout.buffer.flush()
+'''
+
+    def setUp(self):
+        self.log = tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl")
+        self.log.close()
+        os.environ["FAKE_MCP_LOG"] = self.log.name
+        self.root = tempfile.TemporaryDirectory()
+        tools = Path(self.root.name) / "tools"
+        tools.mkdir()
+        (tools / "strata_mcp.py").write_text(self.FAKE_STRATA, encoding="utf-8")
+        self.hub = hub_from_config({}, defaults={"strata": builtin_strata_server(self.root.name)})
+        self.hub.settings.update({"timeout_s": 10, "max_result_chars": 500, "max_rounds": 2})
+        self.hub.start(wait=True)
+        self.httpd = None
+
+    def tearDown(self):
+        if self.httpd:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+        self.hub.close()
+        del os.environ["FAKE_MCP_LOG"]
+        os.unlink(self.log.name)
+        self.root.cleanup()
+
+    def start(self, *scripts):
+        tok = ByteTokenizer()
+        self.engine = ScriptedEngine(tok, list(scripts))
+        self.svc = Service(self.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc.mcp = self.hub
+        self.httpd = serve(self.svc, port=0)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def post(self, body):
+        req = urllib.request.Request(self.base + "/v1/chat/completions",
+                                     data=json.dumps({"model": "m", "stream": True, **body}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, e.read().decode()
+
+    @staticmethod
+    def chunks(text):
+        return [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: {")]
+
+    def test_offered_under_the_opt_in(self):
+        self.start(call_script("strata__status"), "\n\nChecked.")
+        code, text = self.post({"messages": [{"role": "user", "content": "check it"}], "strata_mcp": True})
+        self.assertEqual(code, 200, text)
+        cs = self.chunks(text)
+        mcp = [c["strata_mcp"] for c in cs if "strata_mcp" in c]
+        self.assertEqual([m["event"] for m in mcp], ["start", "call", "result"])
+        self.assertEqual((mcp[1]["server"], mcp[1]["tool"]), ("strata", "status"))
+        self.assertEqual(mcp[2]["text"], "engine idle (fake strata)")
+        self.assertIn('"name": "strata__status"', self.engine.prompt_text(0))
+
+    def test_without_the_opt_in_the_wire_is_the_same_as_with_no_hub(self):
+        """The same plain request on two fresh services - one carrying the built-in row, one with no hub at all:
+        identical once the volatile id/created fields are set aside."""
+        scripts = [call_script("strata__status"), "\n\nChecked."]
+        plain = {"messages": [{"role": "user", "content": "check it"}]}
+
+        def run(svc):
+            httpd = serve(svc, port=0)
+            try:
+                req = urllib.request.Request("http://127.0.0.1:%d/v1/chat/completions" % httpd.server_address[1],
+                                             data=json.dumps({"model": "m", "stream": True, **plain}).encode(),
+                                             headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    return r.read().decode()
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+        def fresh(with_hub):
+            tok = ByteTokenizer()
+            svc = Service(ScriptedEngine(tok, list(scripts)), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+            if with_hub:
+                svc.mcp = self.hub
+            return run(svc)
+
+        def stable(text):
+            out = []
+            for line in text.splitlines():
+                if line.startswith("data: {"):
+                    j = json.loads(line[6:])
+                    j.pop("id", None)
+                    j.pop("created", None)
+                    out.append("data: " + json.dumps(j, sort_keys=True))
+                else:
+                    out.append(line)
+            return "\n".join(out)
+
+        self.assertEqual(stable(fresh(True)), stable(fresh(False)), "no opt-in, no difference on the wire")
+        plain_body = fresh(True)
+        self.assertNotIn('"strata_mcp"', plain_body, "no opt-in: no tool events and no tool schemas")
+        self.assertIn("<function=strata__status>", plain_body,
+                      "with no tools offered the call text arrives as content and nothing runs")
+
+    def test_the_configured_opt_outs(self):
+        with tempfile.TemporaryDirectory() as d:
+            tools = Path(d) / "tools"
+            tools.mkdir()
+            (tools / "strata_mcp.py").write_text(self.FAKE_STRATA, encoding="utf-8")
+            default = builtin_strata_server(d)
+            self.assertIsNone(hub_from_config({"mcp_servers": {"strata": {"command": "x", "disabled": True}}},
+                                              defaults={"strata": default}), "an explicit strata key is an opt-out")
+            self.assertIsNone(hub_from_config({"mcp": {"builtin_strata": False}}, defaults={"strata": default}))
 
 
 if __name__ == "__main__":

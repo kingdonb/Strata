@@ -1,7 +1,17 @@
 """serve/mcp.py - tools from MCP (Model Context Protocol) servers for the web app's chats.
 
 The user lists servers in the run config (`"mcp_servers"`, or Claude Desktop's `"mcpServers"` block pasted as is) or
-in a separate file (`--mcp-config`).  Each one is either a program Strata starts (`command`, `args`, `env`, `cwd`:
+in a separate file (`--mcp-config`).
+
+On top of what is configured, the Strata folder's own MCP server (`tools/strata_mcp.py`, the folder this file is
+installed in) is registered by default under the name "strata" - the person's own "strata" entry, even a disabled
+one, or `"mcp": {"builtin_strata": false}` leaves it out.  Its tools are offered only to requests that opt in with
+`"strata_mcp": true` like every other server's; a request without the opt-in sees exactly the API it always saw.
+Its tools behave like any connected server's tools - including that the chat's model can be asked to stop the very
+engine the chat runs on (the request then ends with an error; the person starts the model again in the app), the
+same consequence the desktop agent's row documents.
+
+Each one is either a program Strata starts (`command`, `args`, `env`, `cwd`:
 the stdio transport, newline-delimited JSON-RPC 2.0 on its stdin/stdout) or an address (`url`, `headers`: the
 Streamable HTTP transport, JSON-RPC POSTed, answered as JSON or as an event stream).  Both are implemented here with
 the standard library only; no MCP SDK is needed.
@@ -30,11 +40,24 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from serve import lifeline
 
 PROTOCOL = "2025-06-18"               # the MCP revision Strata asks for; the server's answer is used as given
 DEFAULTS = {"timeout_s": 60.0, "max_result_chars": 20000, "max_rounds": 8, "start_timeout_s": 120.0}
+
+
+def builtin_strata_server(root=None):
+    """The default "strata" entry: the Strata folder's own MCP server (tools/strata_mcp.py beside serve/), so the
+    engine's web chat can answer "is Strata running?" with nothing configured.  Derived from this process's own
+    layout - `root` defaults to the folder serve/ lives in - so a trimmed runtime install without the file simply
+    has no entry (the hub's ordinary start log says so, and the chat works without it)."""
+    root = Path(root) if root else Path(__file__).resolve().parent.parent
+    script = root / "tools" / "strata_mcp.py"
+    if not script.is_file():
+        return None
+    return {"command": sys.executable, "args": [str(script), "--root", str(root)], "cwd": str(root)}
 
 
 class McpError(RuntimeError):
@@ -627,7 +650,8 @@ def servers_from(block, where: str) -> dict[str, dict]:
 
 
 def settings_from(cfg: dict) -> dict:
-    """The run config's optional `"mcp"` block: timeout_s, max_result_chars, max_rounds, start_timeout_s."""
+    """The run config's optional `"mcp"` block: timeout_s, max_result_chars, max_rounds, start_timeout_s,
+    builtin_strata."""
     out = {}
     for key, value in (cfg.get("mcp") or {}).items():
         number = isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -639,30 +663,47 @@ def settings_from(cfg: dict) -> dict:
             if not number or value != int(value) or value < 1:
                 raise SystemExit(f"[strata] config mcp.{key}={value!r}: expected a positive integer")
             out[key] = int(value)
+        elif key == "builtin_strata":
+            if not isinstance(value, bool):
+                raise SystemExit(f"[strata] config mcp.{key}={value!r}: expected true or false")
+            out[key] = value
         else:
             print(f"[strata] config mcp.{key}={value!r}: unknown key, ignored", flush=True)
     return out
 
 
-def hub_from_config(cfg: dict, mcp_config_path: str | None = None) -> McpHub | None:
+def hub_from_config(cfg: dict, mcp_config_path: str | None = None, defaults: dict | None = None) -> McpHub | None:
     """The run config's `"mcp_servers"` (or `"mcpServers"`) plus the servers in the --mcp-config file (Claude
-    Desktop's format: {"mcpServers": {...}}); a name in both takes the file's entry.  None when there are none."""
+    Desktop's format: {"mcpServers": {...}}); a name in both takes the file's entry.  `defaults` (from serve/server.py:
+    the built-in "strata" server) is added at the lowest precedence - any "strata" key the person wrote, even a
+    `disabled: true`, suppresses it, and so does `"mcp": {"builtin_strata": false}`.  None when there are none."""
     servers = {}
+    provided = set()
+    for block in (cfg.get("mcp_servers"), cfg.get("mcpServers")):
+        if isinstance(block, dict):
+            provided.update(str(n) for n in block)
     servers.update(servers_from(cfg.get("mcp_servers"), "config mcp_servers"))
     servers.update(servers_from(cfg.get("mcpServers"), "config mcpServers"))
+    file_block = None
     if mcp_config_path:
         try:
             with open(mcp_config_path, encoding="utf-8-sig") as f:
                 data = json.load(f)
         except (OSError, ValueError) as e:
             raise SystemExit(f"[strata] --mcp-config {mcp_config_path}: {e}") from None
-        block = data.get("mcpServers", data.get("mcp_servers")) if isinstance(data, dict) else None
-        if block is None:
+        file_block = data.get("mcpServers", data.get("mcp_servers")) if isinstance(data, dict) else None
+        if file_block is None:
             raise SystemExit(f"[strata] --mcp-config {mcp_config_path}: expected {{\"mcpServers\": {{...}}}}")
-        servers.update(servers_from(block, f"--mcp-config {mcp_config_path}"))
+        if isinstance(file_block, dict):
+            provided.update(str(n) for n in file_block)
+        servers.update(servers_from(file_block, f"--mcp-config {mcp_config_path}"))
+    settings = settings_from(cfg)
+    if defaults and "strata" not in provided and settings.get("builtin_strata") is not False:
+        if defaults.get("strata"):
+            servers.setdefault("strata", defaults["strata"])
     if not servers:
         return None
-    return McpHub(servers, settings_from(cfg))
+    return McpHub(servers, settings)
 
 
 if __name__ == "__main__":                               # python -m serve.mcp config.json: list what a config offers

@@ -35,6 +35,9 @@ const COMMANDS_SERVER = 'mcp__strata-commands__';
 /** The browser tool server's name in the agent (Settings -> Tools). Looking at the page does not ask; acting on it does. */
 const BROWSER_SERVER = 'mcp__browser__';
 const BROWSER_LOOKING = new Set(['browser_snapshot', 'browser_take_screenshot', 'browser_console_messages', 'browser_network_requests', 'browser_wait_for']);
+/** The built-in Strata engine tools (Settings -> Tools): reading the engine is free, changing it asks. */
+export const STRATA_SERVER = 'mcp__strata__';
+export const STRATA_READING = new Set(['strata_status', 'strata_models', 'strata_logs', 'strata_connect_info']);
 
 /** Tools that cannot change anything on this computer. Everything else asks. */
 export const READ_ONLY_TOOLS = new Set([
@@ -136,6 +139,8 @@ const clip = (value, max) => {
 export const WEB_TOOLS = new Set(['web_search', 'web_fetch']);
 /** What the model reads when the person says no. Plain words, and it tells the model what to do next. */
 export const WEB_REFUSAL = 'The person did not allow web access, so nothing was searched or opened. Go on without it and say so.';
+/** What Plan mode says about a connected tool it refuses. */
+export const PLAN_REFUSAL = 'Plan mode only looks and changes nothing, so it cannot use this tool. Switch to Manual or Bypass to use it.';
 
 /**
  * The question for a web call, in plain words: what is about to leave this computer and where it goes.
@@ -151,6 +156,27 @@ export function webDecision(exec, options = {}) {
     return { kind: 'ask', web: true, reason: `The assistant wants to search the web for: ${words}. Search words go to ${options.provider || 'the search service'}.` };
   }
   return { kind: 'ask', web: true, reason: `The assistant wants to open the web page ${clip(args.url, 200)}. The page's site sees the request.` };
+}
+
+/**
+ * The Strata engine tools in plain words. Status, models, logs and connection info only read (all local, 127.0.0.1).
+ * An install without `confirm` (or `cancel`) is the tool's own plan-or-progress read: it changes nothing. A speed test
+ * occupies the running model for up to a minute, so it asks; start, stop and a confirmed install change the engine.
+ * @param {string} name the tool name without the server prefix
+ * @param {Record<string, unknown>} args
+ * @returns {{kind:'ask', reason:string}|null}
+ */
+export function strataDecision(name, args) {
+  if (STRATA_READING.has(name)) return null;
+  if (name === 'strata_benchmark') return { kind: 'ask', reason: 'Run a short speed test on the running Strata model (it does nothing else for up to a minute)' };
+  if (name === 'strata_start') return { kind: 'ask', reason: `Start the Strata model${args.model ? ` ${clip(args.model, 80)}` : ' the tool picks (the most recently used)'} and wait until it answers (1-3 minutes)` };
+  if (name === 'strata_stop') return { kind: 'ask', reason: 'Stop the running Strata model and free its memory. If this chat runs on that model, it cannot answer until the model is loaded again.' };
+  if (name === 'strata_install') {
+    if (args.cancel === true) return { kind: 'ask', reason: 'Stop a running Strata install (what is downloaded already stays)' };
+    if (args.confirm === true) return { kind: 'ask', reason: 'Download and install a Strata model (tens of gigabytes; the plan the tool returned first names the model, size and free disk)' };
+    return null;
+  }
+  return { kind: 'ask', reason: `Use the Strata engine tool ${name.replace(/^strata_/, '').replace(/_/g, ' ')}` };
 }
 
 /**
@@ -175,6 +201,7 @@ export function manualDecision(exec, options = {}) {
   if (tool.startsWith(LOOK_ONLY_SERVER)) return null;
   if (tool.startsWith(BROWSER_SERVER)) return browserDecision(tool.slice(BROWSER_SERVER.length), args);
   if (tool.startsWith(COMMANDS_SERVER)) return { kind: 'ask', reason: `Run your tool “${tool.slice(COMMANDS_SERVER.length).replace(/_/g, ' ')}”${args.input ? ` with: ${clip(args.input, 120)}` : ''}` };
+  if (tool.startsWith(STRATA_SERVER)) return strataDecision(tool.slice(STRATA_SERVER.length), args);
   if (tool.startsWith('mcp__')) return { kind: 'ask', reason: `Use the connected tool ${tool.split('__').slice(1).join(' / ')}` };
   return { kind: 'ask', reason: `Use the tool ${tool}` };
 }
@@ -193,13 +220,23 @@ function browserDecision(name, args) {
 
 /**
  * Plan mode changes nothing. A connected tool (a person's tool server, a command they wrote, the browser) is not under the sandbox, so
- * Plan refuses it instead of letting it run. The look-only instruction tools are fine.
+ * Plan refuses it instead of letting it run. The look-only instruction tools are fine, and so are the Strata engine tools that only
+ * read (status, models, logs, connection info), a `strata_install` without `confirm` (the tool's plan-or-progress read) and the speed
+ * test (it refuses while the model is busy, so it answers "busy" instead of disturbing anything).
  * @returns {{kind:'deny', reason:string}|null}
  */
 export function planDecision(exec) {
   const tool = String(exec.name ?? '');
   if (!tool.startsWith('mcp__') || tool.startsWith(LOOK_ONLY_SERVER)) return null;
-  return { kind: 'deny', reason: 'Plan mode only looks and changes nothing, so it cannot use this tool. Switch to Manual or Bypass to use it.' };
+  if (tool.startsWith(STRATA_SERVER)) {
+    const args = exec.arguments && typeof exec.arguments === 'object' ? exec.arguments : {};
+    const name = tool.slice(STRATA_SERVER.length);
+    if (STRATA_READING.has(name)) return null;
+    if (name === 'strata_install' && args.confirm !== true && args.cancel !== true) return null;
+    if (name === 'strata_benchmark') return null;
+    return { kind: 'deny', reason: PLAN_REFUSAL };
+  }
+  return { kind: 'deny', reason: PLAN_REFUSAL };
 }
 
 /**

@@ -3526,5 +3526,9 @@
   "s9034": "Carregando o modelo…",
   "s9035": "Estes arquivos do modelo estão faltando: {0}.",
   "s9036": "Pressione Baixar e carregar de novo para buscá-los. Os arquivos que já estão aí são mantidos. Se os mesmos arquivos aparecerem de novo, abra os Detalhes e compartilhe-os ao pedir ajuda.",
-  "s9037": "Esta atualização foi interrompida quando o aplicativo reiniciou. Uma atualização posterior terminou, então não há nada a fazer."
+  "s9037": "Esta atualização foi interrompida quando o aplicativo reiniciou. Uma atualização posterior terminou, então não há nada a fazer.",
+  "s9038": "Motor do Strata",
+  "s9039": "Deixar o assistente trabalhar com o Strata",
+  "s9040": "O assistente pode ver o seu motor do Strata: o que está instalado e em execução, a lista de modelos, os registros. Iniciar, parar, um teste de velocidade e baixar um novo modelo perguntam primeiro no modo manual.",
+  "s9041": "Nenhuma instalação do Strata foi encontrada neste computador. Conecte uma (Configurações → Motor, ou o Terminal do Strata), e as ferramentas aparecerão aqui."
 }

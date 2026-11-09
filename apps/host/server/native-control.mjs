@@ -85,6 +85,25 @@ export function createNativeControl({directory,requests=()=>[],changed=()=>{},sp
  function shareDataFolder(){if(!packaged)return;try{let at=0;if(preferences.downloadDirectory)try{at=statSync(settingsPath).mtimeMs/1000;}catch{/* no file yet */}const found=syncDataFolder({appFile:controlSettingsFile(),terminalFile:terminalSettingsFile(),app:preferences.downloadDirectory?{folder:preferences.downloadDirectory,at}:null});if(found.from==='terminal'&&found.folder&&found.folder!==preferences.downloadDirectory){preferences={...preferences,downloadDirectory:found.folder};writeFileSync(settingsPath,JSON.stringify(preferences,null,2),{mode:0o600});}}catch{/* the shared setting is a convenience: never stop the app */}}
  function repo(){if(packaged)return installRoot();const path=realpathSync(preferences.repo);if(!existsSync(join(path,'setup.py'))||!existsSync(join(path,'tools/strata_mcp.py'))||!existsSync(join(path,'serve/server.py')))throw new Error('Choose the Strata repository folder containing setup.py and tools/strata_mcp.py.');return path;}
  function python(){return resolvePython({repo:preferences.repo});}
+ /* The Strata MCP tools (tools/strata_mcp.py) the agent's chats can be given: the same program, root and mode the
+    control client starts, so the agent and the app manage the same installation. `found:false` leaves the switch in
+    Settings -> Tools disabled and wires no row. Never throws: the profile builder and the settings view call it. */
+ function strataToolSpec(){
+  try{
+   if(packaged){
+    if(!control?.control?.python)return {found:false};
+    const dir=control.control.dir,script=join(dir,'tools/strata_mcp.py');
+    if(!existsSync(script))return {found:false};
+    const env=installerEnvironment(control.control,{installDir:repo()});
+    const keep=['STRATA_CONTROL_INSTALL','STRATA_NO_ACQUIRE','STRATA_COMPONENTS_DIR','STRATA_SETTINGS_FILE','STRATA_CONTROL_DIR','STRATA_INSTALL_DIR','PYTHONNOUSERSITE','PYTHONUTF8','PYTHONUNBUFFERED','PYTHONIOENCODING'];
+    return {found:true,spec:{command:control.control.python,args:[script,'--root',repo(),'--src',dir],cwd:dir,
+      env:Object.fromEntries(keep.map(k=>[k,env[k]]).filter(([,v])=>v!==undefined))}};
+   }
+   const folder=repo(),script=join(folder,'tools/strata_mcp.py'),py=python();
+   if(!existsSync(script)||py.source==='fallback')return {found:false};
+   return {found:true,spec:{command:py.command,args:[...py.args,script],cwd:folder,env:{PYTHONUNBUFFERED:'1',PYTHONUTF8:'1',PYTHONIOENCODING:'utf-8'}}};
+  }catch{return {found:false};}
+ }
  function send(method,params,timeout=30000){return new Promise((resolve,reject)=>{const id=++seq;const alarm=setTimeout(()=>{pending.delete(id);reject(new Error('The native engine did not respond in time. Check engine logs.'));},timeout);pending.set(id,{resolve,reject,alarm});child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});}
  function disconnect(){child?.kill();child=null;definitions=[];for(const p of pending.values()){clearTimeout(p.alarm);p.reject(new Error('Native control connection closed.'));}pending.clear();}
  async function connect(){if(closing)throw new Error("The host is shutting down.");if(child&&definitions.length)return;if(!connecting)connecting=startClient().finally(()=>{connecting=null;});return connecting;}
@@ -510,5 +529,5 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
  // Remove nonserializable process references from public jobs.
  const publicState=()=>{const value=state();value.jobs=value.jobs.map(({process,engineAbort,rawResult,...job})=>job);return value;};
  async function localPreview(path){if(!packaged)throw new Error('Checking local model files is part of the Strata app.');if(typeof path!=='string'||!path.trim()||[...path].some(c=>c.charCodeAt(0)<32))throw new Error('Choose a folder.');return control.importPlan(path.trim());}
- return {state:publicState,tuneStatus,tuneEffective,tuneOff,tunePresets:{list:()=>autotuner.list(),action:(kind,id,extra)=>autotuner.action(kind,id,extra),undoFor:async args=>autotuner.undoFor(tuneConfig(args).path)},refresh,localPreview,configure,setDownloadDirectory,planModelsFolder,startModelsFolder,interruptedMove,finishInterruptedMove,leaveInterruptedMove,plan,settings,save,settingsFile,openSettingsFile,operation,cancel,unload,resolveInstance,poll,logs:()=>logs.slice(),benchmarkReport:()=>readJson(join(directory,'native-benchmark.json'),null),setDefault(id){defaultId=resolveInstance(id).id;emit();return publicState();},hasLive:()=>[...instances.values()].some(i=>i.status==='ready'),readyInstances:()=>[...instances.values()].filter(i=>i.status==='ready'),defaultInstanceId:()=>defaultId,close};
+ return {state:publicState,strataToolSpec,tuneStatus,tuneEffective,tuneOff,tunePresets:{list:()=>autotuner.list(),action:(kind,id,extra)=>autotuner.action(kind,id,extra),undoFor:async args=>autotuner.undoFor(tuneConfig(args).path)},refresh,localPreview,configure,setDownloadDirectory,planModelsFolder,startModelsFolder,interruptedMove,finishInterruptedMove,leaveInterruptedMove,plan,settings,save,settingsFile,openSettingsFile,operation,cancel,unload,resolveInstance,poll,logs:()=>logs.slice(),benchmarkReport:()=>readJson(join(directory,'native-benchmark.json'),null),setDefault(id){defaultId=resolveInstance(id).id;emit();return publicState();},hasLive:()=>[...instances.values()].some(i=>i.status==='ready'),readyInstances:()=>[...instances.values()].filter(i=>i.status==='ready'),defaultInstanceId:()=>defaultId,close};
 }
