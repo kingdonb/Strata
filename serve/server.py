@@ -8129,13 +8129,12 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
         types = json.loads((tpath / "token_type.json").read_text())
         tok = ST.Tokenizer(tokens, merges, types)
-    # The engine's own chat gets the Strata folder's MCP server (tools/strata_mcp.py beside the config) by default:
-    # "is Strata running?" needs nothing configured. The person's own "strata" entry (even a disabled one) or
-    # "mcp": {"builtin_strata": false} suppresses it; an offline (strict) profile starts without it, and so does a
-    # trimmed runtime without the file. The env carries STRATA_MCP_OWN_PORT: there the state tools refuse what would
-    # end this chat's model.
-    strata_default = (builtin_strata_server(str(Path(a.config).parent), a.port)
-                      if not a.offline and a.config else None)
+    # The engine's own chat gets the Strata folder's MCP server (tools/strata_mcp.py beside serve/) by default:
+    # "is Strata running?" needs nothing configured. Its tools are offered only to requests that opt in with
+    # "strata_mcp": true, like every other server's; the person's own "strata" entry (even a disabled one) or
+    # "mcp": {"builtin_strata": false} suppresses the row. A strict-offline profile starts without it (the check
+    # below stays about the person's own servers), and so does a trimmed runtime without the file.
+    strata_default = builtin_strata_server() if not a.offline else None
     hub = hub_from_config(cfg, a.mcp_config, defaults={"strata": strata_default} if strata_default else None)
     if a.offline and (hub is not None or cfg.get("before_load") or a.before_load):
         ap.error("--offline requires MCP servers and before_load commands to be disabled in this profile")

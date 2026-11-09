@@ -1,10 +1,15 @@
 """serve/mcp.py - tools from MCP (Model Context Protocol) servers for the web app's chats.
 
 The user lists servers in the run config (`"mcp_servers"`, or Claude Desktop's `"mcpServers"` block pasted as is) or
-in a separate file (`--mcp-config`).  On top of what is configured, the Strata folder's own MCP server
-(`tools/strata_mcp.py`) is offered by default under the name "strata" (the person's own "strata" entry, even a
-disabled one, or `"mcp": {"builtin_strata": false}` leaves it out); its environment carries STRATA_MCP_OWN_PORT, so
-there the state tools refuse what would end or disturb the chat's own model.
+in a separate file (`--mcp-config`).
+
+On top of what is configured, the Strata folder's own MCP server (`tools/strata_mcp.py`, the folder this file is
+installed in) is registered by default under the name "strata" - the person's own "strata" entry, even a disabled
+one, or `"mcp": {"builtin_strata": false}` leaves it out.  Its tools are offered only to requests that opt in with
+`"strata_mcp": true` like every other server's; a request without the opt-in sees exactly the API it always saw.
+Its tools behave like any connected server's tools - including that the chat's model can be asked to stop the very
+engine the chat runs on (the request then ends with an error; the person starts the model again in the app), the
+same consequence the desktop agent's row documents.
 
 Each one is either a program Strata starts (`command`, `args`, `env`, `cwd`:
 the stdio transport, newline-delimited JSON-RPC 2.0 on its stdin/stdout) or an address (`url`, `headers`: the
@@ -43,20 +48,16 @@ PROTOCOL = "2025-06-18"               # the MCP revision Strata asks for; the se
 DEFAULTS = {"timeout_s": 60.0, "max_result_chars": 20000, "max_rounds": 8, "start_timeout_s": 120.0}
 
 
-def builtin_strata_server(root, port=None):
-    """The default "strata" entry: the Strata folder's own MCP server (tools/strata_mcp.py), so the engine's web
-    chat can answer "is Strata running?" with nothing configured.  `port` (the serving server's own) rides in the
-    environment as STRATA_MCP_OWN_PORT: there the state tools refuse what would end the chat's model.  None when the
-    script is not beside the config (a trimmed runtime install; the desktop app's agent carries it instead)."""
-    if not root:
-        return None
-    script = Path(root) / "tools" / "strata_mcp.py"
+def builtin_strata_server(root=None):
+    """The default "strata" entry: the Strata folder's own MCP server (tools/strata_mcp.py beside serve/), so the
+    engine's web chat can answer "is Strata running?" with nothing configured.  Derived from this process's own
+    layout - `root` defaults to the folder serve/ lives in - so a trimmed runtime install without the file simply
+    has no entry (the hub's ordinary start log says so, and the chat works without it)."""
+    root = Path(root) if root else Path(__file__).resolve().parent.parent
+    script = root / "tools" / "strata_mcp.py"
     if not script.is_file():
         return None
-    env = {"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
-    if port:
-        env["STRATA_MCP_OWN_PORT"] = str(int(port))
-    return {"command": sys.executable, "args": [str(script), "--root", str(root)], "cwd": str(root), "env": env}
+    return {"command": sys.executable, "args": [str(script), "--root", str(root)], "cwd": str(root)}
 
 
 class McpError(RuntimeError):

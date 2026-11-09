@@ -17,10 +17,7 @@ ever stops a process it started (a Strata started elsewhere, e.g. from its own w
 unload the model).
 
 Not to be confused with serve/mcp.py: that is Strata's MCP *client* (the model calling your tools from the chat page).
-This file is an MCP *server* for the AI assistant you already use.  The engine's own chat offers this server too
-(serve/mcp.py's built-in "strata" entry): there STRATA_MCP_OWN_PORT is set to the serving port, and strata_start,
-strata_stop and a confirmed strata_install refuse - the chat's model cannot stop itself, be replaced under itself,
-or have a second model started on top of it.
+This file is an MCP *server* for the AI assistant you already use.
 """
 from __future__ import annotations
 
@@ -51,17 +48,6 @@ DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 CONTROL = os.environ.get("STRATA_CONTROL_INSTALL") == "1"
 DEFAULT_PORT = 8080
 STATE_DIR = ".strata-mcp"                             # in the Strata folder (git-ignored)
-
-
-def own_port() -> int | None:
-    """The port of the engine this MCP server lives inside, when it does (serve/mcp.py's built-in server sets
-    STRATA_MCP_OWN_PORT): the state tools then refuse what would end or disturb the chat's own model. Read fresh so a
-    test (or a wrapper) can set it at any time."""
-    try:
-        return int(os.environ.get("STRATA_MCP_OWN_PORT") or "")
-    except ValueError:
-        return None
-
 
 # What setup.py offers, used only when setup.py cannot be imported (the numbers are setup's MODELS / FAMILIES /
 # CONTEXTS; tools/test_strata_mcp.py checks they still match).
@@ -2035,10 +2021,6 @@ class Tools:
                                    f"{' at most; part of it is already here' if plan['partly_downloaded'] else ''}). "
                                    "Nothing was done yet: ask the user, then call strata_install again with the "
                                    "same arguments and confirm=true.", "plan": plan}
-            if own_port() is not None:
-                raise ToolError(f"Strata is running (this chat runs on it, port {own_port()}): setup may replace "
-                                "the engine files it uses, so the engine's own chat does not install; stop the "
-                                "model in the Strata app first, then ask again")
             if plan["disk_short"]:
                 raise ToolError(plan["disk_short"])
             return self.launch_install(plan, args)
@@ -2182,10 +2164,6 @@ class Tools:
     def strata_start(self, model=None, port=None, gpu=None, wait_seconds=50) -> dict:
         s = self.s
         with s.lock:
-            if own_port() is not None:
-                raise ToolError(f"a model is already running on port {own_port()} (this chat runs on it), so no "
-                                "second one is started from the engine's own chat; the Strata app can run several "
-                                "models at once")
             job = s.install_job()
             if job and job["running"]:
                 raise ToolError("an install is still running (strata_install shows its progress); start the model "
@@ -2269,9 +2247,6 @@ class Tools:
                 tracked = None
             if tracked:
                 port = tracked["port"]
-                if own_port() is not None and port == own_port():
-                    raise ToolError(f"this chat's model runs on port {port}: stopping it would end this chat; the "
-                                    "person can stop or unload the model in the Strata app")
                 key = s.api_key_for(port)
                 st, body = http_json(f"http://127.0.0.1:{port}/status", api_key=key, timeout=3)
                 if st == 200 and isinstance(body, dict) and body.get("busy") and not force:
@@ -2297,11 +2272,6 @@ class Tools:
                         "model": tracked.get("model"), "port": port, "engine_unloaded": unloaded,
                         "ended_cleanly": clean}
             for p in s.ports(port):
-                if own_port() is not None and p == own_port():
-                    if port == own_port():
-                        raise ToolError(f"this chat's model runs on port {p}: stopping it would end this chat; the "
-                                        "person can stop or unload the model in the Strata app")
-                    continue                     # the chat's own engine: never unloaded as a side effect
                 info = s.probe(p, deep=False)
                 if info and not info.get("other"):
                     key = s.api_key_for(p)
@@ -2313,13 +2283,10 @@ class Tools:
                         raise ToolError("Strata (started outside this MCP server) wants an API key this folder's "
                                         "configs do not have; close its window to stop it")
                     return {"summary": f"Strata on port {p} was started outside this MCP server (its own window or a "
-                                   f"service), so only its model was unloaded ({r}): its VRAM and RAM are free, "
-                                   "but the server still listens and loads the model again on the next request. "
-                                   "Close its window to end it completely.",
+                                       f"service), so only its model was unloaded ({r}): its VRAM and RAM are free, "
+                                       "but the server still listens and loads the model again on the next request. "
+                                       "Close its window to end it completely.",
                             "port": p, "engine_unloaded": r}
-            if own_port() is not None and not port:
-                return {"summary": f"no other Strata is running (this chat's model on port {own_port()} was left "
-                                   "alone: stopping it would end this chat)"}
             return {"summary": "Strata is not running"}
 
     # ---- strata_logs

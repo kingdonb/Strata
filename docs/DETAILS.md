@@ -1546,11 +1546,13 @@ with an `mcpServers` block; add it to the `serve/server.py` line of your run scr
 - **The built-in one:** with no `mcp_servers` of your own, the chat also gets Strata's own MCP server
   (`tools/strata_mcp.py`, the one [Manage Strata from your AI assistant](#manage-strata-from-your-ai-assistant-mcp-server)
   describes) under the name `strata` - so "is Strata running?", "what is installed?", "what do the logs say?" and
-  "how do I point another app at it?" need no configuration. Your own `"strata"` entry (even a `"disabled": true`)
-  or `"mcp": {"builtin_strata": false}` turns the default off. Inside the running engine's chat, its state tools
-  refuse: the model cannot stop the very server it is talking through, start a second model on top of it, or run an
-  install under itself (setup may replace the engine files in use) - stop the model in the app first, then ask
-  again. The tools that only read (status, models, logs, connect info) and the speed test work as always.
+  "how do I point another app at it?" need no configuration. Its tools are offered only to requests that opt in with
+  `"strata_mcp": true`, like every other server's; a request without the opt-in sees exactly the API it always saw.
+  Your own `"strata"` entry (even a `"disabled": true`) or `"mcp": {"builtin_strata": false}` turns the default off.
+  The tools behave like any connected server's tools: in the chat page the model can be asked to stop the very
+  engine the chat runs on - the request then ends with an error and you start the model again in the app - and a
+  confirmed install runs setup while the engine works, which can end the engine when its files are replaced. The
+  desktop app's direct chat asks before every connected-tool call; Bypass runs them without asking.
 - The servers start with Strata, in the background; the server window says what each one offers
   (`MCP server 'files': 14 tools (...)`), or why it did not start - its tools are then left out and the chat works
   without them. The Monitor tab lists them, and the Sampling drawer has **Use tools from MCP servers** (on by
