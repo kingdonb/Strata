@@ -19,7 +19,7 @@ import { standardPreset } from '../server/agent/preset.mjs';
 import { TOOL_GROUPS } from '../server/agent/tools-catalog.mjs';
 import { createAgentTools } from '../server/agent/tools-settings.mjs';
 import { findBrowser, browserCandidates, findPlaywrightMcp } from '../server/agent/browser-probe.mjs';
-import { manualDecision, planDecision } from '../server/agent/plugins/strata-gate.mjs';
+import { manualDecision, planDecision, strataDecision } from '../server/agent/plugins/strata-gate.mjs';
 import { createDuckDuckGoSearch, looksBlocked, parseHtmlResults, parseLiteResults, realUrl, BLOCKED_MESSAGE } from '../server/web-search-ddg.mjs';
 import { createExaSearch, createPerplexitySearch } from '../server/web-search-keyed.mjs';
 
@@ -369,6 +369,90 @@ test('browser: the tool server is found in the agent component; the screen can s
     const off = createAgentTools({ read: () => ({ browser: { enabled: false } }), write: () => {}, dataDir: dir, browser: () => ({ found: true, name: 'x', path: 'p', cli: 'c' }) });
     assert.equal(entriesOf(buildProfile({ local: [], connections: [], tools: off.profileView() })).flatMap(x => x.insert ?? []).some(r => r.config?.serverName === 'browser'), false);
   } finally { cleanup(dir); }
+});
+
+// ------------------------------------------------------------------------------------------------ Strata engine tools
+
+const STRATA_SPEC = { command: 'python3', args: ['/repo/tools/strata_mcp.py', '--root', '/repo'], cwd: '/repo', env: { PYTHONUTF8: '1' } };
+const strataView = strata => ({ off: new Set(), search: { provider: 'builtin', key: '' }, webWithoutAsking: false, browserEnabled: false, browserPath: null, browserCli: null, strataEnabled: !!strata, strataSpec: strata ? STRATA_SPEC : null, servers: {}, hasInstructionTools: false, hasCommandTools: false, toolFile: null });
+
+const strataTools = (dir, state, probe) => createAgentTools({ read: () => state, write: value => { state = value; }, dataDir: dir, ...(probe ? { strata: probe } : {}) });
+
+test('Tools: the Strata engine tools default on when an installation is found, the switch is remembered, and the profile view carries the spec', () => {
+  const dir = tmp();
+  try {
+    const bare = strataTools(dir, {});
+    assert.deepEqual(bare.view().strata, { enabled: true, found: false }, 'default on, and not found without a probe');
+    assert.equal(bare.profileView().strataEnabled, false, 'not found: no row reaches the profile');
+    const found = strataTools(dir, {}, () => ({ found: true, spec: STRATA_SPEC }));
+    assert.deepEqual(found.view().strata, { enabled: true, found: true });
+    const profile = found.profileView();
+    assert.equal(profile.strataEnabled, true);
+    assert.deepEqual(profile.strataSpec, STRATA_SPEC);
+    found.update({ strata: { enabled: false } });
+    assert.equal(found.profileView().strataEnabled, false);
+    assert.equal(found.profileView().strataSpec, null, 'off leaves no spec behind');
+    found.update({ strata: { enabled: true } });
+    assert.equal(found.profileView().strataEnabled, true);
+  } finally { cleanup(dir); }
+});
+
+test("profile: the Strata row is the person's own (not the chat toggle's), its env travels as tokens, and a model server named strata yields to ours", () => {
+  const names = profile => profile.patch.match(/"serverName": "([^"]+)"/g)?.map(s => s.slice(15, -1)) ?? [];
+  const spec = { command: 'python3', args: ['/repo/tools/strata_mcp.py', '--root', '/repo'], cwd: '/repo' };
+  const view = strata => ({ ...strataView(!!strata), strataSpec: strata ? spec : null });
+  const on = buildProfile({ local: [], connections: [], tools: view(true) });
+  assert.deepEqual(names(on), ['strata']);
+  const row = entriesOf(on).flatMap(x => x.insert ?? []).find(r => r.config?.serverName === 'strata');
+  assert.equal(row.id, 'mcp-strata');
+  assert.deepEqual(row.config.args, ['/repo/tools/strata_mcp.py', '--root', '/repo']);
+  assert.equal(row.config.cwd, '/repo');
+  // a server env value never lands in the profile file: it travels in the agent's environment, referenced by name
+  const withEnv = buildProfile({ local: [], connections: [], tools: { ...view(true), strataSpec: { ...spec, env: { PYTHONUTF8: '1' } } } });
+  assert.equal(withEnv.env.STRATA_MCP_0_E_PYTHONUTF8, '1');
+  assert.ok(withEnv.patch.includes('!!js process.env.STRATA_MCP_0_E_PYTHONUTF8'));
+  assert.ok(!withEnv.patch.includes('"PYTHONUTF8": "1"'), 'the value is not inline in the profile');
+  assert.deepEqual(names(buildProfile({ local: [], connections: [], tools: view(false) })), [], 'the switch off wires nothing');
+  // the chat's Tools toggle governs the CONNECTED servers, not this Settings row (the browser's rule)
+  assert.deepEqual(names(buildProfile({ local: [], connections: [], tools: view(true), connectMcp: false })), ['strata']);
+  // a model's own server named strata yields to the built-in one and is reported, not silently dropped
+  const local = [{ id: 'a', modelId: 'm', baseUrl: 'http://127.0.0.1:1/v1', mcpServers: { strata: { command: 'node', args: ['x.js'] } } }];
+  const both = buildProfile({ local, defaultLocalId: 'a', tools: view(true) });
+  const rows = entriesOf(both).flatMap(x => x.insert ?? []).filter(r => r.config?.serverName === 'strata');
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].config.command, 'python3', 'the built-in row wins');
+  assert.ok(both.mcpSkipped.some(s => s.name === 'strata' && s.why === 'duplicate'));
+});
+
+test('the gate: the Strata reads run unasked in Manual and Plan; start, stop, a speed test and a confirmed install ask in Manual and are refused in Plan; a confirm-less install is a read', () => {
+  for (const name of ['strata_status', 'strata_models', 'strata_logs', 'strata_connect_info']) {
+    assert.equal(manualDecision({ name: `mcp__strata__${name}`, arguments: {} }), null, name);
+    assert.equal(planDecision({ name: `mcp__strata__${name}` }), null, name);
+  }
+  assert.equal(manualDecision({ name: 'mcp__strata__strata_install', arguments: {} }), null, 'the plan-or-progress call changes nothing, so it never asks');
+  assert.equal(manualDecision({ name: 'mcp__strata__strata_install', arguments: { cancel: false } }), null);
+  assert.equal(planDecision({ name: 'mcp__strata__strata_install', arguments: {} }), null);
+  const install = manualDecision({ name: 'mcp__strata__strata_install', arguments: { confirm: true } });
+  assert.equal(install.kind, 'ask');
+  assert.match(install.reason, /gigabytes/);
+  assert.equal(manualDecision({ name: 'mcp__strata__strata_install', arguments: { cancel: true } }).kind, 'ask');
+  assert.equal(planDecision({ name: 'mcp__strata__strata_install', arguments: { confirm: true } }).kind, 'deny');
+  assert.equal(planDecision({ name: 'mcp__strata__strata_install', arguments: { cancel: true } }).kind, 'deny');
+  const benchmark = manualDecision({ name: 'mcp__strata__strata_benchmark', arguments: {} });
+  assert.equal(benchmark.kind, 'ask');
+  assert.match(benchmark.reason, /speed test/);
+  assert.equal(planDecision({ name: 'mcp__strata__strata_benchmark' }), null, 'it refuses while the model is busy, so Plan lets it answer busy');
+  const stop = manualDecision({ name: 'mcp__strata__strata_stop', arguments: {} });
+  assert.equal(stop.kind, 'ask');
+  assert.match(stop.reason, /free its memory/);
+  assert.equal(planDecision({ name: 'mcp__strata__strata_stop' }).kind, 'deny');
+  const start = manualDecision({ name: 'mcp__strata__strata_start', arguments: { model: 'q2_0' } });
+  assert.equal(start.kind, 'ask');
+  assert.match(start.reason, /q2_0/);
+  assert.equal(planDecision({ name: 'mcp__strata__strata_start' }).kind, 'deny');
+  assert.equal(strataDecision('strata_start', {}).kind, 'ask', 'a start with no model still asks');
+  assert.equal(manualDecision({ name: 'mcp__strata__strata_something_new', arguments: {} }).kind, 'ask', 'a tool the rules do not know asks');
+  assert.equal(planDecision({ name: 'mcp__strata__strata_something_new' }).kind, 'deny');
 });
 
 const browserNow = findBrowser();

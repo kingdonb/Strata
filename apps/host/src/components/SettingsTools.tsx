@@ -38,6 +38,7 @@ export interface ToolsState {
   /** Skip the once-per-chat question before the first web search or page in Manual mode. Off unless the person turned it on. */
   webWithoutAsking: boolean;
   browser: { enabled: boolean; found: boolean; name: string | null; missing?: 'component' };
+  strata: { enabled: boolean; found: boolean };
   custom: CustomTool[];
 }
 
@@ -152,6 +153,15 @@ export function SettingsTools({ preview }: { preview?: ToolsState }) {
       <div className="st-card st-card--flush">
         <Field label={tr('Use a web browser')} hint={state.browser.found ? tr('The assistant can open pages, click and type in {0}. In Manual mode every action asks first.', [state.browser.name ?? tr('your browser')]) : tr(state.browser.missing === 'component' ? 'The browser tool is not part of this installation.' : 'Chrome or Edge was not found on this computer. Install one, then come back and turn this on.')}>
           <button className="st-toggle" role="switch" aria-checked={state.browser.enabled && state.browser.found} aria-label={tr('Use a web browser')} disabled={busy || !state.browser.found} onClick={() => void save({ browser: { enabled: !state.browser.enabled } })} />
+        </Field>
+      </div>
+    </section>
+
+    <section className="settings-section">
+      <h2 className="h4" style={{ marginBottom: 10 }}>{tr('Strata engine')}</h2>
+      <div className="st-card st-card--flush">
+        <Field label={tr('Let the assistant work with Strata')} hint={state.strata.found ? tr('The assistant can look at your Strata engine: what is installed and running, the model list, the logs. Starting, stopping, a speed test and downloading a new model ask first in Manual mode.') : tr('No Strata installation was found on this computer. Connect one (Settings → Engine, or the Strata Terminal), and the tools appear here.')}>
+          <button className="st-toggle" role="switch" aria-checked={state.strata.enabled && state.strata.found} aria-label={tr('Let the assistant work with Strata')} disabled={busy || !state.strata.found} onClick={() => void save({ strata: { enabled: !state.strata.enabled } })} />
         </Field>
       </div>
     </section>

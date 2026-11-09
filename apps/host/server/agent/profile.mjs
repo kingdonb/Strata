@@ -67,7 +67,7 @@ export const CUSTOM_TOOLS_SCRIPT = fileURLToPath(new URL('./custom-tools-mcp.mjs
 const SEARCH_NAMES = Object.freeze({ builtin: 'DuckDuckGo, or Bing when DuckDuckGo is busy', exa: 'Exa', perplexity: 'Perplexity', deepseek: 'DeepSeek' });
 
 /** What Settings -> Tools says when nothing was chosen. */
-const NO_TOOLS_SETTINGS = Object.freeze({ off: new Set(), search: { provider: 'builtin', key: '' }, webWithoutAsking: false, browserEnabled: false, browserPath: null, browserCli: null, servers: {}, hasInstructionTools: false, hasCommandTools: false, toolFile: null });
+const NO_TOOLS_SETTINGS = Object.freeze({ off: new Set(), search: { provider: 'builtin', key: '' }, webWithoutAsking: false, browserEnabled: false, browserPath: null, browserCli: null, strataEnabled: false, strataSpec: null, servers: {}, hasInstructionTools: false, hasCommandTools: false, toolFile: null });
 
 /**
  * The tool servers (MCP) set up for the model in Settings, as Harness client rows. Their tools appear to the agent as
@@ -297,14 +297,22 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
   // instruction and command tools are Settings -> Tools' to govern, not this toggle's. Flipping the toggle
   // changes the signature, so the agent restarts with (or without) the rows.
   const mcpSkipped = [];
-  const mcp = connectMcp === false ? [] : mcpRows({ ...(defaultInstance?.mcpServers ?? {}), ...(tools.servers ?? {}) }, mcpEnv, mcpSkipped);
-  if (connectMcp !== false) Object.assign(env, mcpEnv);
+  // The built-in Strata engine tools (tools/strata_mcp.py, the same program the app's control client runs): one row of
+  // the person's own, Settings-governed server rows, beside the instruction/command tool server and the browser. A
+  // model's own server named `strata` would collide with the row's id, so it is skipped and reported.
+  const strataRows = tools.strataEnabled && tools.strataSpec ? mcpRows({ strata: tools.strataSpec }, mcpEnv, mcpSkipped) : [];
+  const modelServers = { ...(defaultInstance?.mcpServers ?? {}) };
+  if (modelServers.strata) { mcpSkipped.push({ name: 'strata', why: 'duplicate' }); delete modelServers.strata; }
+  const mcp = connectMcp === false ? [] : mcpRows({ ...modelServers, ...(tools.servers ?? {}) }, mcpEnv, mcpSkipped);
+  // The strata server's env must travel even when the chat's Tools toggle is off: its row is Settings-governed, not
+  // governed by that toggle (like the browser and the person's instruction/command tools).
+  Object.assign(env, mcpEnv);
   // The person's own instruction and command tools come from the app's tool server; a command tool asks in Manual like any connected tool.
   const own = (kind, on) => on && tools.toolFile ? [{ id: `mcp-strata-${kind}`, name: '@deepseek-ai/dsh-mcp-client', config: { serverName: `strata-${kind}`, transport: 'stdio', command: process.execPath, args: [CUSTOM_TOOLS_SCRIPT, kind, tools.toolFile] } }] : [];
   // The browser: Playwright's tool server on the person's own Chrome or Edge, in a separate empty profile (what the Harness's own browser provider does). Every action asks in Manual.
   const browserRows = tools.browserEnabled && tools.browserPath && tools.browserCli
     ? [{ id: 'mcp-browser', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'browser', transport: 'stdio', command: process.execPath, args: [tools.browserCli, '--browser', 'chromium', '--isolated', ...(process.env.STRATA_BROWSER_HEADLESS === '1' ? ['--headless'] : []), '--executable-path', tools.browserPath] } }] : [];
-  const ownRows = [...own('instructions', tools.hasInstructionTools), ...own('commands', tools.hasCommandTools), ...browserRows];
+  const ownRows = [...own('instructions', tools.hasInstructionTools), ...own('commands', tools.hasCommandTools), ...browserRows, ...strataRows];
   // Web search: DuckDuckGo with no key unless the person chose a keyed service AND saved its key (then that one; never a half-set-up one).
   const searchOn = !tools.off.has('search');
   const keyed = ['exa', 'perplexity', 'deepseek'].includes(tools.search.provider) && tools.search.key ? tools.search.provider : null;
