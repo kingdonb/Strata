@@ -25,6 +25,7 @@ difference.
 | The built-in Strata tools in the engine's own chat | `serve/mcp.py` (`builtin_strata_server`, `"mcp": {"builtin_strata": false}` turns it off) |
 | Apple Silicon temperature without root | `serve/telemetry.py` (`_AppleSiliconThermal`) |
 | Qwen3.6 UD-Q2_K_XL in the model tables, and the Qwen3.6 rows in the Mac model list | `setup.py` (`QWEN36_FILES`, `OWN_PATH_FAMILIES`), `tools/strata_mcp.py` |
+| Qwen3.6 setup on a Mac (`./setup.sh --family qwen36`) | `metal/setup_mac_q36.py`, the hand-over in `metal/setup_mac.py` (`qwen36_setup`), `tools/test_setup_mac_q36.py` |
 | The M2 validation records, the Metal roadmap and review, the sandbox notes | `docs/QWEN36_METAL*.md`, `docs/m2-sessions/`, `docs/M2_*.md`, `docs/ENVIRONMENT.md`, `docs/blog/`, `bench/results/2026-10-*-m2-q36-*` |
 
 ## Syncing with upstream
@@ -41,7 +42,14 @@ addition beside it. When upstream fixes something the fork also fixed, take upst
 
 After a merge:
 
-1. `python tools/check` (upstream's fast checks: the Python suites, the app's typecheck, tests and build).
+1. `python tools/check` (upstream's fast checks: the Python suites, the app's typecheck, tests and build). Run it
+   in a clean worktree with a scratch `HOME`, not in a checkout you serve models from: on 2026-11-14 the Python suite,
+   run in the live checkout, rewrote the local `strata-q2_0.json` (it left a `.bak`) and `run-q2_0.sh`.
+
+   ```
+   git worktree add --detach /tmp/strata-check HEAD
+   cd /tmp/strata-check && HOME=/tmp/strata-check-home python tools/check
+   ```
 2. Build the Metal engine (`cmake -S metal -B build-metal -G Ninja -DMETAL_CPP_DIR=third_party/metal-cpp`, then
    `cmake --build build-metal --target strata`) and the Qwen3.6 tests (`q36_compile_test`, `q36_chunk_parity`,
    `prefix_plan_test`, `moe_sim`).
@@ -59,10 +67,13 @@ set. Reach Qwen3.6 through its family (`own_size("qwen36", ...)`, `--family qwen
 
 ## Open work after the 2026-11-14 merge
 
-- **Qwen3.6 setup on a Mac.** `metal/setup_mac.py` and `strata_control/mac_fit.py` are upstream's files, so
-  `./setup.sh --family qwen36` does not exist yet on this base. The fork's earlier version of that flow keyed
-  `UD-Q2_K_XL` by its bare name (see above) and has to be ported onto upstream's family tables. A model that is
-  already set up (an existing `strata-*.json` run config) starts as before.
+- **Qwen3.6 setup on a Mac: ported, not yet run end to end on the Mac.** `./setup.sh --setup --family qwen36` goes to
+  `metal/setup_mac_q36.py` (a file of its own; `metal/setup_mac.py` only hands the run over). It writes the run config
+  the way `setup.py` does for this family on a PC: `"arch": "qwen35moe"`, `--max-context`, `--mtp` as a draft count.
+  A run config written before the merge has no `"arch"`, so the rest of Strata reads it as a Flash-Next config: run
+  setup again (the model file is found where it is and not downloaded again), or add `"arch": "qwen35moe"` by hand.
+  `strata launch` on a Mac installs upstream's packaged Metal engine, which has no Qwen3.6 path: use `./setup.sh`
+  from this checkout until the fork publishes its own engine package.
 - **Qwen3.6 names in the app.** The labels "Compact (MTP)" and so on were dropped from
   `apps/host/src/lib/native-catalog.ts` for the same reason; the sizes show their plain names.
 - **The Metal gates on the merged engine.** See the merge's pull request for what was run and what was not.

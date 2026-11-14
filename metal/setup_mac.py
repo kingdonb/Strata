@@ -368,8 +368,23 @@ def _feed_models(argv, interactive: bool) -> None:
         S.feed_models_setup(peek("--feed"))
 
 
+def qwen36_setup(given):
+    """This fork's Qwen3.6 Metal path (metal/setup_mac_q36.py) when the command line names `--family qwen36`, else None.  It has a flow of its own, and its
+    sizes share their names with Flash-Next sets (UD-Q2_K_XL ...), so it is chosen by the family before this file's parser and tables see the run."""
+    if not any(x == "--family=qwen36" or (x == "--family" and given[i + 1:i + 2] == ["qwen36"]) for i, x in enumerate(given)):
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("setup_mac_q36", Path(__file__).with_name("setup_mac_q36.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def main(argv=None) -> int:
     given = argv if argv is not None else sys.argv[1:]
+    q36 = qwen36_setup(list(given))
+    if q36 is not None:
+        return q36.main(list(given), build_engine=build_engine, start=start)
     _feed_models(argv, not any(x in given for x in ("--yes", "--model", "--check", "--family")) and ("--setup" in given or not mac_configs()))   # (a plain start of an installed model reads nothing)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--family", choices=["qwen", "unsloth", "gyro", *_fit.FEED_FAMILIES], default=None,
