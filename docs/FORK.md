@@ -26,6 +26,7 @@ difference.
 | Apple Silicon temperature without root | `serve/telemetry.py` (`_AppleSiliconThermal`) |
 | Qwen3.6 UD-Q2_K_XL in the model tables, and the Qwen3.6 rows in the Mac model list | `setup.py` (`QWEN36_FILES`, `OWN_PATH_FAMILIES`), `tools/strata_mcp.py` |
 | Qwen3.6 setup on a Mac (`./setup.sh --family qwen36`) | `metal/setup_mac_q36.py`, the hand-over in `metal/setup_mac.py` (`qwen36_setup`), `tools/test_setup_mac_q36.py` |
+| The Qwen3.6 engine's settings in the register, its result folders in the bench index, the guarded check script | `data/settings-register.json` (13 `STRATA_Q36M_*` entries), `bench/results/README.md` (two rows), `scripts/check_guarded.sh` |
 | The M2 validation records, the Metal roadmap and review, the sandbox notes | `docs/QWEN36_METAL*.md`, `docs/m2-sessions/`, `docs/M2_*.md`, `docs/ENVIRONMENT.md`, `docs/blog/`, `bench/results/2026-10-*-m2-q36-*` |
 
 ## Syncing with upstream
@@ -42,14 +43,23 @@ addition beside it. When upstream fixes something the fork also fixed, take upst
 
 After a merge:
 
-1. `python tools/check` (upstream's fast checks: the Python suites, the app's typecheck, tests and build). Run it
-   in a clean worktree with a scratch `HOME`, not in a checkout you serve models from: on 2026-11-14 the Python suite,
-   run in the live checkout, rewrote the local `strata-q2_0.json` (it left a `.bak`) and `run-q2_0.sh`.
+1. Upstream's fast checks (`tools/check`: the Python suites, the app's typecheck, tests and build, the docs checks).
+   On Linux run `python tools/check`. On a Mac run `scripts/check_guarded.sh`, never `tools/check` in a checkout you
+   serve models from. On a Mac `setup.py` hands its whole command line to `metal/setup_mac.py`, so a test that calls
+   setup for real runs a real setup: on 2026-11-14 that rewrote a run config in the live checkout and started its
+   model, and in a clean worktree it began downloading a model (58 GB). The two tests found then are fixed; upstream
+   runs the Python suites on Linux and Windows only, so another can appear. The script runs the checks in a scratch
+   worktree with a scratch `HOME`, no outside network and no write access to the checkout or the model folders:
 
    ```
-   git worktree add --detach /tmp/strata-check HEAD
-   cd /tmp/strata-check && HOME=/tmp/strata-check-home python tools/check
+   STRATA_GUARD_READONLY=$HOME/w/Strata-data:$HOME/Documents/Strata scripts/check_guarded.sh
    ```
+
+   Many tests fail on a Mac on pristine upstream too. Compare with the same run of the upstream tag
+   (`scripts/check_guarded.sh v0.2.13.1`) before reading a failure as the fork's.
+   After adding a `STRATA_*` setting to the engine, add it to `data/settings-register.json` (run
+   `python tools/settings_register.py`, keep only the new entries, fill in `status`, `owner`, `note`); after adding a
+   folder under `bench/results`, run `python tools/bench_results_index.py` in a clean checkout.
 2. Build the Metal engine (`cmake -S metal -B build-metal -G Ninja -DMETAL_CPP_DIR=third_party/metal-cpp`, then
    `cmake --build build-metal --target strata`) and the Qwen3.6 tests (`q36_compile_test`, `q36_chunk_parity`,
    `prefix_plan_test`, `moe_sim`).

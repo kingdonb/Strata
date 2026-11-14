@@ -31273,6 +31273,535 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_Q36M_ATTN_GQA",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 515,
+     "backend": "metal",
+     "fn": "env_flag"
+    },
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 1969,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/QWEN36_METAL.md:379",
+    "docs/QWEN36_METAL.md:397",
+    "docs/QWEN36_METAL.md:404",
+    "docs/QWEN36_METAL.md:453",
+    "docs/QWEN36_METAL.md:457",
+    "docs/QWEN36_METAL.md:460",
+    "docs/QWEN36_METAL.md:464",
+    "docs/QWEN36_METAL.md:472",
+    "docs/QWEN36_METAL.md:560",
+    "docs/QWEN36_METAL.md:593",
+    "docs/QWEN36_METAL.md:706",
+    "docs/M2_VALIDATION_SESSION_RUNBOOK.md:79",
+    "docs/M2_VALIDATION_SESSION_RUNBOOK.md:110",
+    "docs/M2_VALIDATION_SESSION_RUNBOOK.md:223",
+    "docs/QWEN36_METAL_REVIEW.md:137",
+    "docs/QWEN36_METAL_ROADMAP.md:87",
+    "docs/QWEN36_METAL_ROADMAP.md:137",
+    "docs/QWEN36_METAL_ROADMAP.md:159",
+    "docs/QWEN36_METAL_ROADMAP.md:199"
+   ],
+   "first_commit": "b6f060caec",
+   "first_date": "2026-10-19",
+   "since": null,
+   "last_commit": "b6f060caec",
+   "last_date": "2026-10-19",
+   "status": "opt-in",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): GQA-folded attention, one K/V read per KV-head group (docs/QWEN36_METAL.md section 8); setup writes it",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_ATTN_ROWS",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 193,
+     "backend": "metal",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "1",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:13",
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:38",
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:210",
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:214",
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:280",
+    "docs/QWEN36_METAL.md:159",
+    "docs/QWEN36_METAL_ROADMAP.md:217"
+   ],
+   "first_commit": "1889b17276",
+   "first_date": "2026-10-20",
+   "since": null,
+   "last_commit": "1889b17276",
+   "last_date": "2026-10-20",
+   "status": "research",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): rows per split-K attention dispatch, the multi-row knob (docs/QWEN36_METAL.md)",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_ATTN_SK",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 1968,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:211",
+    "docs/QWEN36_METAL.md:155",
+    "docs/QWEN36_METAL.md:216",
+    "docs/QWEN36_METAL.md:404",
+    "docs/QWEN36_METAL.md:419",
+    "docs/QWEN36_METAL.md:439",
+    "docs/QWEN36_METAL.md:457",
+    "docs/QWEN36_METAL.md:560",
+    "docs/QWEN36_METAL.md:591",
+    "docs/QWEN36_METAL_ROADMAP.md:22",
+    "docs/QWEN36_METAL_ROADMAP.md:160"
+   ],
+   "first_commit": "65037a91bc",
+   "first_date": "2026-10-17",
+   "since": null,
+   "last_commit": "02d7aeec46",
+   "last_date": "2026-10-18",
+   "status": "research",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): forces split-K attention at a short context, for the parity gate (docs/QWEN36_METAL.md section 6)",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_DENSE_MMA",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 182,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:13",
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:217",
+    "docs/QWEN36_METAL.md:631",
+    "docs/QWEN36_METAL.md:659",
+    "docs/QWEN36_METAL.md:681",
+    "docs/QWEN36_METAL.md:682",
+    "docs/QWEN36_METAL.md:706",
+    "docs/QWEN36_METAL_REVIEW.md:137",
+    "docs/QWEN36_METAL_ROADMAP.md:199"
+   ],
+   "first_commit": "3dca4b47c9",
+   "first_date": "2026-10-19",
+   "since": null,
+   "last_commit": "3dca4b47c9",
+   "last_date": "2026-10-19",
+   "status": "opt-in",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): the chunk's dense GEMMs on the matrix units (docs/QWEN36_METAL.md section 10); setup writes it",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_DISPATCH_LOG",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/mtl_rt.mm",
+     "line": 330,
+     "backend": "metal",
+     "fn": "getenv"
+    },
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 204,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "int",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:14",
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:178",
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:210",
+    "docs/QWEN36_METAL.md:170",
+    "docs/QWEN36_METAL.md:750",
+    "docs/QWEN36_METAL_ROADMAP.md:205"
+   ],
+   "first_commit": "1889b17276",
+   "first_date": "2026-10-20",
+   "since": null,
+   "last_commit": "1889b17276",
+   "last_date": "2026-10-20",
+   "status": "research",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): one stderr line per prompt chunk with the dispatch counts (attention, GEMV, other)",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_GDN_WY",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 175,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:13",
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:217",
+    "docs/QWEN36_METAL.md:631",
+    "docs/QWEN36_METAL.md:646",
+    "docs/QWEN36_METAL.md:680",
+    "docs/QWEN36_METAL.md:682",
+    "docs/QWEN36_METAL.md:706",
+    "docs/QWEN36_METAL_REVIEW.md:137",
+    "docs/QWEN36_METAL_ROADMAP.md:199"
+   ],
+   "first_commit": "a661a6516b",
+   "first_date": "2026-10-19",
+   "since": null,
+   "last_commit": "a661a6516b",
+   "last_date": "2026-10-19",
+   "status": "opt-in",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): the chunk's parallel (WY) Gated DeltaNet scan (docs/QWEN36_METAL.md section 10); setup writes it",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_MEM_OK",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 2267,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/QWEN36_METAL.md:178",
+    "docs/QWEN36_METAL_REVIEW.md:100",
+    "docs/QWEN36_METAL_ROADMAP.md:23"
+   ],
+   "first_commit": "65037a91bc",
+   "first_date": "2026-10-17",
+   "since": null,
+   "last_commit": "8bdd9eb4cf",
+   "last_date": "2026-10-19",
+   "status": "opt-in",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): starts although the memory estimate is above the Mac's recommended working set (docs/QWEN36_METAL.md section 6)",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_POISON_STATE",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 2403,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "00cd22b7df",
+   "first_date": "2026-10-18",
+   "since": null,
+   "last_commit": "00cd22b7df",
+   "last_date": "2026-10-18",
+   "status": "research",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): diagnostic, fill the scratch state with NaN / -1 at the start of a request (wins over ZERO_STATE)",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_PREFILL",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 1909,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/QWEN36_METAL.md:187",
+    "docs/QWEN36_METAL.md:705"
+   ],
+   "first_commit": "d93247dac9",
+   "first_date": "2026-10-17",
+   "since": null,
+   "last_commit": "d93247dac9",
+   "last_date": "2026-10-17",
+   "status": "opt-in",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): reads a prompt in chunks of 512 tokens when --prefill is not given (docs/QWEN36_METAL.md section 6); setup writes it",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_PREFIX_RESET",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 2404,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:15",
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:226",
+    "docs/M2_UI_SESSION_3_RUNBOOK.md:283",
+    "docs/QWEN36_METAL.md:42",
+    "docs/M2_VALIDATION_SESSION_RUNBOOK.md:156"
+   ],
+   "first_commit": "1a2ad16ea9",
+   "first_date": "2026-10-20",
+   "since": null,
+   "last_commit": "1a2ad16ea9",
+   "last_date": "2026-10-20",
+   "status": "research",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): A/B switch, the full state reset of before the kept common prefix",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_SYNC_EVERY",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/mtl_rt.mm",
+     "line": 1051,
+     "backend": "metal",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "cbe03cab1c",
+   "first_date": "2026-10-18",
+   "since": null,
+   "last_commit": "1889b17276",
+   "last_date": "2026-10-20",
+   "status": "research",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): diagnostic, commits every N dispatches as their own command buffer (metal/src/mtl_rt.mm)",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_TRACE",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 610,
+     "backend": "metal",
+     "fn": "env_flag"
+    },
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 1106,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/QWEN36_METAL.md:437"
+   ],
+   "first_commit": "f54f90ad9f",
+   "first_date": "2026-10-18",
+   "since": null,
+   "last_commit": "b6f060caec",
+   "last_date": "2026-10-19",
+   "status": "research",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): debug, per-layer sub-graphs and checksums in the prompt path",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36M_ZERO_STATE",
+   "backends": [
+    "metal"
+   ],
+   "reads": [
+    {
+     "file": "metal/src/engine/q36_metal.cpp",
+     "line": 2402,
+     "backend": "metal",
+     "fn": "env_flag"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "off",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "b30049dbaf",
+   "first_date": "2026-10-18",
+   "since": null,
+   "last_commit": "00cd22b7df",
+   "last_date": "2026-10-18",
+   "status": "research",
+   "owner": "metal/q36",
+   "note": "Qwen3.6 on Metal (fork): diagnostic, zero the scratch state at the start of a request",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_Q36_BLAS_F32",
    "backends": [
     "cuda-hip"
