@@ -9,7 +9,11 @@ It is a file of its own, not a branch inside setup_mac.py, for two reasons:
     tokenizer is prepared, read from the GGUF.
   * Unsloth's size names are not unique.  UD-Q2_K_XL, UD-Q4_K_XL and UD-Q6_K_XL are Qwen3.8-Flash-Next sets in
     setup.py's MODELS and in strata_control/mac_fit.py's MAC_MODELS, and they are Qwen3.6 sizes too.  A Qwen3.6 size
-    is therefore reached only through its family (setup.py OWN_PATH_FAMILIES["qwen36"]) and never by its bare name.
+    is therefore reached only through its family and never by its bare name.
+
+The sizes the Mac runs are in strata_control/mac_q36.py (UD-Q2_K_XL).  They are not added to setup.py's
+OWN_PATH_FAMILIES["qwen36"], which lists the sizes upstream's CUDA / HIP path runs and would offer them on every PC.
+The family's other facts (title, repository, architecture, drafts per step) are read from that table.
 
 The run config follows the one setup.py writes for this family on a PC ("arch": "qwen35moe", --max-context, --mtp as
 a draft count), so the rest of Strata treats it as a Qwen3.6 config and not as a Flash-Next one.
@@ -26,12 +30,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 import setup as S  # noqa: E402
 from strata_control.mac_fit import mac_info, mac_problems, recommend_context  # noqa: E402
+from strata_control.mac_q36 import DEFAULT as DEFAULT_MODEL, FAMILY, MAC_SIZES  # noqa: E402
 
-FAMILY = "qwen36"
-# The size that was run on a Mac (an M2 with 24 GB: docs/QWEN36_METAL.md, docs/m2-sessions).  The family's other sizes
-# can be named with --model; they are installed with a line that says they were not run on a Mac.
-MAC_RUN = ("UD-Q2_K_XL",)
-DEFAULT_MODEL = "UD-Q2_K_XL"
 DRAFT_VOCAB = 8192          # the draft head's rows (docs/QWEN36_METAL.md, "The draft-vocab subset head")
 # The engine's opt-in kernels this path was validated with (each one's section in docs/QWEN36_METAL.md names its gate).
 ENGINE_ENV = {"STRATA_METAL_STREAM": "1", "STRATA_Q36M_PREFILL": "1", "STRATA_Q36M_ATTN_GQA": "1",
@@ -49,8 +49,20 @@ def family() -> dict:
     return S.OWN_PATH_FAMILIES[FAMILY]
 
 
+def sizes() -> dict:
+    """Every size --model takes: the Mac's own (MAC_SIZES), then the family's other sizes, which were not run on a Mac."""
+    fam = family()
+    out = {m: dict(d, mac=True) for m, d in MAC_SIZES.items()}
+    for m, d in fam["models"].items():
+        if m not in out:
+            name = fam["file"].format(q=m)
+            size, sha = fam["sha256"][name]
+            out[m] = {"about": d["about"], "file": name, "size": size, "sha256": sha, "ram_gb": d["ram_gb"], "mac": False}
+    return out
+
+
 def gguf_name(model: str) -> str:
-    return family()["file"].format(q=model)
+    return sizes()[model]["file"]
 
 
 def find_gguf(name: str, gguf_dir, models_root: Path, tag: str, roots: list) -> Path | None:
@@ -93,7 +105,7 @@ def main(argv, build_engine, start) -> int:
     fam = family()
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--family", choices=[FAMILY])
-    ap.add_argument("--model", choices=list(fam["models"]))
+    ap.add_argument("--model", choices=list(sizes()))
     ap.add_argument("--context", type=int)
     ap.add_argument("--port", type=int)
     ap.add_argument("--host")
@@ -139,9 +151,10 @@ def main(argv, build_engine, start) -> int:
     # ---- 2. the choices
     S.step(2, "your choices")
     model = a.model or DEFAULT_MODEL
-    if model not in MAC_RUN:
-        S.warn(f"{model} was not run on a Mac (only {', '.join(MAC_RUN)} was): kept as you chose")
-    need_ram = fam["models"][model]["ram_gb"]
+    size = sizes()[model]
+    if not size["mac"]:
+        S.warn(f"{model} was not run on a Mac (only {', '.join(MAC_SIZES)} was): kept as you chose")
+    need_ram = size["ram_gb"]
     if info["ram_gb"] < need_ram:
         S.warn(f"{model} needs about {need_ram} GB of memory and this Mac has {info['ram_gb']:.0f} GB: kept as you "
                "chose; it may not start")
@@ -152,7 +165,7 @@ def main(argv, build_engine, start) -> int:
     tag = fam["tag"] + model
     name = gguf_name(model)
     found = find_gguf(name, a.gguf_dir, models_root, tag, roots)
-    need = (0 if found else fam["sha256"][name][0] / 1e9) + 2
+    need = (0 if found else size["size"] / 1e9) + 2
     if free < need:
         S.warn(f"about {need:.0f} GB are needed on the disk ({free:.0f} GB free): kept as you chose; it may run out")
 
@@ -184,12 +197,7 @@ def main(argv, build_engine, start) -> int:
         gguf = models_root / tag / name
         gguf.parent.mkdir(parents=True, exist_ok=True)
         S.download(fam["hf"] + name, gguf)
-    size, sha = fam["sha256"][name]
-    if sha:
-        S.verify_sha256(gguf, size, sha, own=bool(found))
-    elif gguf.stat().st_size != size:
-        S.fail(f"{gguf.name} has {gguf.stat().st_size} bytes; the file this setup knows has {size}",
-               "delete it and run setup again to download it")
+    S.verify_sha256(gguf, size["size"], size["sha256"], own=bool(found))      # the pinned size and SHA-256 (a file of your own is checked once)
     S.ok("model file present")
 
     # ---- 6. the tokenizer (the engine reads everything else from the GGUF itself)

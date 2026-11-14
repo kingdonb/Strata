@@ -24,7 +24,7 @@ difference.
 | The built-in Strata tools in the agent (`mcp__strata__*`) | `apps/host/server/native-control.mjs` (`strataToolSpec`), `apps/host/server/agent/` (`profile.mjs`, `tools-settings.mjs`, `plugins/strata-gate.mjs`, `agent-bridge.mjs`), `apps/host/src/components/SettingsTools.tsx`, strings `s9039`-`s9042` in `apps/host/src/locales/` |
 | The built-in Strata tools in the engine's own chat | `serve/mcp.py` (`builtin_strata_server`, `"mcp": {"builtin_strata": false}` turns it off) |
 | Apple Silicon temperature without root | `serve/telemetry.py` (`_AppleSiliconThermal`) |
-| Qwen3.6 UD-Q2_K_XL in the model tables, and the Qwen3.6 rows in the Mac model list | `setup.py` (`QWEN36_FILES`, `OWN_PATH_FAMILIES`), `tools/strata_mcp.py` |
+| The Qwen3.6 size the Mac runs (UD-Q2_K_XL, pinned by size and SHA-256), and the Qwen3.6 rows in the Mac model list | `strata_control/mac_q36.py`, `tools/strata_mcp.py` (`_mac_qwen36`) |
 | Qwen3.6 setup on a Mac (`./setup.sh --family qwen36`) | `metal/setup_mac_q36.py`, the hand-over in `metal/setup_mac.py` (`qwen36_setup`), `tools/test_setup_mac_q36.py` |
 | The Qwen3.6 engine's settings in the register, its result folders in the bench index, the guarded check script | `data/settings-register.json` (13 `STRATA_Q36M_*` entries), `bench/results/README.md` (two rows), `scripts/check_guarded.sh` |
 | The M2 validation records, the Metal roadmap and review, the sandbox notes | `docs/QWEN36_METAL*.md`, `docs/m2-sessions/`, `docs/M2_*.md`, `docs/ENVIRONMENT.md`, `docs/blog/`, `bench/results/2026-10-*-m2-q36-*` |
@@ -75,6 +75,10 @@ Upstream's model tables are keyed by the bare size name, and Unsloth uses the sa
 Qwen3.6 size to `MODELS`, `MAC_MODELS` or a label map under its bare name: it would replace or relabel the Flash-Next
 set. Reach Qwen3.6 through its family (`own_size("qwen36", ...)`, `--family qwen36`).
 
+`setup.py` is upstream's file, byte for byte. Its `OWN_PATH_FAMILIES["qwen36"]` lists the sizes upstream's CUDA and
+HIP path runs; a size added there is offered on every PC and, for a PC with little RAM, recommended. The size the Mac
+runs is in `strata_control/mac_q36.py` and nowhere else.
+
 ## Open work after the 2026-11-14 merge
 
 - **Qwen3.6 setup on a Mac: ported, not yet run end to end on the Mac.** `./setup.sh --setup --family qwen36` goes to
@@ -87,8 +91,6 @@ set. Reach Qwen3.6 through its family (`own_size("qwen36", ...)`, `--family qwen
 - **Qwen3.6 names in the app.** The labels "Compact (MTP)" and so on were dropped from
   `apps/host/src/lib/native-catalog.ts` for the same reason; the sizes show their plain names.
 - **The Metal gates on the merged engine.** See the merge's pull request for what was run and what was not.
-- **`UD-Q2_K_XL` for Qwen3.6 is listed on every platform** because `OWN_PATH_FAMILIES` is shared. It was only run on
-  the Metal engine.
 
 ## Releasing from the fork
 

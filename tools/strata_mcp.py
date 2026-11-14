@@ -1193,27 +1193,36 @@ class Strata:
             if sizes:
                 out.append({"family": family, "title": fd["title"], "about": fd.get("about"), "experimental": False,
                             "images": any(x["images"] for x in sizes), "sizes": sizes})
-        if "qwen36" in families:
-            fd36 = families["qwen36"]
-            q36_sizes = []
-            for m in self.sizes_of(models, "qwen36"):
-                d = self.own_size("qwen36", m) or models.get(m, {})
-                tag = (fd36.get("tag", "") + m).lower()
-                is_installed = tag in have or (m == "UD-Q2_K_XL" and any(c in have for c in ("q36_q2", "q36", tag)))
-                active_id = "q36_q2" if "q36_q2" in have and m == "UD-Q2_K_XL" else ("q36" if "q36" in have and m == "UD-Q2_K_XL" else tag)
-                q36_sizes.append({
-                    "model": m, "about": d.get("about", "Qwen3.6-35B-A3B Metal native GGUF with MTP"),
-                    "download_gb": d.get("download_gb", 12.6),
-                    "experimental": False, "images": False, "ram_needed_gb": d.get("ram_gb", 16.0), "experts_gb": d.get("arena_gb", 11.7),
-                    "mem_total": True, "memory_gb": float(d.get("ram_gb", 16.0)), "on_this_pc": "fits" if ram >= d.get("ram_gb", 16.0) else "tight",
-                    "installed": is_installed, "id": active_id, "engine_min": None
-                })
-            if q36_sizes:
-                out.append({"family": "qwen36", "title": fd36["title"], "about": fd36.get("about", "35B MoE with Metal kernels"), "experimental": False, "images": False, "sizes": q36_sizes})
+        q36 = self._mac_qwen36(families, have, ram)      # Qwen3.6-35B-A3B on this fork's Metal engine path: after the Flash-Next families
+        if q36 is not None:
+            out.append(q36)
         ds = self._mac_deepseek(hw, have)                # DeepSeek-V4.1-Flash on the Mac (0.2.7.1): after Qwen, never the default
         if ds is not None:
             out.append(ds)
         return self._feed_rows(out, self.setup_module())
+
+    def _mac_qwen36(self, families: dict, have: set, ram: float) -> dict | None:
+        """Qwen3.6-35B-A3B for a Mac: the sizes this fork's Metal engine path runs (strata_control/mac_q36.py), with the same numbers setup uses
+        (metal/setup_mac_q36.py).  None when setup.py has no such family, or this Strata folder does not carry the Mac table."""
+        fam = families.get("qwen36")
+        if not fam:
+            return None
+        try:
+            from strata_control import mac_q36
+        except Exception as e:                          # noqa: BLE001
+            log(f"strata_control/mac_q36.py could not be imported ({e})")
+            return None
+        sizes = []
+        for m, d in mac_q36.MAC_SIZES.items():
+            tag = (fam.get("tag", "") + m).lower()
+            ids = [i for i in (tag, *mac_q36.EARLIER_IDS.get(m, ())) if i in have]     # a config an earlier setup wrote keeps its own name
+            sizes.append({"model": m, "about": d["about"], "download_gb": d["download_gb"], "experimental": False, "images": False,
+                          "ram_needed_gb": d["ram_gb"], "experts_gb": d["arena_gb"], "mem_total": True, "memory_gb": float(d["ram_gb"]),
+                          "on_this_pc": ("fits" if ram >= d["ram_gb"] else "may run slower") if ram else None,
+                          "installed": bool(ids), "id": ids[0] if ids else tag, "engine_min": None})
+        if not sizes:
+            return None
+        return {"family": "qwen36", "title": fam["title"], "about": fam.get("about"), "experimental": False, "images": False, "sizes": sizes}
 
     def dsv41_engine_exe(self) -> Path | None:
         """The installed strata-dsv41 (STRATA_DSV41_EXE, else the newest package in the engine-dsv41 folders of this install), None when there is none; only looked at, never started."""

@@ -51,15 +51,27 @@ class Chosen(unittest.TestCase):
             self.assertIs(kwargs["start"], M.start)
 
     def test_the_shared_size_names_stay_flash_next_in_the_bare_name_tables(self):
-        """UD-Q2_K_XL, UD-Q4_K_XL and UD-Q6_K_XL are Flash-Next sets where a table is keyed by the bare name; the Qwen3.6
-        sizes of the same names live only in their family."""
-        own = S.OWN_PATH_FAMILIES["qwen36"]["models"]
+        """UD-Q2_K_XL, UD-Q4_K_XL and UD-Q6_K_XL are Flash-Next sets where a table is keyed by the bare name."""
         for name in ("UD-Q2_K_XL", "UD-Q4_K_XL", "UD-Q6_K_XL"):
-            self.assertIn(name, own)
             self.assertNotIn("qwen36", S.MODELS[name].get("families", ()), name)
             self.assertEqual(M.MAC_MODELS[name].get("family"), "unsloth", name)
-        self.assertIn(Q.DEFAULT_MODEL, own)
-        self.assertIn(Q.gguf_name(Q.DEFAULT_MODEL), S.OWN_PATH_FAMILIES["qwen36"]["sha256"])
+
+    def test_the_mac_size_is_not_offered_on_a_pc(self):
+        """setup.py's family table is the family as the CUDA / HIP path runs it: a size added there is offered, and for little RAM recommended, on every PC."""
+        self.assertEqual(list(S.OWN_PATH_FAMILIES["qwen36"]["models"]), ["UD-Q4_K_XL", "UD-Q6_K_XL", "Q8_0"])
+        self.assertNotIn(Q.gguf_name("UD-Q2_K_XL"), S.OWN_PATH_FAMILIES["qwen36"]["sha256"])
+        self.assertEqual(Q.DEFAULT_MODEL, "UD-Q2_K_XL")
+        sizes = Q.sizes()
+        self.assertEqual(list(sizes), ["UD-Q2_K_XL", "UD-Q4_K_XL", "UD-Q6_K_XL", "Q8_0"], "the Mac's own size first, then the family's")
+        self.assertEqual([m for m, d in sizes.items() if d["mac"]], ["UD-Q2_K_XL"])
+
+    def test_every_size_is_pinned_by_size_and_sha256(self):
+        for model, d in Q.sizes().items():
+            self.assertEqual(d["file"], f"Qwen3.6-35B-A3B-{model}.gguf")
+            self.assertGreater(d["size"], 10 ** 10, model)
+            self.assertRegex(d["sha256"], r"^[0-9a-f]{64}$", model)
+        mac = Q.MAC_SIZES["UD-Q2_K_XL"]
+        self.assertEqual(round(mac["size"] / 1e9, 1), mac["download_gb"])
 
 
 class Files(unittest.TestCase):
@@ -106,7 +118,8 @@ class Config(unittest.TestCase):
             S.write_config(path, Q.run_config(Path("/e/strata"), Path("/m/q.gguf"), Path("/p/tokenizer"), "UD-Q2_K_XL", 32768, 8095,
                                               Path("/d/x.log")))
             choices = S.choices_from_config(path)
-            self.assertEqual((choices["family"], choices["model"], choices["context"]), ("qwen36", "UD-Q2_K_XL", 32768))
+            # (the size is not one of setup.py's own for this family, so it reads back as None: on a Mac the Qwen3.6 flow takes its default)
+            self.assertEqual((choices["family"], choices["model"], choices["context"]), ("qwen36", None, 32768))
 
 
 if __name__ == "__main__":

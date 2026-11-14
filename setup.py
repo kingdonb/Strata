@@ -749,7 +749,6 @@ MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # packs): OWN_PATH_FAMILIES, offered in the same menu and installed by install_own_path.  NVIDIA (CUDA) and AMD (HIP)
 # only: the Intel Arc (SYCL) engine refuses it.
 QWEN36_FILES = {
-    "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf": (12574128416, None),
     "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf": (22853663008, "55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"),
     "Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf": (32611711264, "35fce994cd36104a7dc1bd8a4bdf13778145664c00fdef6773aebc9246e5019c"),
     "Qwen3.6-35B-A3B-Q8_0.gguf": (37801097504, "c1283d8b80c3e38b2735ddbc9766d3b3126f44d6c484be419d4e101d09a76131"),
@@ -765,8 +764,7 @@ OWN_PATH_FAMILIES = {
                # RAM: the engine keeps a copy of every expert in RAM when they do not all fit in VRAM (the hybrid mode),
                # so the file's size plus room for the OS and the rest (measured: UD-Q4_K_XL on a 46 GB PC with a 12 GB
                # card, 18.75 GiB of experts pinned)
-               "models": {"UD-Q2_K_XL": {"about": "2-bit (Unsloth Dynamic), the smallest", "ram_gb": 16},
-                          "UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), the smallest", "ram_gb": 32},
+               "models": {"UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), the smallest", "ram_gb": 32},
                           "UD-Q6_K_XL": {"about": "6-bit (Unsloth Dynamic), closer to the full model", "ram_gb": 44},
                           "Q8_0": {"about": "8-bit, the closest to the full model", "ram_gb": 52}},
                "sha256": QWEN36_FILES,

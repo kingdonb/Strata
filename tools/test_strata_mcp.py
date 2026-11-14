@@ -779,8 +779,12 @@ class MacCatalog(unittest.TestCase):
     def test_the_model_list_is_the_macs_sizes_with_unified_memory_verdicts(self):
         s, hw = self.hw(32)
         fams = s.model_table(hw)
-        self.assertEqual([f["family"] for f in fams], ["qwen", "unsloth", "gyro", "deepseek41"],
-                         "Unsloth's sets since round 0214 (the app repacks them), no Swift or NVFP4 on a Mac; Gyro after the regular sizes, DeepSeek (0.2.7.1) last")
+        self.assertEqual([f["family"] for f in fams], ["qwen", "unsloth", "gyro", "qwen36", "deepseek41"],
+                         "Unsloth's sets since round 0214 (the app repacks them), no Swift or NVFP4 on a Mac; Gyro after the regular sizes, DeepSeek (0.2.7.1) last; "
+                         "this fork: Qwen3.6 on its Metal path (strata_control/mac_q36.py) before DeepSeek")
+        q36 = {x["model"]: x for x in fams[3]["sizes"]}
+        self.assertEqual(list(q36), ["UD-Q2_K_XL"], "the size the Metal path was run with, not the PC sizes of the family")
+        self.assertEqual((q36["UD-Q2_K_XL"]["on_this_pc"], q36["UD-Q2_K_XL"]["images"], q36["UD-Q2_K_XL"]["download_gb"]), ("fits", False, 12.6))
         by = {x["model"]: x for x in fams[0]["sizes"]}
         self.assertEqual(list(by), ["Q2_0", "IQ3_XXS", "IQ3_S"])
         un = {x["model"]: x for x in fams[1]["sizes"]}
