@@ -39,7 +39,6 @@ class _VersionAction(argparse.Action):
 
 def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="strata", description="Strata serving and terminal clients")
-    import strata_cli
     ap.add_argument("--version", action=_VersionAction, nargs=0,
                     help="print the version and the interpreter this terminal runs on")
     sp = ap.add_subparsers(dest="command", required=True)
@@ -171,6 +170,8 @@ def parser() -> argparse.ArgumentParser:
     models_move.add_argument("--output", choices=("human", "json", "jsonl"), default="human")
     from strata_cli import drafting_cmd
     drafting_cmd.add_parser(sp)
+    from strata_cli import split_cmd
+    split_cmd.add_parser(sp)
     engine = sp.add_parser("engine", help="engine tuning and component actions")
     engine_sp = engine.add_subparsers(dest="engine_command", required=True)
     calibrate = engine_sp.add_parser("calibrate", help="measure, review and apply engine tuning")
@@ -568,7 +569,7 @@ def _models(a: argparse.Namespace) -> int:
             from strata_cli import connections
             resolved = connections.resolve(url=a.url, connection=a.connection,
                                            credential_env=a.credential_env, timeout=a.timeout)
-            endpoint = Endpoint(resolved["url"], os.environ.get(resolved["credential_env"]),
+            endpoint = Endpoint(resolved["url"], _usable_key(os.environ.get(resolved["credential_env"])),
                                 resolved["timeout_s"], resolved["prefix"])
             snapshot = endpoint.snapshot()
             model = snapshot["model"]
@@ -770,7 +771,8 @@ def _effective(cfg: dict, saved: dict | None, cli: argparse.Namespace | None = N
     if values["queue_timeout"] is not None and values["max_queue"] is None:
         raise ProfileError("queue_timeout requires max_queue to bound pending calls")
     if values["parallel"] is not None and any(flag in cfg["args"] for flag in ("--batch", "--slots")):
-        if origins["parallel"] != "run_config":
+        # (the all-cards split engine's run config, split_config's "split_engine_note", always carries --batch; the server turns "parallel" into its lane count)
+        if origins["parallel"] != "run_config" and not cfg.get("split_engine_note"):
             raise ProfileError("parallel override conflicts with --batch/--slots in run config args")
     if values["batch_groups"] is not None and "--batch-groups" in cfg["args"]:
         raise ProfileError("batch_groups override conflicts with --batch-groups in run config args")
@@ -1040,7 +1042,7 @@ def _doctor(a: argparse.Namespace) -> int:
         if live_probe is not None:
             print(f"Live GPU probe: {live_probe['status']}")
             for card in live_probe["cards"]:
-                print(f"  GPU {card['index']}: {card['name']} | {card['memory_mib']} MiB | "
+                print(f"  GPU {card['index']}: {card['name']} | {str(card['memory_mib']) + ' MiB' if card['memory_mib'] is not None else 'unified memory'} | "
                       f"driver {card['driver_version']} | {card['uuid']}")
     return 0 if report["ok"] else 5
 
@@ -1126,27 +1128,17 @@ def _calibration(a: argparse.Namespace) -> int:
     return 0 if components["ok"] else 5
 
 
-def _bench_standard_module():
-    """The fork does not carry upstream's standard-v1 benchmark suite (benchmarks stay gated here); the plain
-    serving-bench report/compare/cancel keep working. Returns None when the module is absent."""
-    try:
-        from strata_cli import bench_standard
-        return bench_standard
-    except ImportError:
-        return None
-
-
 def _bench(a: argparse.Namespace) -> int:
     from strata_cli import bench
     machine = a.output == "json"
     if a.bench_command in ("report", "compare") and a.out and a.output != "markdown":
         return _error("--out requires --output markdown", 2, machine)
     if a.bench_command == "report":
-        standard_mod = _bench_standard_module()
-        standard_report = standard_mod.load_if_standard(Path(a.path)) if standard_mod else None
+        from strata_cli import bench_standard
+        standard_report = bench_standard.load_if_standard(Path(a.path))
         if standard_report is not None:
             if a.output == "markdown":
-                rendered = standard_mod.report_markdown(standard_report)
+                rendered = bench_standard.report_markdown(standard_report)
                 if a.out:
                     bench.write_markdown(Path(a.out), rendered)
                     print(f"Markdown report: {Path(a.out).resolve()}")
@@ -1157,7 +1149,7 @@ def _bench(a: argparse.Namespace) -> int:
                                          "status": standard_report["run"]["status"],
                                          "quality": standard_report["quality"],
                                          "summaries": standard_report["summaries"]}}, machine=machine,
-                            human=standard_mod.format_plain(standard_report))
+                            human=bench_standard.format_plain(standard_report))
         report = bench.load(Path(a.path))
         result = bench.summary(report)
         if a.output == "markdown":
@@ -1194,9 +1186,6 @@ def _bench(a: argparse.Namespace) -> int:
                                                not a.telemetry_credential_env.isidentifier()):
         return _error("credential options must name environment variables", 2, machine)
     if a.suite == "standard-v1":
-        if _bench_standard_module() is None:
-            return _error("the standard-v1 suite is not part of this fork (benchmarks stay gated; "
-                          "use the serving suites)", 2, machine)
         return _bench_standard(a, machine)
     if a.out is None:
         return _error("--out is required for the serving suites", 2, machine)
@@ -1225,9 +1214,9 @@ def _bench(a: argparse.Namespace) -> int:
                             "model_name": cfg.get("model_name"), "gpu": cfg.get("gpu")}
     else:
         url = a.url
-    key = os.environ.get(a.credential_env)
+    key = _usable_key(os.environ.get(a.credential_env))
     endpoint = Endpoint(url, key, timeout=10)
-    telemetry = Endpoint(url, os.environ.get(a.telemetry_credential_env) if a.telemetry_credential_env else key,
+    telemetry = Endpoint(url, _usable_key(os.environ.get(a.telemetry_credential_env)) if a.telemetry_credential_env else key,
                          timeout=3)
     from strata_control.benchmarking import benchmark_lease
     lease = benchmark_lease(saved["id"], Path(a.out)) if a.profile and saved else contextlib.nullcontext()
@@ -1245,6 +1234,12 @@ def _bench(a: argparse.Namespace) -> int:
         print(bench.format_summary(compact))
         print(f"Evidence: {Path(a.out).resolve() / 'results.json'}")
     return 0 if report["successful"] else 6
+
+
+def _usable_key(value):
+    """An API key from the environment: "none" (any case) is the server's word for no key, so it is no key (#4483)."""
+    from strata_cli.bench_facts import usable_key
+    return usable_key(value)
 
 
 def _bench_standard(a: argparse.Namespace, machine: bool) -> int:
@@ -1265,7 +1260,7 @@ def _bench_standard(a: argparse.Namespace, machine: bool) -> int:
         return _error("--load-timeout must be 1..86400 seconds", 2, machine)
     plan = None
     saved = None
-    key = os.environ.get(a.credential_env)
+    key = _usable_key(os.environ.get(a.credential_env))
     if a.profile:
         _, saved, _, cfg = _source(a.profile)
         plan, _ = _launch_plan(a.profile)
@@ -1297,8 +1292,9 @@ def _bench_standard(a: argparse.Namespace, machine: bool) -> int:
     import tempfile
     lease = benchmark_lease(saved["id"], out) if saved else contextlib.nullcontext()
     proc, scratch, engine_log, run_log, log_start = None, None, None, None, 0
+    stop_problem = None
     try:
-        with lease, contextlib.redirect_stdout(sys.stderr):
+        with lease, bench_standard.term_is_interrupt(), contextlib.redirect_stdout(sys.stderr):
             def log(message: str) -> None:
                 print(message, file=sys.stderr, flush=True)
             if a.profile and target.get("/health", timeout=5) is None:
@@ -1316,13 +1312,23 @@ def _bench_standard(a: argparse.Namespace, machine: bool) -> int:
                                               engine_run_log=(run_log, log_start) if proc is not None else None,
                                               started_engine=proc is not None, hash_model=not a.skip_model_hash)
     finally:
-        bench_standard.stop_engine(proc)
+        stop_problem = bench_standard.stop_engine(proc)
+        if not isinstance(stop_problem, str):
+            stop_problem = None
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
     ok = doc["run"]["status"] == "complete"
+    if stop_problem:   # #3438: a stop that failed is not a normal finish: the engine may still hold the port and the GPU
+        ok = False
+        print(f"\nERROR: the engine this run started could not be stopped: {stop_problem}. It may still hold the server port "
+              "and the GPU: stop it by hand before the next run. This run is marked FAILED.", file=sys.stderr, flush=True)
+        try:
+            (out_dir / "ENGINE-NOT-STOPPED.txt").write_text(stop_problem + "\n", encoding="utf-8")
+        except OSError:
+            pass
     path = out_dir / "results.json"
     if machine:
-        print(json.dumps({"schema_version": 1, "ok": ok, "path": str(path.resolve()), "status": doc["run"]["status"],
+        print(json.dumps({"schema_version": 1, "ok": ok, "path": str(path.resolve()), "status": "failed" if stop_problem else doc["run"]["status"], "engine_stop_error": stop_problem,
                           "quality": doc["quality"], "summaries": doc["summaries"]}, ensure_ascii=False, allow_nan=False))
     else:
         print(bench_standard.format_plain(doc))
@@ -1577,7 +1583,7 @@ def _timeskip(a: argparse.Namespace) -> int:
         env = {**os.environ, "STRATA_TIMESKIP_PROMPT": prompt,
                "STRATA_TIMESKIP_ATTEMPT": str(attempt)}
         proc = subprocess.run(a.revise_command, shell=True, cwd=str(candidate), env=env,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, errors="replace")
         if proc.returncode != 0:
             raise time_skip.TimeSkipError(
                 f"the revision command failed (exit {proc.returncode}): "
@@ -2036,6 +2042,8 @@ def _components_engine(a: argparse.Namespace) -> int:
         print(f"engine            {report['engine']['exe']}  (version {report['engine']['version']})")
     else:
         print(report["notice"], file=sys.stderr)
+    for row in report.get("shapes") or []:             # the engines of model shapes, only on a PC that has one (strata_control/shape_engine.py)
+        print(f"engine for {row['shape']}  " + (f"{row['engine']['exe']}  (version {row['engine']['version']})" if row["usable"] else str(row.get("notice"))))
     notice = engine_component.cached_notice(root)
     if notice:
         print(notice)
@@ -2134,7 +2142,7 @@ def _run(a: argparse.Namespace) -> int:
             return _components_backends(a)
         if a.command == "components" and a.components_command == "engine":
             return _components_engine(a)
-        if a.command == "update" or (a.command == "components" and a.components_command in ("update", "rollback")):
+        if a.command == "update" or (a.command == "components" and a.components_command in ("update", "rollback", "install-file", "engines", "use", "remove")):
             from strata_cli import update_cmd
             return update_cmd.run(a)
         if a.command in ("doctor", "components"):
@@ -2146,6 +2154,9 @@ def _run(a: argparse.Namespace) -> int:
         if a.command == "drafting":
             from strata_cli import drafting_cmd as _drafting_cmd
             return _drafting_cmd.run(a)
+        if a.command == "split-engine":
+            from strata_cli import split_cmd as _split_cmd
+            return _split_cmd.run(a)
         if a.command == "bench":
             return _bench(a)
         if a.command == "timeskip":
@@ -2216,6 +2227,21 @@ class _QuietCapture:
         return self.text
 
 
+def _install_argv(argv: list[str]) -> list[str]:
+    """`strata install` hands everything after it to setup.py (`strata install --family qwen --model IQ3_XXS --yes`). argparse cannot do that
+    by itself: an option it does not know ahead of the first plain word (--source, --family) was refused as "unrecognized arguments", or
+    split from its value (#4188). So the options of setup.py go behind a `--`, and only `--update` and --help stay strata's own."""
+    if not argv or argv[0] != "install":
+        return argv
+    rest = list(argv[1:])
+    if rest and rest[0] in ("-h", "--help"):
+        return argv
+    update = "--update" in rest
+    if update:
+        rest.remove("--update")
+    return ["install", *(["--update"] if update else []), "--", *rest]
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         from strata_control import private_files
@@ -2223,8 +2249,9 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:                          # a thin bundle ships without strata_control
         pass
     ap = parser()
-    a, extras = ap.parse_known_args(argv)
-    a.raw_argv = list(sys.argv[1:] if argv is None else argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    a, extras = ap.parse_known_args(_install_argv(raw))
+    a.raw_argv = raw
     if extras:
         if getattr(a, "command", None) in ("launch", "connect"):
             from strata_cli.launch import cmd as launch_cmd

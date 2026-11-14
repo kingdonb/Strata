@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import time
-import unittest
 from pathlib import Path
 
 import setup
@@ -14,7 +13,7 @@ from tests.terminal.test_discovery import GuiLayout
 
 class SharedModelsFolder(GuiLayout):
     def files(self):
-        mine = Path(os.environ["APPDATA"]) / "Strata" / "settings.json"
+        mine = self.settings_path
         mine.parent.mkdir(parents=True, exist_ok=True)
         return mine, discovery.app_settings_file()
 
@@ -26,7 +25,6 @@ class SharedModelsFolder(GuiLayout):
     def read(self, file: Path) -> dict:
         return json.loads(file.read_text())
 
-    @unittest.skip("upstream test is Windows-path-flavored: it fails identically on upstream v0.2.2 on Linux (verified 2026-10-23 in the fork's upstream-sync survey)")
     def test_the_terminal_choice_made_last_wins_and_the_app_file_follows(self):
         mine, app = self.files()
         old, new = self.base / "on-c", self.base / "on-d"
@@ -38,7 +36,6 @@ class SharedModelsFolder(GuiLayout):
         self.assertEqual(self.read(app)["installs"], ["keep"])        # merged, not replaced
         self.assertEqual(list(old.iterdir()), [])                     # nothing moved
 
-    @unittest.skip("upstream test is Windows-path-flavored: it fails identically on upstream v0.2.2 on Linux (verified 2026-10-23 in the fork's upstream-sync survey)")
     def test_the_app_choice_made_last_wins_and_the_terminal_file_follows(self):
         mine, app = self.files()
         old, new = self.base / "on-c", self.base / "on-d"
@@ -49,7 +46,6 @@ class SharedModelsFolder(GuiLayout):
         self.assertEqual(self.read(mine)["data_dir_at"], 3000)
         self.assertEqual(self.catalog().data_dir().resolve(), new.resolve())
 
-    @unittest.skip("upstream test is Windows-path-flavored: it fails identically on upstream v0.2.2 on Linux (verified 2026-10-23 in the fork's upstream-sync survey)")
     def test_an_app_folder_on_a_disk_that_is_gone_is_not_adopted(self):
         mine, app = self.files()
         keep = self.base / "kept"
@@ -68,7 +64,6 @@ class SharedModelsFolder(GuiLayout):
         self.assertEqual(discovery.data_dir(self.base / "default")[0], folder)
         self.assertEqual(app.read_bytes(), before)
 
-    @unittest.skip("upstream test is Windows-path-flavored: it fails identically on upstream v0.2.2 on Linux (verified 2026-10-23 in the fork's upstream-sync survey)")
     def test_files_without_a_time_use_the_file_time(self):
         mine, app = self.files()
         old, new = self.base / "a", self.base / "b"
@@ -86,7 +81,6 @@ class SharedModelsFolder(GuiLayout):
         self.assertIsNone(discovery.sync_data_dir())
         self.assertEqual(Path(self.read(app)["data_dir"]), self.base / "a")
 
-    @unittest.skip("upstream test is Windows-path-flavored: it fails identically on upstream v0.2.2 on Linux (verified 2026-10-23 in the fork's upstream-sync survey)")
     def test_setup_stamps_a_changed_data_folder(self):
         mine, _ = self.files()
         setup.save_settings({"data_dir": str(self.base / "x")})

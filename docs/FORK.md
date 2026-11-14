@@ -1,88 +1,106 @@
 # About this fork (kingdonb/Strata)
 
-This fork is a **development line**, not a release. It is Strata 0.2.0 with a divergent Apple-Silicon
-Metal/Qwen3.6 kernel line on top (`metal/`, documented in [QWEN36_METAL.md](QWEN36_METAL.md)). It is built
-from source on the owner's Mac; it ships no installers, no engine packages and no update feed of its own.
+This fork is upstream Strata plus a small set of additions. It is built from source on the owner's Mac. It does not
+publish installers, engine packages or an update feed of its own yet; that is planned (see "Releasing from the fork").
 
-- App version: **0.2.0-beta** (`apps/host/package.json`, `apps/desktop`) — kept deliberately; see "Versioning".
-- Engine version: **0.1.45.3-metal** (`metal/CMakeLists.txt` `STRATA_VERSION`).
-- The host's update check still points at upstream's release feed (`api.github.com/repos/Niko1221/Strata`,
-  inherited from 0.2.0). "Update" would offer upstream engines; installing one would replace this fork's
-  engine. Do not use it on this fork. (A standalone decision on the fork's update story is pending.)
+- Base: upstream **v0.2.13.1** (`628f7495`), merged on 2026-11-14 with an ordinary `git merge`.
+- Versions: upstream's (app and Terminal 0.2.13, Control 0.1.59.1, engine 0.1.59). The fork no longer keeps a version
+  line of its own. A fork release will add a suffix to upstream's number (owner decision, 2026-11-14).
+- Until the fork has its own feed, the built-in update address is still upstream's
+  (`github.com/Niko1221/Strata/releases/latest/download`). `strata update` and the app's Update button would install
+  upstream's engine, which does not have the Qwen3.6 Metal path. Do not use them on a machine that runs this fork's
+  engine.
 
-## Upstream syncs
+## What the fork adds
 
-| Date | Upstream synced through | Merge-base | Slices |
-| --- | --- | --- | --- |
-| 2026-10-25 | **v0.2.3.1** (`7ddc17a3`), range `011c9e60..7ddc17a3` (131 commits, 294 files, +14,913/−661) | `011c9e60` ("Release notes 0.2.2") | Host context handling, Terminal steadiness, safe drafting wiring (serve/ deltas skipped — engine version gates) |
-| 2026-10-23 | **v0.2.2** (`011c9e60`), range `3d1fb480..011c9e60` (404 commits, 590 files, +52,967/−2,271) | `3d1fb480` ("Release notes 0.2.0") | Terminal/Control/serve; host app; docs + this file |
+Everything else in the tree is upstream's file, byte for byte. `git diff v0.2.13.1 HEAD --stat` lists the whole
+difference.
 
-Syncs are **path-scoped and deliberate**, one PR per slice — never a blind merge:
-
-```
-git remote add upstream https://github.com/Niko1221/Strata.git
-git fetch upstream --tags
-git diff 3d1fb480 v0.2.2 -- <paths> | git apply      # per slice, on a fresh branch from main
-```
-
-`scripts/upstream_survey.sh <from> <to>` wraps this method (the survey, ledger-row generation and
-skip-list application; run it with `--help`). The skip list's machine-readable twin is
-`scripts/upstream_skip.txt` — update it in the same PR whenever this table changes.
-
-Then apply the skip-list below (revert modified files to the merge-base, delete upstream-new ones), run the
-suites, and record what was skipped and why in the PR.
-
-## Skip-list as of the v0.2.2 sync (with reasons)
-
-| Skipped | Why |
+| Addition | Where |
 | --- | --- |
-| `strata_control/feed.py`, `strata_cli/update_cmd.py` | The signed update feed / `strata update` rework — the fork keeps the 0.2.0 update behavior (pending standalone decision) |
-| `strata_cli/bench_facts.py`, `bench_standard.py` (the `standard-v1` suite) | Benchmarks stay gated (Benchmark Day); the plain serving-bench commands keep working; `bench run --suite standard-v1` fails with a plain fork message |
-| `strata_control/calibration_jobs.py`, `autotune.py`, `benchmarking.py` | Bench-gated measurement machinery (the `calibration.py`/`components.py`/`bench.py` hardening fixes ARE taken — API-supersets) |
-| `tools/test_setup_*.py`, `setup.py`, `START-HERE.bat`, `cmake/`, root `CMakeLists.txt` | Upstream's source-installer and engine-package machinery (CUDA/HIP/SYCL package selection, gfx lists); the fork builds the Metal engine |
-| `src/` (CUDA/HIP engine), `sycl/` (Intel) | The fork builds no CUDA/HIP/SYCL engine; keeping them unsynced keeps the fork's delta small. The shared `include/strata/` headers stay synced as one block with them, never piecemeal (deferred engine-adjacent slice, interactive per the working agreement) |
-| `metal/` upstream changes (Gyro trellis kernels, dense tiles) | Engine behavior — deferred behind an owner decision (a Metal Gyro port would let the fork's engine load Gyro files); the overlap with our `quant.metal` is section-disjoint and mergeable later |
-| `packaging/`, `docker/` (except nothing), `.github/`, `Dockerfile`, `installer.nsi` | Upstream release/CI/image machinery the fork does not run |
-| `serve/` upstream changes in v0.2.3.1 | Gated on upstream's 0.1.48 engine packaging, version gates, and DFlash2 routing; the fork runs 0.1.45.3-metal. Skipped to prevent advertising unsupported engine features. Terminal/CLI connection TLS trust was ported via `strata_control/tls.py`. |
-| `tools/dflash2/`, `strata_control/drafting_fetch.py` (DFlash2 drafter) | Surveyed, not adopted — targets Qwen3.8-Flash-Next (CUDA/SYCL); the fork's q36 line uses its own native MTP speculative decoding |
-| `bench/**`, `bench.sh`, `BENCH.bat` | Reference material only — no claims, no measurement scope |
-| README translations, `AGENTS.md` upstream changes | They advertise features the fork does not take; the fork's README/AGENTS stay fork-specific |
-| Gyro/RX-6000 model entries | The fork's Metal engine does not load Gyro yet (host references are engine-report-guarded and stay graceful) |
+| Qwen3.6-35B-A3B on Apple Silicon (Metal) | `metal/kernels/q36*.metal`, the K-quant kernels in `metal/kernels/quant.metal`, `metal/src/engine/q36_metal.cpp`, `metal/src/engine/q36_prefix_plan.hpp`, `metal/tests/q36_*`, `metal/tests/moe_sim.cpp`, `tools/qwen35/q36_*`; documented in [QWEN36_METAL.md](QWEN36_METAL.md) |
+| Serial GPU dispatch for the Qwen3.6 graphs, the dispatch tally and the argument-count guard | `metal/src/mtl_rt.h`, `metal/src/mtl_rt.mm` (`set_serial_graphs`; off for every other engine) |
+| The direct chat asks before a connected tool runs (Manual and Plan ask, Bypass runs) | `serve/server.py` (`GET /v1/mcp/tools`, `POST /v1/mcp/call`), `apps/host/server/tool-run.mjs`, `apps/host/server/index.mjs` (`/api/tools/run`), `apps/host/server/inference.mjs`, `apps/host/src/lib/store.ts`, `apps/host/src/app/ContextPanel.tsx`, `apps/host/src/components/ComposerControls.tsx` |
+| The built-in Strata tools in the agent (`mcp__strata__*`) | `apps/host/server/native-control.mjs` (`strataToolSpec`), `apps/host/server/agent/` (`profile.mjs`, `tools-settings.mjs`, `plugins/strata-gate.mjs`, `agent-bridge.mjs`), `apps/host/src/components/SettingsTools.tsx`, strings `s9039`-`s9042` in `apps/host/src/locales/` |
+| The built-in Strata tools in the engine's own chat | `serve/mcp.py` (`builtin_strata_server`, `"mcp": {"builtin_strata": false}` turns it off) |
+| Apple Silicon temperature without root | `serve/telemetry.py` (`_AppleSiliconThermal`) |
+| Qwen3.6 UD-Q2_K_XL in the model tables, and the Qwen3.6 rows in the Mac model list | `setup.py` (`QWEN36_FILES`, `OWN_PATH_FAMILIES`), `tools/strata_mcp.py` |
+| The M2 validation records, the Metal roadmap and review, the sandbox notes | `docs/QWEN36_METAL*.md`, `docs/m2-sessions/`, `docs/M2_*.md`, `docs/ENVIRONMENT.md`, `docs/blog/`, `bench/results/2026-10-*-m2-q36-*` |
 
-**Versioning (deliberate):** the fork keeps its own version line (`0.2.0-beta` app, `0.1.45.3-metal` engine)
-and records upstream provenance here instead of adopting upstream's bumps (`0.2.2` / `0.1.46` / `0.1.47`).
-Revisit only if the fork starts shipping releases.
+## Syncing with upstream
 
-## Notes for the next sync
+Merge a release tag. Do not apply path-scoped diffs by hand again.
 
-1. The survey method is four commands (fetch tags; `diff --name-only` per area; commit subjects per area; read
-   the release notes) — see the spec task's design doc (helix-specs `design/tasks/000696_upstream-sync-survey/`).
-2. Upstream test files embed product-version strings and Windows path assumptions. Validate with a
-   **three-way comparison** (merge-base worktree, full-upstream worktree, synced tree) before trusting any
-   single red test; the sandbox lacks `regex`/`textual` (many environmental errors) and its `sh` is dash.
-3. `tests/data/` carries test fixtures ported tests need (`gpu_roles_vectors.json`) — sync it with the tests,
-   not with the skipped areas.
-4. Upstream's terminal tests that read `%APPDATA%/Strata/settings.json` fail identically on the pristine
-   upstream tree on Linux; the ported code honors the same setting written to the platform-correct path.
-5. The two engine-tree overlap files (`metal/CMakeLists.txt`, `metal/kernels/quant.metal`) and
-   `docs/TEST_REQUESTS.md` are the only places both sides have touched — resolve them as unions when the
-   engine-adjacent slice (if approved) lands.
-6. Owner decision (2026-10-25): small bugfixes ride along inline with the story that touches them —
-   no separate patch release per fix. Each concern still gets its own commit and a line in the PR body;
-   the review of a mixed PR lands as a docs file in the same branch (see docs/PR24_REVIEW.md and its
-   punch list for the pre-release checks).
-9. Owner decision (2026-10-25, per the 000715 spec review): the host suite gets a CI leg —
-   `.github/workflows/host-suite.yml` (paths `apps/host/**`, ubuntu, Node 24 = the engines floor,
-   `npm ci` + `npm test`). Until it existed, `apps/host` changes ran no CI at all and baseline reds
-   accumulated silently (four sat on main for weeks). The pre-push-script alternative was considered and
-   declined: only CI protects PRs from people and bots who never read docs. Owner can revert the one file
-   if they disagree on return.
-10. **Fork-only serve additions (2026-10-25, task 000712):** `GET /v1/mcp/tools` and `POST /v1/mcp/call` in
-   `serve/server.py` (the host chat's ask mode: the MCP tools as OpenAI schemas, and the executor for a call
-   its user approved). Both are additive wrappers over tested `McpHub` code, guarded like the other MCP-only
-   endpoints (`_authorized()` / `_own_page`); upstream v0.2.3.1's skipped serve slice has no counterpart, so
-   nothing collides — when serve slices resume, re-apply these two blocks (or propose them upstream first).
-   Tests: `serve/test_mcp.py` class `Endpoints`.
-11. Upstream's agent-path work continues past our v0.2.3.1 base: newest known commit `ed4b4db4` (2026-10-25,
-   "guide set for 0.2.5"). Survey it before the next host sync — the fork's `apps/host/server/agent/` is
-   already at the v0.2.2 level (a71fd347, 7d555815, 034f2fde are in main), so only the delta matters.
+```
+git fetch origin --tags
+git merge v0.2.14          # the next upstream tag
+```
+
+Conflicts can only appear in the files of the table above. For each one, take upstream's change and keep the fork's
+addition beside it. When upstream fixes something the fork also fixed, take upstream's fix and drop the fork's.
+
+After a merge:
+
+1. `python tools/check` (upstream's fast checks: the Python suites, the app's typecheck, tests and build).
+2. Build the Metal engine (`cmake -S metal -B build-metal -G Ninja -DMETAL_CPP_DIR=third_party/metal-cpp`, then
+   `cmake --build build-metal --target strata`) and the Qwen3.6 tests (`q36_compile_test`, `q36_chunk_parity`,
+   `prefix_plan_test`, `moe_sim`).
+3. Run the Qwen3.6 gates on the Mac with the model loaded. The commands are in [QWEN36_METAL.md](QWEN36_METAL.md).
+
+Push the upstream tags the fork merged (`v0.2.2`, `v0.2.3.1`, `v0.2.13.1` so far) to the fork, not every upstream tag.
+
+### Names the two sides share
+
+Upstream's model tables are keyed by the bare size name, and Unsloth uses the same size names for different models.
+`UD-Q2_K_XL`, `UD-Q4_K_XL` and `UD-Q6_K_XL` are Qwen3.8-Flash-Next sets in `setup.py` `MODELS` and in
+`strata_control/mac_fit.py` `MAC_MODELS`, and they are also Qwen3.6 sizes in `OWN_PATH_FAMILIES["qwen36"]`. Never add a
+Qwen3.6 size to `MODELS`, `MAC_MODELS` or a label map under its bare name: it would replace or relabel the Flash-Next
+set. Reach Qwen3.6 through its family (`own_size("qwen36", ...)`, `--family qwen36`).
+
+## Open work after the 2026-11-14 merge
+
+- **Qwen3.6 setup on a Mac.** `metal/setup_mac.py` and `strata_control/mac_fit.py` are upstream's files, so
+  `./setup.sh --family qwen36` does not exist yet on this base. The fork's earlier version of that flow keyed
+  `UD-Q2_K_XL` by its bare name (see above) and has to be ported onto upstream's family tables. A model that is
+  already set up (an existing `strata-*.json` run config) starts as before.
+- **Qwen3.6 names in the app.** The labels "Compact (MTP)" and so on were dropped from
+  `apps/host/src/lib/native-catalog.ts` for the same reason; the sizes show their plain names.
+- **The Metal gates on the merged engine.** See the merge's pull request for what was run and what was not.
+- **`UD-Q2_K_XL` for Qwen3.6 is listed on every platform** because `OWN_PATH_FAMILIES` is shared. It was only run on
+  the Metal engine.
+
+## Releasing from the fork
+
+Upstream's release process is in [packaging/UPDATES.md](../packaging/UPDATES.md) and nothing in it is tied to
+upstream's GitHub account except three things the fork has to change before its first release:
+
+1. **Keys.** The owner makes a feed key (`python packaging/feed_tool.py keygen`) and, for the desktop app, a Tauri
+   updater key. The private halves stay outside git. The public halves go into `strata_control/update_keys.json`
+   and `apps/desktop/src-tauri/tauri.conf.json`.
+2. **Addresses.** `strata_cli/update_cmd.py` (`DEFAULT_FEED`), `packaging/install.sh`, `packaging/install.ps1`,
+   `apps/desktop/src-tauri/tauri.conf.json` (the updater endpoint) and `apps/host/server/updates.mjs` name
+   `Niko1221/Strata`.
+3. **A release.** Signed engine and Control packages, `strata-feed.json` and its `.sig`, `install-manifest.txt`,
+   `install.sh` and `install.ps1`, uploaded as the assets of a normal (not pre-release) GitHub release.
+
+Outside `metal/` the fork's engine sources are upstream's, so on NVIDIA, AMD and Intel hardware a fork release only
+needs its own Control package; the engine package can be upstream's.
+
+## Owner decisions on record
+
+- 2026-11-14: when the fork and upstream both changed something, follow upstream unless the fork's work is expressly
+  new. Adopt upstream's version numbers. Publish only the upstream tags the fork merged. A fork release carries a
+  suffix on upstream's number.
+- 2026-10-25: a small bugfix rides along with the story that touches it; there is no separate patch release per fix.
+  Each concern still gets its own commit and a line in the pull request, and the review of a mixed pull request lands
+  as a docs file in the same branch (see [PR24_REVIEW.md](PR24_REVIEW.md)).
+
+## History
+
+- 2026-10-17 to 2026-11-09: the fork was developed on upstream 0.2.0 and synced twice by hand-applied, path-scoped
+  diffs (v0.2.2 on 2026-10-23, v0.2.3.1 on 2026-10-25) with a skip-list. The 2026-11-14 merge retired that method and
+  the skip-list: every skipped area is upstream's again.
+- Fork changes that upstream later made in its own way, and that the merge dropped in favour of upstream's: the
+  lifeline watcher identity (upstream #3590), the empty `STRATA_API_KEY` of a source-run server (#3851), ending the
+  Time-skip process group (#4529, #4570), the Metal prompt path's expert-cache loan, the Gyro exclusion on the Mac,
+  the consolidated Metal stubs file, and the test skips that existed only for the skip-list.

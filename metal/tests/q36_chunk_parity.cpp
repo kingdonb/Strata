@@ -172,6 +172,7 @@ void check_placement(const char* stage, const int* ids, const int* cnt_off, cons
 // decision is checked against (docs/QWEN36_METAL.md's chunk section)
 static void run_bench() {
     mtl::Context cx;
+    cx.set_serial_graphs(true);   // the Qwen3.6 graphs need the Serial dispatch type (mtl_rt.h)
     const int lib = cx.compile({"quant.metal", "q36.metal"});
     const int HK = 16, HV = 48, S = 128, C = (2 * HK + HV) * S, ZV = HV * S;
     const float eps = 1e-6f;
@@ -317,6 +318,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     mtl::Context cx;
+    cx.set_serial_graphs(true);   // the Qwen3.6 graphs need the Serial dispatch type (mtl_rt.h)
     const int lib = cx.compile({"quant.metal", "q36.metal"});
     std::printf("device %s\n", cx.device_name().c_str());
     const float eps = 1e-6f;
