@@ -249,7 +249,10 @@ class SetupControlMode(unittest.TestCase):
     def test_the_dispatch_in_main_is_by_mode(self):
         """CONTROL mode (the app, the Terminal's installer mode) prepares and adopts; a checkout keeps the from-source Intel setup."""
         for control, expect in ((True, "intel_control_setup"), (False, "sycl_setup")):
+            # (the platform is named: on a Mac setup.main() hands the run to metal/setup_mac.py before it looks at --backend, and that is a real,
+            # unattended setup - it starts an installed model, or downloads one)
             with mock.patch.object(setup, "CONTROL", control), mock.patch.object(setup, "intel_control_setup", return_value=11) as ctl, \
+                    mock.patch.object(setup.sys, "platform", "linux"), \
                     mock.patch.object(setup, "sycl_setup", return_value=22) as old, mock.patch.object(sys, "argv", ["setup.py", "--backend", "sycl", "--yes"]):
                 self.assertEqual(setup.main(), 11 if control else 22)
                 self.assertEqual((ctl.called, old.called), (control, not control), expect)

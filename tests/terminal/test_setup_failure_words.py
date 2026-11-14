@@ -26,6 +26,8 @@ class SetupFailureWords(unittest.TestCase):
         self.assertIn("/tmp/a.setup.log", error.next)
         self.assertEqual(setup_failure(["nothing useful"], "", "", None, True).text, "The model could not be installed.")
 
+    @unittest.skipIf(__import__("sys").platform == "darwin", "on a Mac setup.py hands the run to metal/setup_mac.py before its own parser reads --kv: "
+                                                               "this would be a real setup (it starts an installed model), not an argparse error")
     def test_setup_accepts_the_kv_format_the_docker_docs_offer(self):
         import subprocess, sys
         root = Path(__file__).resolve().parents[2]
