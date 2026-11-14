@@ -97,6 +97,26 @@ upstream's GitHub account except three things the fork has to change before its 
 Outside `metal/` the fork's engine sources are upstream's, so on NVIDIA, AMD and Intel hardware a fork release only
 needs its own Control package; the engine package can be upstream's.
 
+### The two machines a fork release is for (owner, 2026-11-14)
+
+| Machine | What it runs | What a release needs for it |
+| --- | --- | --- |
+| `mbp`: a MacBook with an M2 and 24 GB (about 18 GB of it wired while the model runs). The owner's own computer; it has to work offline. The signing keys are made and kept here. | Qwen3.6-35B-A3B on this fork's Metal engine | The fork's own Metal engine package (`macos-arm64`, `metal`), built on this Mac, and the fork's Control |
+| `rtx`: `chudmax`, Ubuntu on x86_64 (kernel 7.0), 64 GB of RAM, one NVIDIA RTX 5060 Ti with 16 GB | Qwen3.8-Flash-Next on upstream's CUDA engine | The fork's Control for `linux-x86_64`. The engine is upstream's `strata-engine-<version>-linux-x86_64-cuda-cuda13` package, signed again with the fork's key (`feed_tool.py sign-package`) or trusted through upstream's key |
+
+### Names and version numbers
+
+- A fork release is tagged with upstream's version and the suffix `-mbp.rtx.N`: `v0.2.13.1-mbp.rtx.1` is the first
+  release on upstream v0.2.13.1 (the suffix names the two machines above; `N` counts the fork's releases on that base).
+- The suffix belongs to the git tag and the GitHub release only. Versions inside the signed feed must be plain numbers
+  with three or four parts: `strata_control/feed.py` `version_key` refuses anything else ("is not a version number"),
+  and where a suffix is allowed (the installed app's version, `strata_cli/handover.py`) it reads as a pre-release and
+  sorts below the same number. So the packages of a fork release carry upstream's numbers (Control 0.1.59.1, engine
+  0.1.59).
+- Not decided: how a second fork release on the same upstream base reaches a machine that already has the first.
+  `strata update` only installs a higher version, and upstream owns the next numbers. Until that is settled, such a
+  machine is updated with `strata update --force` or installed again.
+
 ## Owner decisions on record
 
 - 2026-11-14: when the fork and upstream both changed something, follow upstream unless the fork's work is expressly
