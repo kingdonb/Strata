@@ -131,6 +131,15 @@ needs its own Control package; the engine package can be upstream's.
 
 ## Owner decisions on record
 
+- 2026-11-14: nothing from this fork is offered upstream. It lives in the kingdonb tree only. Upstream chose not to
+  support Qwen3.6 on Metal, for good reason (a laptop runs it hot and slowly); the fork is for people who want to try
+  it anyway. A bug found in upstream's code is fixed here and noted in this file, not reported there.
+- 2026-11-14: the Metal work ships in the fork's own releases. If a signed feed is published, its versions are
+  upstream's, unmodified; the fork's `-mbp.rtx.N` tag is added beside upstream's tag so that it is plain the release
+  is not upstream's. The fork does not rebuild upstream's engine unmodified: where upstream's engine is right for a
+  machine, upstream's package is used.
+- 2026-11-14: on the owner's MacBook, full test suites, engine builds and model runs happen in a window the owner
+  names (overnight as a rule). Unscheduled work stays light.
 - 2026-11-14: when the fork and upstream both changed something, follow upstream unless the fork's work is expressly
   new. Adopt upstream's version numbers. Publish only the upstream tags the fork merged. A fork release carries a
   suffix on upstream's number.
