@@ -96,20 +96,51 @@ runs is in `strata_control/mac_q36.py` and nowhere else.
 
 ## Releasing from the fork
 
-Upstream's release process is in [packaging/UPDATES.md](../packaging/UPDATES.md) and nothing in it is tied to
-upstream's GitHub account except three things the fork has to change before its first release:
+Upstream has no release workflow. It builds on build boxes without a key and signs on one release PC
+([packaging/UPDATES.md](../packaging/UPDATES.md)). The fork follows the same split, with three choices of its own:
 
-1. **Keys.** The owner makes a feed key (`python packaging/feed_tool.py keygen`) and, for the desktop app, a Tauri
-   updater key. The private halves stay outside git. The public halves go into `strata_control/update_keys.json`
-   and `apps/desktop/src-tauri/tauri.conf.json`.
-2. **Addresses.** `strata_cli/update_cmd.py` (`DEFAULT_FEED`), `packaging/install.sh`, `packaging/install.ps1`,
-   `apps/desktop/src-tauri/tauri.conf.json` (the updater endpoint) and `apps/host/server/updates.mjs` name
-   `Niko1221/Strata`.
-3. **A release.** Signed engine and Control packages, `strata-feed.json` and its `.sig`, `install-manifest.txt`,
-   `install.sh` and `install.ps1`, uploaded as the assets of a normal (not pre-release) GitHub release.
+- **The tree keeps upstream's addresses and upstream's key.** The fork's release address and public feed key
+  (`packaging/fork/feed-key.pub.json`, key id `e52bcd0bc55781a9`) are written into the sources when a package is
+  built, by `scripts/fork_release.py bake`. So upstream's tests that pin its addresses still hold, and a merge does
+  not conflict there. A source checkout therefore still reads upstream's feed: only an installed fork release reads
+  the fork's.
+- **Upstream's engines and drafters are not built or uploaded again.** `scripts/fork_release.py carry` checks
+  upstream's signed feed against upstream's key and copies its engine and drafter entries, with upstream's
+  addresses, sizes and SHA-256, into the fork's feed. A fork Control trusts both keys: the fork's for the feed, and
+  upstream's because each engine package carries upstream's signature. Upstream's Metal engine is left out (it has
+  no Qwen3.6 path); the fork's own Metal engine package is open work. There is no DeepSeek member.
+- **The feed sequence is upstream's times 1000, plus N** (`scripts/fork_release.py sequence`). A PC refuses a feed
+  older than the last one it accepted, so a PC that ran upstream needs a higher number. A PC that took a fork feed
+  refuses upstream's feed afterwards.
 
-Outside `metal/` the fork's engine sources are upstream's, so on NVIDIA, AMD and Intel hardware a fork release only
-needs its own Control package; the engine package can be upstream's.
+The steps of a release `vX-mbp.rtx.N`:
+
+1. Push the commit to a branch named `fork-release/...`, or run the "Fork release build" workflow by hand. It bakes,
+   builds the Terminal for Linux x86_64 and macOS arm64, smoke-tests it and packs it as the feed's Control package.
+   Download the two `fork-control-*` artifacts into one folder `RELEASE` (`control/`, `install.sh`, `install.ps1`).
+2. Download upstream's `strata-feed.json` and `strata-feed.json.sig` of the same version, then:
+
+   ```
+   python scripts/fork_release.py carry --upstream-feed strata-feed.json --upstream-sig strata-feed.json.sig \
+       --upstream-tag vX --out RELEASE
+   ```
+
+3. On the owner's machine, with the key (the only step that reads it):
+
+   ```
+   python packaging/feed_tool.py build-feed --out RELEASE --key KEYDIR/feed-key.json \
+       --sequence $(python scripts/fork_release.py sequence --upstream-feed strata-feed.json -n N) \
+       --engine RELEASE/engine --drafters RELEASE/drafters --control RELEASE/control --no-dsv41-carry
+   python packaging/feed_tool.py verify-feed RELEASE --pub packaging/fork/feed-key.pub.json
+   ```
+
+4. Tag the commit `vX-mbp.rtx.N` and publish a normal (not pre-release) GitHub release on `kingdonb/Strata` with
+   `strata-feed.json`, `strata-feed.json.sig`, `install-manifest.txt`, `install.sh`, `install.ps1` and the two
+   Control archives as flat assets. The one-line installers and `strata update` read `releases/latest/download`.
+5. On a PC: `curl -fsSL https://github.com/kingdonb/Strata/releases/latest/download/install.sh -o install.sh && sh install.sh`.
+
+The desktop app is not part of a fork release yet: it would need a Tauri updater key and its own addresses
+(`apps/desktop/src-tauri/tauri.conf.json`, `apps/host/server/updates.mjs`).
 
 ### The two machines a fork release is for (owner, 2026-11-14)
 
