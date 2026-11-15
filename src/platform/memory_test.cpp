@@ -73,8 +73,36 @@ int file_cache_keeps_cases() {
 }
 }  // namespace
 
+// #3237: the drive probe's decision
+int file_tier_prefers_direct_cases() {
+    using strata::platform::file_tier_prefers_direct;
+    struct Case { const char* what; double held, direct, cached; bool direct_wins; };
+    const Case cases[] = {
+        {"#3237: 13% held, 8.18 vs 4.93 GB/s", 0.13, 8.18e9, 4.93e9, true},
+        {"P1004 (measured): 1.65 vs 0.81 GB/s, 19% held: a slow drive keeps the cache", 0.19, 1.65e9, 0.81e9, false},
+        {"a fast drive, the same ratio as P1004 (8 vs 4 GB/s)", 0.19, 8.0e9, 4.0e9, true},
+        {"just under the 4 GB/s floor", 0.10, 3.9e9, 1.0e9, false},
+        {"a third held, direct 1.4x: not enough", 0.35, 5.6e9, 4.0e9, false},
+        {"a third held, direct 1.6x", 0.35, 6.4e9, 4.0e9, true},
+        {"under 30% held, direct 1.3x", 0.20, 5.2e9, 4.0e9, true},
+        {"under 30% held, direct 1.2x", 0.20, 4.8e9, 4.0e9, false},
+        {"half held or more: the cache, however fast the drive", 0.5, 9e9, 1e9, false},
+        {"no cached-path figure", 0.1, 5e9, 0.0, false},
+        {"no direct figure", 0.1, 0.0, 5e9, false},
+        {"a hard disk (direct 2x, under the floor): the cache", 0.1, 0.2e9, 0.1e9, false},
+    };
+    int fail = 0;
+    for (const Case& c : cases) {
+        const bool got = file_tier_prefers_direct(c.held, c.direct, c.cached);
+        std::printf("file_tier_prefers_direct %-62s -> %s%s\n", c.what, got ? "unbuffered" : "cache",
+                    got == c.direct_wins ? "" : "   <-- WRONG");
+        fail |= got != c.direct_wins;
+    }
+    return fail;
+}
+
 int main() {
-    int fail_keeps = file_cache_keeps_cases();
+    int fail_keeps = file_cache_keeps_cases() | file_tier_prefers_direct_cases();
     const uint64_t bytes = 256ull << 20;
     void* p = std::malloc(bytes);
     if (p == nullptr) return 2;
@@ -82,7 +110,10 @@ int main() {
     const strata::platform::LockResult r = strata::platform::lock_resident(p, bytes);
     std::printf("lock_resident: ok=%d locked=%llu MiB (%s)\n", (int) r.ok, (unsigned long long) (r.locked_bytes >> 20),
                 r.note.c_str());
-    int fail = !(r.ok && r.locked_bytes == bytes) | fail_keeps;
+    // The system refused the lock (a container or a shell with a small `ulimit -l`: RLIMIT_MEMLOCK of 8 MiB, no CAP_IPC_LOCK): nothing was locked, so the
+    // lock itself cannot be tested here.  The cases above still count; the test then reports "skipped" (exit 77) with the reason, not a failure.
+    const bool lock_refused = !r.ok && r.locked_bytes == 0;
+    int fail = (lock_refused ? 0 : !(r.ok && r.locked_bytes == bytes)) | fail_keeps;
 #if defined(_WIN32)
     PROCESS_MEMORY_COUNTERS pmc{};
     GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc);
@@ -91,6 +122,11 @@ int main() {
 #endif
     strata::platform::unlock_resident(p, bytes);
     std::free(p);
+    if (!fail && lock_refused) {
+        std::printf("platform_memory_test: SKIPPED, the system refused to lock %llu MiB (%s); raise the memory-lock limit to run it\n",
+                    (unsigned long long) (bytes >> 20), r.note.c_str());
+        return 77;
+    }
     std::printf("platform_memory_test: %s\n", fail ? "FAILED" : "OK");
     return fail;
 }

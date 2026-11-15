@@ -1,3 +1,4 @@
+#include "b60_layout_state.hpp"
 // src/kernels/cuda/shared_expert.cu - P2.S2: the shared expert.
 //
 // `ref/moe.py::shared_expert`, transcribed:
@@ -20,6 +21,7 @@
 // an FP32 sigmoid. Native projection overrides independently select CUDA Q8_1 MMVQ and FP32 SwiGLU.
 #define DPCT_PROFILING_ENABLED
 #include <sycl/sycl.hpp>
+#include "strata/kprof.hpp"
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
 #include "strata/kernels/shared_expert.hpp"
@@ -272,7 +274,7 @@ void launch_sigmoid_scale_rows(float *out, const float *g, int n_embd,
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};
 
-            cs->parallel_for<
+            strata::kprof::kp(cs, __FILE__, __func__, __LINE__)->template parallel_for<
                 dpct_kernel_name<class sigmoid_scale_rows_vec4_kernel_723a94>>(
                 sycl::nd_range<3>(
                     sycl::range(1, (unsigned)n_tok,
@@ -288,7 +290,7 @@ void launch_sigmoid_scale_rows(float *out, const float *g, int n_embd,
         auto exp_props = sycl::ext::oneapi::experimental::properties{
             sycl::ext::oneapi::experimental::use_root_sync};
 
-        cs->parallel_for<
+        strata::kprof::kp(cs, __FILE__, __func__, __LINE__)->template parallel_for<
             dpct_kernel_name<class sigmoid_scale_rows_kernel_26f4a0>>(
             sycl::nd_range<3>(
                 sycl::range(1, (unsigned)n_tok,
@@ -337,7 +339,7 @@ void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, cons
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};
 
-            cs->parallel_for<
+            strata::kprof::kp(cs, __FILE__, __func__, __LINE__)->template parallel_for<
                 dpct_kernel_name<class native_swiglu_kernel_c4e755>>(
                 sycl::nd_range<3>(
                     sycl::range(1, 1, (unsigned)((n + THREADS - 1) / THREADS)) *
@@ -390,7 +392,7 @@ void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, cons
                         sycl::ext::oneapi::experimental::properties{
                             sycl::ext::oneapi::experimental::use_root_sync};
 
-                    cs->submit([&](sycl::handler &cgh) {
+                    strata::kprof::kp(cs, __FILE__, __func__, __LINE__)->submit([&](sycl::handler &cgh) {
                         auto g_t_ct0 = g + t;
 
                         cgh.parallel_for<dpct_kernel_name<
@@ -408,7 +410,7 @@ void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, cons
                 dpct::has_capability_or_fail(cs->get_device(),
                                              {sycl::aspect::fp64});
 
-                cs->submit([&](sycl::handler &cgh) {
+                strata::kprof::kp(cs, __FILE__, __func__, __LINE__)->submit([&](sycl::handler &cgh) {
                     auto x_bf16_size_t_t_n_embd_ct0 =
                         x_bf16 + (size_t)t * n_embd;
                     auto g_t_ct2 = g + t;
@@ -431,7 +433,7 @@ void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, cons
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};
 
-            cs->parallel_for<dpct_kernel_name<class scale_rows_kernel_4f17ec>>(
+            strata::kprof::kp(cs, __FILE__, __func__, __LINE__)->template parallel_for<dpct_kernel_name<class scale_rows_kernel_4f17ec>>(
                 sycl::nd_range<3>(
                     sycl::range(1, (unsigned)n_tok,
                                 (unsigned)((n_embd + THREADS - 1) / THREADS)) *
@@ -533,7 +535,7 @@ void shared_expert(const uint8_t *x_q8_0, const uint8_t *x_q8k,
     const unsigned g_embd = (unsigned) ((n_embd + THREADS - 1) / THREADS);
 
     // gate and up projections, then silu(gate) * up in place in `gate`
-    if (native_gate || native_up)
+    if ((native_gate || native_up) && !(b60_layout_requested() && native->x_q8_1 && native->x_q8_1==native->q8_1))
         native_quantize_q8_1(x_f32, native->q8_1, (int) n_embd, 1, stream);
     if (native_gate)
         native_mmvq(native->gate_type, native->gate_data, native->q8_1, gate, (int) n_embd, (int) n_ff, 1, stream);
@@ -552,8 +554,8 @@ void shared_expert(const uint8_t *x_q8_0, const uint8_t *x_q8k,
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};
 
-            strata::q_of(stream)
-                ->parallel_for<
+            strata::kprof::kp(strata::q_of(stream), __FILE__, __func__, __LINE__)
+                ->template parallel_for<
                     dpct_kernel_name<class native_swiglu_kernel_75dcdc>>(
                     sycl::nd_range<3>(sycl::range(1, 1, g_ff) *
                                           sycl::range(1, 1, THREADS),
@@ -568,8 +570,8 @@ void shared_expert(const uint8_t *x_q8_0, const uint8_t *x_q8k,
                 strata::q_of(stream)->get_device(),
                 {sycl::aspect::fp64});
 
-            strata::q_of(stream)
-                ->parallel_for<dpct_kernel_name<class swiglu_kernel_fbfcfe>>(
+            strata::kprof::kp(strata::q_of(stream), __FILE__, __func__, __LINE__)
+                ->template parallel_for<dpct_kernel_name<class swiglu_kernel_fbfcfe>>(
                     sycl::nd_range<3>(sycl::range(1, 1, g_ff) *
                                           sycl::range(1, 1, THREADS),
                                       sycl::range(1, 1, THREADS)),
@@ -618,8 +620,8 @@ void shared_expert(const uint8_t *x_q8_0, const uint8_t *x_q8k,
                 strata::q_of(stream)->get_device(),
                 {sycl::aspect::fp64});
 
-            strata::q_of(stream)
-                ->parallel_for<
+            strata::kprof::kp(strata::q_of(stream), __FILE__, __func__, __LINE__)
+                ->template parallel_for<
                     dpct_kernel_name<class scalar_gate_kernel_82de77>>(
                     sycl::nd_range<3>(sycl::range(1, 1, 256),
                                       sycl::range(1, 1, 256)),
@@ -634,8 +636,8 @@ void shared_expert(const uint8_t *x_q8_0, const uint8_t *x_q8k,
             auto exp_props = sycl::ext::oneapi::experimental::properties{
                 sycl::ext::oneapi::experimental::use_root_sync};
 
-            strata::q_of(stream)
-                ->parallel_for<dpct_kernel_name<class scale_kernel_a41a71>>(
+            strata::kprof::kp(strata::q_of(stream), __FILE__, __func__, __LINE__)
+                ->template parallel_for<dpct_kernel_name<class scale_kernel_a41a71>>(
                     sycl::nd_range<3>(sycl::range(1, 1, g_embd) *
                                           sycl::range(1, 1, THREADS),
                                       sycl::range(1, 1, THREADS)),
@@ -673,7 +675,7 @@ void moe_combine(const float *parts, const float *weights, const float *shared,
             strata::q_of(stream)->get_device(),
             {sycl::aspect::fp64});
 
-        strata::q_of(stream)
+        strata::kprof::kp(strata::q_of(stream), __FILE__, __func__, __LINE__)
             ->submit([&](sycl::handler &cgh) {
                 int shared_nullptr_ct6 = shared != nullptr;
 

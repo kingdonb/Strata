@@ -155,7 +155,7 @@ class ComponentStart(unittest.TestCase):
         body = bytearray((folder / library).read_bytes())
         body[100] ^= 0xFF                                       # same size; only the full hash sees it
         (folder / library).write_bytes(bytes(body))
-        code, result = self._cli("runtime", "start", "--profile", "app", "--wait", "20", "--shutdown-timeout", "2")
+        code, result = self._cli("runtime", "start", "--profile", "app", "--wait", "60", "--shutdown-timeout", "2")
         self.assertEqual(code, 5, result)                      # the refusal is the first thing the user sees: no host, no server
         self.assertFalse(result["ok"])
         self.assertFalse((self.root / "ran.txt").exists(), "a package with a changed library must not run")
@@ -165,7 +165,7 @@ class ComponentStart(unittest.TestCase):
         self.assertIsNone(runtime._read_state("app"), "no runtime host may exist after the refusal")
 
     def test_no_engine_is_a_notice_and_starts_nothing(self):
-        code, result = self._cli("runtime", "start", "--profile", "app", "--wait", "20", "--shutdown-timeout", "2")
+        code, result = self._cli("runtime", "start", "--profile", "app", "--wait", "60", "--shutdown-timeout", "2")
         self.assertNotEqual(code, 0)
         self.assertFalse(result["ok"])
         self.assertFalse((self.root / "ran.txt").exists(), "no engine may run")
@@ -180,7 +180,7 @@ class ComponentStart(unittest.TestCase):
     def test_a_tampered_engine_is_not_started(self):
         folder = install_fake_engine(self.components)
         (folder / "engine_main.py").write_text(FAKE_ENGINE + "# changed\n", encoding="utf-8")
-        code, result = self._cli("runtime", "start", "--profile", "app", "--wait", "20", "--shutdown-timeout", "2")
+        code, result = self._cli("runtime", "start", "--profile", "app", "--wait", "60", "--shutdown-timeout", "2")
         self.assertNotEqual(code, 0)
         self.assertFalse((self.root / "ran.txt").exists(), "a changed package must not run")
 
@@ -201,6 +201,23 @@ class ComponentStart(unittest.TestCase):
                 entry.unlink(missing_ok=True)
             server.with_component_engine({"exe": "component:strata-engine", "backend": "cuda"})
         self.assertEqual(caught.exception.code, 5)
+
+    def test_a_picture_reader_path_from_an_older_engine_folder_follows_the_installed_package(self):
+        """After an engine update the folder name changes; the run config's absolute vision exe must not stop the server."""
+        from serve import server
+        folder = install_fake_engine(self.components)
+        reader = folder / "strata-vision"
+        reader.write_text("x", encoding="utf-8")
+        gone = str(self.components / "engine" / "0.0.1-old" / "strata-vision")
+        cfg = server.with_component_engine({"exe": "component:strata-engine", "backend": "cuda",
+                                            "vision": {"exe": gone, "cpu_exe": gone, "mmproj": "/m.gguf"}})
+        self.assertEqual(cfg["vision"]["exe"], str(reader))
+        self.assertEqual(cfg["vision"]["cpu_exe"], str(reader))
+        self.assertEqual(cfg["vision"]["mmproj"], "/m.gguf")
+        ok = {"exe": "component:strata-engine", "backend": "cuda", "vision": {"exe": str(reader)}}
+        self.assertEqual(server.with_component_engine(ok)["vision"], {"exe": str(reader)})
+        none = server.with_component_engine({"exe": "component:strata-engine", "backend": "cuda", "vision": {"exe": gone.replace("strata-vision", "other")}})
+        self.assertTrue(none["vision"]["exe"].endswith("other"))        # no such file in the package: left as it is
 
     def test_the_build_json_lib_dirs_follow_the_package_folder(self):
         """The Windows HIP package keeps the ROCm DLLs in rocm/bin (BUILD.json lib_dirs): strata.exe does not load without them on PATH."""

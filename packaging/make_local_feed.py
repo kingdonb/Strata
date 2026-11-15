@@ -21,7 +21,6 @@ The engine package folders are copied (never changed in place) before they are s
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 import sys
 import tarfile
@@ -57,6 +56,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--terminal", type=Path, action="append", default=[], help="a terminal archive (.tar.gz or .zip); repeat per platform")
     ap.add_argument("--engine", type=Path, action="append", default=[], help="an engine package folder (with engine-component.json)")
+    ap.add_argument("--drafter", type=Path, action="append", default=[], help="a DFlash2 drafter file (the feed's drafters member), listed for metal, hosted flat beside the feed")
     ap.add_argument("--keys", type=Path, default=None, help="folder for the test key (default: <out>/../feed-test-keys)")
     ap.add_argument("--url", default="http://127.0.0.1:8099", help="the address this feed will be served at (baked into install.sh/.ps1)")
     ap.add_argument("--sequence", type=int, default=1)
@@ -82,7 +82,8 @@ def main(argv=None) -> int:
             v = version or (folder / "VERSION").read_text(encoding="utf-8").strip()
             version = v
             platform = ("windows-x86_64" if (folder / "python" / "python.exe").exists() else
-                        "macos-arm64" if ("darwin" in term.name or "macos" in term.name) else "linux-x86_64")      # the feed's own platform names
+                        "macos-arm64" if ("darwin" in term.name or "macos" in term.name) else
+                        "linux-aarch64" if "aarch64" in term.name else "linux-x86_64")      # the feed's own platform names
             fmt = "zip" if platform.startswith("windows") else "tar.gz"
             entry = ft.pack_control(folder, out / "control", version=v, platform=platform, fmt=fmt)
             print(f"control {platform} {v}: {entry['size'] // 1048576} MB")
@@ -93,8 +94,15 @@ def main(argv=None) -> int:
             entry = ft.pack_engine(copy, out / "engine")
             print(f"engine {entry['platform']}-{entry['backend']} {entry['version']}: {entry['size'] // 1048576} MB")
             shutil.rmtree(copy.parent, ignore_errors=True)
+    for pack in a.drafter:
+        entry = ft.pack_drafter(pack, out / "drafters", version="1", backends=["metal"], url_prefix="drafters/")
+        print(f"drafter {entry['name']}: {entry['size'] // 1048576} MB")
     ft.build_feed(out, key=key, sequence=a.sequence, channel=a.channel, engine_dir=out / "engine" if a.engine else None,
-                  control_dir=out / "control" if a.terminal else None)
+                  control_dir=out / "control" if a.terminal else None,
+                  drafters_dir=out / "drafters" if a.drafter else None)
+    if any("linux-aarch64" in p.name for p in (out / "control").glob("*.entry.json")):       # the Linux ARM64 Terminal reads its own feed file (same bytes here)
+        for suffix in ("", ".sig"):
+            shutil.copy2(out / ("strata-feed.json" + suffix), out / ("strata-feed-linux-aarch64.json" + suffix))
     base = a.url.rstrip("/")
     for name in ("install.sh", "install.ps1"):
         text = (ROOT / "packaging" / name).read_text(encoding="utf-8").replace(RELEASE_FEED, base)

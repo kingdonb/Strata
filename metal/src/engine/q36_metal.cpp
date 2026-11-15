@@ -1921,6 +1921,7 @@ int run(int argc, char** argv) {
     }
 
     mtl::Context cx;
+    cx.set_serial_graphs(true);   // the Qwen3.6 graphs need the Serial dispatch type (mtl_rt.h)
     std::fprintf(stderr, "strata metal q36: GPU %s (recommended working set: %.1f GB)\n",
                  cx.device_name().c_str(), cx.recommended_working_set() / (1024.0 * 1024.0 * 1024.0));
 

@@ -8,10 +8,7 @@ of key hints. Esc goes back, Enter goes on, q leaves (and says what is kept). Ch
 from __future__ import annotations
 
 import os
-import shutil
-import threading
 from pathlib import Path
-from typing import Any
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -30,11 +27,48 @@ STEPS = (("model", "Model"), ("cards", "Cards"), ("folder", "Folder"), ("context
          ("parallel", "Parallel"), ("tuning", "Tuning"), ("advanced", "Advanced"), ("access", "Access"), ("save", "Save"))
 
 
+STEP_LABELS = {**dict(STEPS), "drafting": "Drafting"}
+
+
+def middle_shorten(text: str, width: int, dots: str = "…") -> str:
+    """`text` in at most `width` terminal cells: when longer, its start and its end with `dots` between them (the drive and the folder's own
+    name stay readable). Unchanged when it fits; at least the dots and one character on each side."""
+    from rich.cells import cell_len
+    if cell_len(text) <= width:
+        return text
+    room = max(2, width - cell_len(dots))
+    head_n = max(1, room * 2 // 5)
+    tail_n = max(1, room - head_n)
+    head, tail = "", ""
+    for ch in text:                                  # by cells, so wide characters count twice
+        if cell_len(head + ch) > head_n:
+            break
+        head += ch
+    for ch in reversed(text):
+        if cell_len(ch + tail) > tail_n:
+            break
+        tail = ch + tail
+    return head + dots + tail
+
+
+def drafting_choice_available(ctx) -> bool:
+    """The Drafting step exists only where there is something to choose: Qwen3.8-Flash-Next (qwen, gyro) on a computer whose engine can run DFlash2
+    (CUDA or HIP, strata_control/drafting.py). Every other model has no step: the rest have only the MTP."""
+    from strata_control import drafting
+    if getattr(getattr(ctx, "settings", None), "family", None) not in drafting.SUPPORTED_FAMILIES or not drafting.ENGINE_SERVES_DFLASH2:
+        return False
+    backend, archs = drafting.detect_hardware()
+    return drafting.hardware_support(backend, archs).can_run
+
+
 def flow_for(ctx) -> list[str]:
-    """The steps of this computer: the Cards step exists only when two or more graphics cards can be used."""
+    """The steps of this computer: the Cards step exists only when two or more graphics cards can be used; the Drafting step only for
+    Qwen3.8-Flash-Next on a computer that can run DFlash2."""
     ids = [sid for sid, _ in STEPS]
     if len(ctx.computer.usable_gpus) < 2:
         ids.remove("cards")
+    if drafting_choice_available(ctx):
+        ids.insert(ids.index("pictures") + 1, "drafting")
     return ids
 
 
@@ -111,7 +145,7 @@ class Base(Screen):
         out.append("STRATA  ", style=f"bold {ACCENT}")
         out.append(f"{self.title_line}", style=f"bold {ACCENT}")
         if self.step_id in flow:
-            labels = dict(STEPS)
+            labels = STEP_LABELS
             n = flow.index(self.step_id)
             if self.width() >= 118:
                 out.append("   ")
@@ -259,6 +293,13 @@ class StartScreen(Base):
         else:
             intro.append("No saved presets yet\n", style=f"bold {ACCENT}")
             intro.append("A preset remembers all your choices so next time you start with one key.\n", style=MUTE)
+        try:                                                      # one quiet line when the last check found a newer engine (a local file; no network)
+            from strata_control import engine_update
+            line = engine_update.notice_line()
+        except Exception:                                         # noqa: BLE001
+            line = None
+        if line:
+            intro.append(line + "\n", style=MUTE)
         self.query_one("#intro", Static).update(intro)
 
     def explain(self) -> Text:
@@ -364,8 +405,8 @@ class ConfirmScreen(ModalScreen):
 class ModelScreen(Base):
     step_id = "model"
     hints = "↑↓ choose   Enter next   o use my own files   Esc back   ? help"
-    help_text = ("Pick the model. 'Needs' is the RAM + graphics memory the model wants (the app's figure); 'SSD N GB' is the part that does not fit and is read from the SSD while it answers; the n-gram table stays on "
-                 "your SSD and is not counted. 'Too big' is a warning, not a block: you can still try it.")
+    help_text = ("Pick the model. 'Needs' is the RAM + graphics memory the model's files take (the app's figure; the n-gram table stays on your SSD and is not counted). 'fits' means they fit the RAM and "
+                 "the graphics memory together; 'may run slower' means they do not, so part is read from the SSD while it answers. Neither is a block: you can still try it.")
 
     BINDINGS = Base.BINDINGS + [Binding("o", "own", "Own files", show=False)]
 
@@ -387,7 +428,7 @@ class ModelScreen(Base):
         w = self.width()
         if w >= 100:
             return [("Model", 42), ("Download", 10), ("Needs (RAM + VRAM)", 20), ("On this computer", 0)]
-        return [("Model", 41), ("Download", 9), ("Needs (RAM+VRAM)", 17), ("On this computer", 0)]
+        return [("Model", 41), ("Size", 8), ("Needs", 7), ("Fits?", 0)]      # 80 columns: the verdict column keeps room (the long words are below the list)
 
     def build_menu(self, initial: bool = False) -> None:
         s = self.ctx.settings
@@ -398,11 +439,14 @@ class ModelScreen(Base):
         items: list[Item] = []
         sel = 0
         for i, r in enumerate(self.rows):
-            col = {"fits": "", "tight": WARN, "no": BAD}[r.verdict]
+            col = {"fits": "", "slower": WARN, "tight": WARN, "no": BAD}[r.verdict]
             tag = (" (recommended)" if r.recommended else "") + (" (installed)" if r.installed else "") + (" [experimental]" if r.experimental else "")
-            need = f"{r.memory_gb:.0f} GB" if r.memory_gb else "-"
-            ssd = f" · SSD {r.spill_gb:.0f} GB" if r.spill_gb >= 1 else ""
-            items.append(Item([r.title, f"{r.download_gb:.0f} GB", need, Cell((r.words.split(",")[0].split(":")[0] if ssd and "SSD" in r.words else r.words) + ssd + tag, col)], key=(r.family, r.model)))
+            need = f"{r.fit_gb:.0f} GB" if r.fit_gb else "-"
+            verdict = r.words + tag
+            if self.width() < 100:                           # a short verdict that fits the column; the full sentence is shown under the list
+                extra = " (recommended)" if r.recommended else " (installed)" if r.installed else " [experimental]" if r.experimental else ""
+                verdict = {"fits": "fits", "slower": "may run slower", "tight": "tight", "no": "too big"}[r.verdict] + extra
+            items.append(Item([r.title, f"{r.download_gb:.0f} GB", need, Cell(verdict, col)], key=(r.family, r.model)))
             if (s.family, s.model) == (r.family, r.model):
                 sel = i
         m = self.query_one(Menu)
@@ -437,14 +481,20 @@ class ModelScreen(Base):
             if r:
                 out.append(f"{r.title}: {r.about}.\n", style=FG)
                 if r.verdict != "fits":
-                    out.append(f"{r.words}. ", style=WARN if r.verdict == "tight" else BAD)
-                if r.spill_gb:
-                    out.append(f"About {r.spill_gb:.0f} GB would be read from the SSD while it answers. ", style=MUTE)
+                    out.append(f"{r.words}. ", style=BAD if r.verdict == "no" else WARN)
         out.append("The n-gram table stays on your SSD and is not counted above.", style=MUTE)
+        for title, why in self.unavailable_lines():
+            out.append(f"\n{title}: {why}", style=MUTE)
         note = self.ctx.computer.other_vendor_note
         if note:
             out.append(" " + note, style=WARN)
         return out
+
+    def unavailable_lines(self) -> list:
+        """Models of the signed feed this engine does not run (none for a feed without any): listed under the models, never in the list."""
+        if not hasattr(self, "_unavailable"):
+            self._unavailable = self.ctx.catalog.unavailable(self.ctx.computer.raw)
+        return self._unavailable
 
     def on_cursor(self) -> None:
         pass
@@ -459,6 +509,8 @@ class ModelScreen(Base):
             if (s.family, s.model) != (fam, model) or s.model_path:
                 s.model_path = None
             s.family, s.model = fam, model
+            from strata_cli.launch import modelstate
+            s.drafting = modelstate.drafting_for_family(s.drafting, fam)         # the other families have no Drafting choice: back to Auto
             r = next(x for x in self.rows if (x.family, x.model) == (fam, model))
             if r.verdict == "no":
                 self.ctx.notes.append(f"{r.title} does not fit this computer; it may be slow or run out of memory.")
@@ -497,6 +549,10 @@ class ModelScreen(Base):
         if problem:
             self.say(f"{problem[0]} {problem[1]}", True)
             return
+        from strata_control import retired
+        if retired.folder_reason(models.absolute(path)):   # DeepSeek files: named, never used (strata_control/retired.py)
+            self.say(retired.own_files(models.absolute(path)), True)
+            return
         try:
             plan = models.plan_import(models.absolute(path))
         except Exception as e:                               # noqa: BLE001
@@ -506,6 +562,8 @@ class ModelScreen(Base):
         if sel.get("family") and sel.get("model") and not plan.get("issues"):
             s = self.ctx.settings
             s.model_path, s.family, s.model = models.import_target(path, plan), sel["family"], sel["model"]
+            from strata_cli.launch import modelstate
+            s.drafting = modelstate.drafting_for_family(s.drafting, s.family)
             self.ctx.picked_in_list = False
             self.close_field("own")
             gb = plan.get("total_bytes", 0) / 1e9
@@ -556,7 +614,7 @@ class CardsScreen(Base):
         """The cards the installed model was set to by a person's choice (kept unless this launch names others)."""
         from strata_cli.launch.runner import installed_cards
         try:
-            return installed_cards(self.ctx.base_config())
+            return installed_cards(self.ctx.base_config(), self.ctx.computer.usable_gpus)
         except Exception:                                    # noqa: BLE001
             return None
 
@@ -839,7 +897,8 @@ class ContextScreen(Base):
         s, cat = self.ctx.settings, self.ctx.catalog
         items = []
         sel = 0
-        for i, c in enumerate(cat.contexts()):
+        sizes = cat.contexts_for(s.family, s.model)
+        for i, c in enumerate(sizes):
             kvgb = cat.kv_gb(c, self.kv())
             note, style = "", ""
             if c == self.rec:
@@ -851,7 +910,7 @@ class ContextScreen(Base):
             items.append(Item([S.context_label(c), S.words_for(c), f"+{kvgb:.1f} GB", Cell(note, style)], key=c))
             if c == s.context:
                 sel = i
-        if s.context and s.context not in cat.contexts():
+        if s.context and s.context not in sizes:
             items.append(Item([S.context_label(s.context), S.words_for(s.context), f"+{cat.kv_gb(s.context, self.kv()):.1f} GB",
                                Cell("your own size", "")], key=s.context))
             sel = len(items) - 1
@@ -984,6 +1043,43 @@ class PicturesScreen(Base):
             device = self.ctx.catalog.picture_default(True)
             key = device if device != "off" else "on"
         self.ctx.settings.vision = key
+
+
+# ------------------------------------------------------------------------------------------------ drafting
+
+class DraftingScreen(Base):
+    step_id = "drafting"
+    help_text = "Drafting is how the model guesses the next words ahead to make answers faster. One drafter runs at a time."
+
+    CHOICES = (("auto", "Auto (recommended)"), ("mtp", "MTP"), ("dflash2", "DFlash2"), ("off", "Off"))
+
+    def body(self) -> ComposeResult:
+        yield Static(Text("How should the model guess ahead?", style=f"bold {ACCENT}"), markup=False)
+        yield Menu(id="menu")
+
+    def on_mount(self) -> None:
+        s = self.ctx.settings
+        from strata_cli.launch import modelstate
+        now = {"dflash2": "DFlash2", "mtp": "MTP", "off": "Off"}[modelstate.resolved_drafting(None, s.family)]
+        items = [Item([label, Cell(now, "") if key == "auto" else Cell("", "")], key=key) for key, label in self.CHOICES]
+        shown = s.drafting if s.drafting in dict(self.CHOICES) else "off" if modelstate.layer_off_without_choice(self.ctx.base_config()) else "auto"
+        sel = [key for key, _ in self.CHOICES].index(shown)
+        self.query_one(Menu).columns = [("", 24), ("", 0)]
+        self.query_one(Menu).set_items(items, sel)
+        self.paint()
+
+    def explain(self) -> Text:
+        return Text("")
+
+    def commit(self) -> None:
+        key = self.menu().current.key
+        from strata_cli.launch import modelstate
+        # Auto stays "nobody chose" (a saved preset writes nothing) unless the model's file holds another choice the app saved: then Auto is written, so it wins
+        base = self.ctx.base_config() or {}
+        layer_off = modelstate.layer_off_without_choice(base)  # the draft layer is off and nothing else is saved: the step showed Off
+        if layer_off and key == "off" and self.ctx.settings.drafting is None:
+            return                                            # Off left as it is: nothing new is written, the draft layer's "mtp": false keeps it
+        self.ctx.settings.drafting = modelstate.drafting_to_save(key, "off" if layer_off else base.get("drafting"))
 
 
 # ------------------------------------------------------------------------------------------------ 6 parallel
@@ -1289,7 +1385,8 @@ class AccessScreen(Base):
     step_id = "access"
     hints = "↑↓ choose   Enter next   p port   k new key   t key on/off   Esc back   ? help"
     help_text = ("Who can use the model. 'This computer only' is the safe default and never needs a key. Beyond it Strata makes an API key "
-                 "for you (recommended); press t if you would rather have no key: it still starts, but anyone who can reach it can use it.")
+                 "for you (recommended); press t if you would rather have no key: it still starts, but anyone who can reach it can use it. "
+                 "To see the key later: strata launch --show-key. To use a key of your own: strata launch --api-key YOUR-KEY (or --api-key-env NAME).")
 
     BINDINGS = Base.BINDINGS + [Binding("p", "port", show=False), Binding("k", "newkey", show=False), Binding("t", "keytoggle", show=False)]
 
@@ -1444,10 +1541,12 @@ class SaveScreen(Base):
 
     def summary_lines(self) -> list[tuple[str, str]]:
         s = self.ctx.settings
+        from strata_cli.launch import modelstate
         r = next((x for x in self.ctx.rows if (x.family, x.model) == (s.family, s.model)), None)
         lines = [("Model", (r.title if r else (s.model or "?")) + (" (your files)" if s.model_path else "")),
                  ("Context", S.context_label(s.context) + f", memory {s.kv or 'int8'}"),
                  ("Pictures", "on" if s.vision != "off" else "off"),
+                 *([("Drafting", dict(DraftingScreen.CHOICES).get(s.drafting or ("off" if modelstate.layer_off_without_choice(self.ctx.base_config()) else "auto"), "Auto (recommended)"))] if drafting_choice_available(self.ctx) else []),
                  ("Parallel", f"{s.parallel} at a time" if s.parallel else f"fit to your card ({S.fit_parallel(self.ctx.computer.main_vram_gb)})"),
                  ("Tuning", {"quick": "quick (about 20 min)", "thorough": "thorough (up to 2 h)", "skip": "skipped"}[s.tune]),
                  ("Access", f"{S.ACCESS_WORDS[s.access]}, port {s.port}" + (", API key on" if s.api_key else ", no API key")),
@@ -1486,6 +1585,8 @@ class SaveScreen(Base):
             t.append("  Name   ")
             t.append("(type below)\n", style=MUTE)
             for k, v in lines:
+                if k == "Storage":   # one row: a long folder wrapped and pushed the last choice off an 80x24 screen
+                    v = middle_shorten(v, self.width() - 14, "…" if self.g.unicode else "...")
                 t.append(f"  {k:<10}{v}\n")
             for n in warnings:
                 t.append(f"  ! {n}\n", style=WARN)

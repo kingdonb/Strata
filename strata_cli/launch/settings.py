@@ -26,6 +26,8 @@ ACCESS_WORDS = {"local": "This computer only", "lan": "My local network", "cloud
 TUNE_MODES = ("quick", "thorough", "skip")
 VISION_MODES = ("off", "on", "gpu", "cpu")
 MTP_MODES = ("on", "off")
+#: strata_control/split_engine.py MODES: the all-cards split engine on NVIDIA and AMD gfx1201 cards (auto = by itself where it is supported, the default)
+SPLIT_MODES = ("auto", "on", "off")
 #: strata_control/drafting.py MODES (tests/terminal/test_drafting.py keeps the two the same)
 DRAFTING_MODES = ("auto", "mtp", "dflash2", "off")
 KV_MODES = ("int8", "q4_0", "k8v4", "fp16")
@@ -60,6 +62,8 @@ def parse_context(text: Any) -> int:
 def context_label(tokens: int | None) -> str:
     if not tokens:
         return "default"
+    if tokens >= 1048576 and tokens % 1048576 == 0:        # 1,048,576 positions: "1M"
+        return f"{tokens // 1048576}M"
     if tokens % 1024 == 0:
         return f"{tokens // 1024}K"
     if tokens >= 1000:
@@ -90,6 +94,7 @@ class LaunchSettings:
     vision: str | None = None                  # None = the default (on when the model can read pictures and the engine has the reader), off | on | gpu | cpu
     parallel: int | None = None                # None = fit to the card
     drafting: str | None = None                # None = Auto (recommended): the table in strata_control/drafting.py; mtp | dflash2 | off choose one. Saved in the launch config
+    split_engine: str | None = None            # None = auto (the all-cards split engine runs by itself where it is supported); on | off. Saved in the preset and the launch config
     mtp: str | None = None                     # None = as installed (draft layer on); "off" starts without it (less graphics memory and RAM, slower); "on" overrides an installed "off"
     tune: str = "skip"                         # quick | thorough | skip
     tune_allow_small: bool = False             # the "answer-changing" tick, off by default, as in the app
@@ -139,6 +144,7 @@ class Notice:
     level: str        # "warn" | "error"
     text: str         # plain words: what it means
     next: str = ""    # plain words: what to do
+    after_write: bool = False   # true only once the thing it reports has really been written: the launch says it then (Runner.announce_key_written), not in the plan or before a refusal
 
     def line(self) -> str:
         return self.text + (f" {self.next}" if self.next else "")
@@ -246,15 +252,25 @@ def settings_from_pairs(pairs: list[str]) -> dict[str, str]:
     return out
 
 
-def as_argv_changes(extra: dict[str, str], bool_flags: frozenset[str]) -> tuple[dict[str, Any], dict[str, str | None]]:
+#: Options whose value is a WORD the engine reads (on, off, auto, none): the word goes through as typed (none since DeepSeek's --dspark left, #3959).
+WORD_VALUE_FLAGS: frozenset[str] = frozenset()
+
+
+def as_argv_changes(extra: dict[str, str], bool_flags: frozenset[str],
+                    word_flags: frozenset[str] = WORD_VALUE_FLAGS) -> tuple[dict[str, Any], dict[str, str | None]]:
     """Turn the Advanced table's values into `tune_knobs.apply_to_argv` changes and environment changes.
 
-    A flag without a value (or on/true/yes) is "present"; off/false/no/none removes it; anything else is a value."""
+    A flag without a value (or on/true/yes) is "present"; off/false/no/none removes it; anything else is a value.
+    A word-valued option (WORD_VALUE_FLAGS) keeps its word."""
     args: dict[str, Any] = {}
     env: dict[str, str | None] = {}
     for key, value in extra.items():
         if key.startswith("--"):
             low = value.lower()
+            if key in word_flags and key not in bool_flags:
+                if low:
+                    args[key] = low
+                continue                          # an empty value is no change, as for every option that takes one (#3504)
             if low == "" and key not in bool_flags:
                 continue                          # an empty value for an option that takes one is no change, never a bare flag (#3504)
             if key in bool_flags or low in ("on", "true", "yes", ""):
@@ -292,6 +308,8 @@ def flags_text(s: LaunchSettings, *, preset: str | None = None) -> str:
             parts.append(f"--mtp {s.mtp}")
         if s.drafting:
             parts.append(f"--drafting {s.drafting}")
+        if s.split_engine:
+            parts.append(f"--split-engine {s.split_engine}")
         parts.append(f"--tune {s.tune}")
         if s.tune_allow_small:
             parts.append("--tune-allow-small")

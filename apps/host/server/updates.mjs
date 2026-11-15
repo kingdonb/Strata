@@ -44,6 +44,9 @@ export async function checkUpdates({ appVersion, engineVersion }, fetcher = fetc
   };
 }
 
+/** The engine row after a version failed its test start on this computer (owner-approved wording, 11-09). */
+export const engineFailedBeforeText = (offered, installed) => `Engine ${offered ?? 'update'} didn't start correctly on this computer, so Strata kept engine ${installed ?? 'in use'}. Press Update engine to try again.`;
+
 /**
  * The packaged app's update check: the signed feed, read by Control (`strata update --check`), plus the shell's own verdict
  * on the app. Same result shape as `checkUpdates`, so the Settings screen needs no change. This is the only place the host
@@ -59,14 +62,18 @@ export async function checkComponentUpdates({ control, appUpdater = null, appVer
     const message = /update server|aren't available|No internet/.test(plain.headline) ? plain.message : `Couldn't check for updates. Try again in a moment.`;
     return { checkedAt, strata: { installedVersion: appVersion ?? control.version ?? null, status: 'error', message, details: plain.details, canInstall: false }, engine: { installedVersion: null, status: 'error', message, details: plain.details, canInstall: false } };
   }
-  const mib = bytes => `${Math.round((bytes ?? 0) / (1 << 20))} MB`;
+  const mib = bytes => `${Math.round((bytes ?? 0) / 1_000_000)} MB`;      // decimal megabytes, like the Terminal and the release page
   const engine = report.engine ?? {};
   const installedEngine = engine.installed?.version ?? null;
   const offered = engine.offered?.version ?? null;
   const engineView = { installedVersion: installedEngine, latestVersion: offered ?? undefined, canInstall: engine.status === 'available' || engine.status === 'install' };
-  if (engine.status === 'available') Object.assign(engineView, { status: 'available', message: `A new engine is available (${mib(engine.download_bytes)}).` });
+  if (engine.status === 'available' && engine.installed_locally) Object.assign(engineView, { status: 'available', message: 'A newer engine is already on this computer. Update switches to it; nothing is downloaded.' });
+  else if (engine.status === 'available') Object.assign(engineView, { status: 'available', message: `A new engine is available (${mib(engine.download_bytes)}).` });
   else if (engine.status === 'install') Object.assign(engineView, { status: 'available', message: `This PC needs an engine to run models. Press Update engine to download it (${mib(engine.download_bytes)}).` });
-  else if (engine.status === 'current' || engine.status === 'failed-before' || engine.status === 'skipped') Object.assign(engineView, { status: 'current', message: 'The engine is up to date.', details: engine.note });
+  // A version that failed its test start here is held back by Control for a day (status failed-before). It is not 'up to date': the row says what happened and
+  // offers the update again (the app's Update engine passes --force, so the press really tries it again). QAGUI-LIN 0213.
+  else if (engine.status === 'failed-before') Object.assign(engineView, { status: 'available', canInstall: true, retry: true, message: engineFailedBeforeText(offered, installedEngine), details: engine.note });
+  else if (engine.status === 'current' || engine.status === 'skipped') Object.assign(engineView, { status: 'current', message: 'The engine is up to date.', details: engine.note });
   else if (engine.status === 'wrong-make') Object.assign(engineView, { status: 'unavailable', message: engine.note ?? 'Nothing was changed: the update was for another make of graphics card.', details: (engine.reasons ?? []).join('\n') || undefined });
   else if (engine.status === 'not-in-feed') Object.assign(engineView, { status: 'current', message: 'No engine update is listed right now.' });
   else Object.assign(engineView, { status: 'unavailable', message: "There isn't an engine for this PC's graphics card yet.", details: (engine.reasons ?? []).join('\n') || undefined });
@@ -74,6 +81,7 @@ export async function checkComponentUpdates({ control, appUpdater = null, appVer
   const app = report.app ?? {};
   let appNew = app.status === 'available' ? app.offered : null;
   let appNotes = app.notes ?? '';
+  let appCheckFailed = null;   // the shell's own (Tauri) check threw: before this, the Settings check hid it and showed only Control's text
   let appCannot = null;   // browser mode: the app window's updater is not running, so the app itself cannot be updated from here
   if (appUpdater) {
     try {
@@ -81,12 +89,44 @@ export async function checkComponentUpdates({ control, appUpdater = null, appVer
       appNew = verdict.available ? verdict.version : null;
       appNotes = verdict.notes ?? appNotes;
     } catch (error) {
-      if (error?.code === 'app-update-unavailable' && appUpdater.unavailable) appCannot = appUpdater.unavailable;   // otherwise the feed's own view stands
+      if (error?.code === 'app-update-unavailable' && appUpdater.unavailable) appCannot = appUpdater.unavailable;
+      else appCheckFailed = String(error?.message ?? error ?? 'The app update check failed.');   // the app's own check did not work: say so, raw text behind Details
     }
   }
   const controlNew = control_.status === 'available' ? control_.offered : null;
   const strata = { installedVersion: appVersion ?? control_.installed ?? control.version ?? null, canInstall: !!((appNew && !appCannot) || controlNew) };
-  if (appNew || controlNew) Object.assign(strata, { status: 'available', latestVersion: appNew ?? controlNew, message: `A new version of Strata is available.${appNotes ? ` ${appNotes}` : ''}${appNew && appCannot ? ` ${appCannot}` : ''}` });
+  const appCheckLine = "Strata couldn't check for a new version of the app itself. Try again later.";
+  if (appNew || controlNew) Object.assign(strata, { status: 'available', latestVersion: appNew ?? controlNew, message: `A new version of Strata is available.${appNotes ? ` ${appNotes}` : ''}${appNew && appCannot ? ` ${appCannot}` : ''}${appCheckFailed ? ` ${appCheckLine}` : ''}` });
+  else if (appCheckFailed) Object.assign(strata, { status: 'error', message: appCheckLine });
   else Object.assign(strata, { status: 'current', message: 'Strata is up to date.' });
+  if (appCheckFailed) strata.details = appCheckFailed;
   return { checkedAt, feed: report.feed, strata, engine: engineView, serving: report.serving ?? [] };
+}
+
+/**
+ * What the first-run card shows: this PC's graphics card(s), the engine package the signed feed offers for it and how big it is.
+ * One feed read, nothing downloaded. `status`: offer (a package fits), none (nothing fits; `reasons` say why), offline (the feed could not be
+ * read), installed (an engine is already here), wrong-make (an engine for another make of card is installed).
+ */
+export async function engineFirstRun({ control, gpus = [] }) {
+  const cards = gpus.map(g => ({ name: g.name ?? 'Graphics card', vramGb: g.vramGb ?? null }));
+  let report;
+  try {
+    report = await control.updateCheck({});
+  } catch (error) {
+    const plain = plainUpdateError(error, 'Strata');
+    return { status: looksOffline(error) || /update server|No internet/.test(plain.headline ?? '') ? 'offline' : 'error', gpus: cards, message: plain.message, details: plain.details };
+  }
+  const engine = report.engine ?? {};
+  const hardware = report.hardware ?? {};
+  const base = { gpus: cards, driver: hardware.nvidia_driver ?? null, backend: hardware.backend ?? null };
+  if (engine.installed) return { ...base, status: 'installed', installedVersion: engine.installed.version ?? null };
+  if (engine.status === 'wrong-make') return { ...base, status: 'wrong-make', message: engine.note ?? null, reasons: engine.reasons ?? [] };
+  if (engine.offered && (engine.status === 'install' || engine.status === 'available')) {
+    // A newer Strata Control in the same feed comes with the engine (an Arc user who has just installed the app needed 0.1.59.1's fix and had to find Settings > Updates; ARCFIX 0213).
+    const ctl = report.control ?? {};
+    const control = ctl.status === 'available' && ctl.offered ? { version: ctl.offered, bytes: ctl.download_bytes || 0 } : null;
+    return { ...base, status: 'offer', offer: { version: engine.offered.version, bytes: engine.download_bytes || engine.offered.size || 0, variant: engine.offered.variant ?? '', backend: engine.offered.backend ?? null }, control };
+  }
+  return { ...base, status: 'none', message: engine.note ?? null, reasons: engine.reasons ?? [] };
 }

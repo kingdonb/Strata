@@ -48,6 +48,22 @@ DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 CONTROL = os.environ.get("STRATA_CONTROL_INSTALL") == "1"
 DEFAULT_PORT = 8080
 STATE_DIR = ".strata-mcp"                             # in the Strata folder (git-ignored)
+# Set by a Strata server that starts this file for its own web chat (serve/mcp.py builtin_strata_server): its port,
+# its config file and its API key.  With them the tools know which server is "the one this chat runs on".
+ENV_HOST_PORT, ENV_HOST_CONFIG, ENV_HOST_KEY = "STRATA_MCP_HOST_PORT", "STRATA_MCP_HOST_CONFIG", "STRATA_MCP_HOST_KEY"
+HOST_WORDS = ("the Strata server this chat runs on: it started these tools for its own chat, and it is the model "
+              "that is answering now")
+
+
+def host_from_env(environ=None) -> dict | None:
+    """The server that started these tools for its own chat ({"port", "config", "key"}), None when nothing did."""
+    environ = os.environ if environ is None else environ
+    raw = (environ.get(ENV_HOST_PORT) or "").strip()
+    if not raw.isdigit() or not 0 < int(raw) < 65536:
+        return None
+    cfg = (environ.get(ENV_HOST_CONFIG) or "").strip()
+    return {"port": int(raw), "config": Path(cfg) if cfg and Path(cfg).is_file() else None,
+            "key": (environ.get(ENV_HOST_KEY) or "").strip() or None}
 
 # What setup.py offers, used only when setup.py cannot be imported (the numbers are setup's MODELS / FAMILIES /
 # CONTEXTS; tools/test_strata_mcp.py checks they still match).
@@ -77,6 +93,31 @@ FALLBACK_MODELS = {
     "Q8_0": {"about": "8-bit, the reference quality (every expert Q8_0); for a 192 GB PC",
              "download_gb": 188.2, "ram_gb": 136, "arena_gb": 128.3, "families": ("unsloth",), "budget": True,
              "vision": True},
+    # round 0214: Unsloth's v3.1 sets (setup.py MODELS; the about lines come with the wording commit)
+    "UD-IQ1_M": {"about": "~1-bit (Unsloth Dynamic v3.1), the smallest download", "download_gb": 68.0, "ram_gb": 48, "arena_gb": 34.8, "families": ("unsloth",), "budget": True,
+               "vision": True},
+    "UD-Q2_0": {"about": "2-bit (Unsloth Dynamic v3.1)", "download_gb": 70.5, "ram_gb": 48, "arena_gb": 37.4, "families": ("unsloth",), "budget": True,
+              "vision": True},
+    "UD-IQ2_XS": {"about": "2-bit i-quant (Unsloth Dynamic v3.1)", "download_gb": 75.8, "ram_gb": 48, "arena_gb": 42.3, "families": ("unsloth",), "budget": True,
+                "vision": True},
+    "UD-Q2_K_XL": {"about": "2-bit (Unsloth Dynamic v3.1) with some 3-bit experts", "download_gb": 79.6, "ram_gb": 48, "arena_gb": 46.0, "families": ("unsloth",), "budget": True,
+                 "vision": True},
+    "UD-IQ3_XXS": {"about": "3-bit i-quant (Unsloth Dynamic v3.1)", "download_gb": 83.6, "ram_gb": 48, "arena_gb": 50.3, "families": ("unsloth",), "budget": True,
+                 "vision": True},
+    "UD-Q3_K_XL": {"about": "3-bit (Unsloth Dynamic v3.1) with some 4-bit experts", "download_gb": 89.5, "ram_gb": 48, "arena_gb": 56.2, "families": ("unsloth",), "budget": True,
+                 "vision": True},
+    "UD-IQ4_XS-v31": {"about": "~4-bit i-quant (Unsloth Dynamic v3.1), a newer file than UD-IQ4_XS with other tensor types", "download_gb": 93.7, "ram_gb": 48, "arena_gb": 60.4, "families": ("unsloth",), "budget": True,
+                      "vision": True},
+    "Gyro-S": {"about": "the smallest option, for PCs with little memory (27.6 GB of VRAM + RAM together); lower quality "
+                        "than the 2-3-bit sizes, and the 2-bit Q2_0 decodes faster",
+               "engine": (0, 1, 45, 1),
+               "download_gb": 58.5, "ram_gb": 27.6, "arena_gb": 25.8, "families": ("gyro",), "mem_total": True,
+               "vision": True},
+    "Gyro-M": {"about": "about IQ3_XXS quality with about 20% less GPU memory (35 GB of VRAM + RAM together); decodes "
+                        "about 16-21% slower than Q2_0 on 12 GB cards",
+               "engine": (0, 1, 45, 1),
+               "download_gb": 92.0, "ram_gb": 35.0, "arena_gb": 32.1, "families": ("gyro",), "mem_total": True,
+               "vision": True},
     "NVFP4": {"about": "4-bit NVFP4 experts, GPTQ (sergqwer's strata-nvfp4 pack); RTX 50 has FP4 tensor cores, other "
                        "NVIDIA cards run it at 8-bit precision", "download_gb": 128.0, "ram_gb": 80, "arena_gb": 68.0,
               "families": ("nvfp4",), "vision": True},
@@ -93,11 +134,15 @@ FALLBACK_FAMILIES = {
                                              "authors' numbers)", "tag": "swift-"},
     "coder": {"title": "Qwen3.8-Flash-Next Coder", "about": "half the experts (code, tools, images kept): needs ~32 GB "
                                                             "of RAM, faster; weaker outside coding", "tag": "coder-"},
-    "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "about": "UD-IQ4_XS, UD-Q4_K_XL, UD-Q5_K_XL, UD-Q6_K_XL or Q8_0 "
-                                                                  "(94 to 188 GB downloads): every expert in RAM from "
-                                                                  "~80 GB (UD-IQ4_XS) to ~136 GB (Q8_0) of RAM, else "
+    "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "about": "UD-IQ1_M, UD-Q2_0, UD-IQ2_XS, UD-Q2_K_XL, UD-IQ3_XXS, UD-Q3_K_XL, UD-IQ4_XS, UD-IQ4_XS-v31, UD-Q4_K_XL, UD-Q5_K_XL, UD-Q6_K_XL or Q8_0 "
+                                                                  "(68 to 188 GB downloads): every expert in RAM from "
+                                                                  "~50 GB (UD-IQ1_M) to ~136 GB (Q8_0) of RAM, else "
                                                                   "part of them read from the SSD",
                 "tag": "unsloth-", "vision": True},
+    "gyro": {"title": "Qwen3.8-Flash-Next (Gyro)", "about": "Gyro-S (27.6 GB of memory) and Gyro-M (35 GB): the smallest "
+                                                              "sizes, for PCs with little memory; 58 and 92 GB "
+                                                              "downloads (the files include the n-gram table)",
+             "tag": "gyro-"},
     "nvfp4": {"title": "Qwen3.8-Flash-Next (NVFP4)", "about": "4-bit NVFP4 experts, NVIDIA cards; a 128 GB download, "
                                                               "~80 GB of RAM to keep every expert in RAM",
               "tag": "nvfp4-"},
@@ -171,7 +216,7 @@ def proc_identity(pid) -> str | None:
         finally:
             _k32.CloseHandle(h)
     stat = Path(f"/proc/{pid}/stat")
-    if Path("/proc/self/stat").exists():
+    if _has_proc():
         try:
             fields = stat.read_text().rsplit(")", 1)[1].split()
         except (OSError, IndexError):
@@ -179,7 +224,10 @@ def proc_identity(pid) -> str | None:
         if fields[0] in ("Z", "X"):                     # a zombie has ended
             return None
         return f"linux:{fields[19]}"                    # field 22 of stat: the start time in clock ticks
-    try:                                                # elsewhere (no /proc): alive, without a start time
+    state = _ps_state(pid)                              # elsewhere (macOS: no /proc): ps says whether it runs; a zombie (an ended child
+    if state is not None:                               # not reaped yet) answers kill(pid, 0) but has ended (lane 8, a Mac install that "ran" for ever)
+        return "pid" if state and not state.startswith("Z") else None
+    try:                                                # no ps either: alive, without a start time
         os.kill(pid, 0)
         if sys.platform == "darwin":
             try:
@@ -191,6 +239,22 @@ def proc_identity(pid) -> str | None:
         return "pid"
     except OSError:
         return None
+
+
+def _has_proc() -> bool:
+    return Path("/proc/self/stat").exists()
+
+
+def _ps_state(pid: int) -> str | None:
+    """The process state letter(s) ps reports for the process ("S", "R+", "Z" ...), "" when no such process runs, None when ps cannot be asked."""
+    try:
+        done = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = done.stdout.strip()
+    if done.returncode != 0 and not out:
+        return ""                                       # ps: no such process
+    return out
 
 
 def proc_alive(pid, ident) -> bool:
@@ -338,7 +402,7 @@ def spawn_detached(cmd: list, cwd: Path, log_path: Path, env: dict | None = None
 def run_quiet(cmd, timeout=30) -> str:
     """A command's stdout ('' when it is missing or fails), without a console window flashing up on Windows."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+        return subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout, stdin=subprocess.DEVNULL,
                               creationflags=CREATE_NO_WINDOW if WIN else 0).stdout or ""
     except (OSError, subprocess.SubprocessError, ValueError):
         return ""
@@ -473,6 +537,11 @@ def norm(p) -> Path:
     return Path(os.path.normcase(os.path.realpath(os.path.abspath(str(p)))))
 
 
+def mounted_drive(n: Path) -> bool:
+    """A drive the desktop mounted for the person: /run/media/<user>/<drive>/..., inside /run but not system state."""
+    return not WIN and is_inside(n, norm("/run/media")) and n != norm("/run/media")
+
+
 def system_folders() -> list[Path]:
     if WIN:
         env = [os.environ.get(k) for k in ("SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramData",
@@ -496,6 +565,7 @@ class Strata:
         self._setup = None
         self._setup_tried = False
         self._hw_cache = None
+        self.host = host_from_env()                     # the server whose chat these tools serve, when one started them
         # tests: the interpreter that runs setup / the server. The app's Control runs the installer on its own Python.
         self.python_override: str | None = sys.executable if CONTROL else None
         self.health_timeout = 2.0
@@ -520,6 +590,11 @@ class Strata:
                 if all(hasattr(mod, a) for a in ("MODELS", "FAMILIES", "CONTEXTS")):
                     mod.out = lambda cmd: run_quiet(cmd, 60)
                     self._setup = mod
+                    if hasattr(mod, "feed_models_setup"):
+                        try:                            # the signed feed's models (the last verified list; nothing is fetched here), after the built-in ones
+                            mod.feed_models_setup(fetch=False)
+                        except Exception as e:          # noqa: BLE001
+                            log(f"the feed's model list was not added: {e}")
             except (Exception, SystemExit) as e:        # noqa: BLE001 - any failure: the built-in tables
                 log(f"setup.py could not be imported ({e}); using the built-in model table")
         return self._setup
@@ -527,11 +602,7 @@ class Strata:
     def tables(self):
         s = self.setup_module()
         if s is not None:
-            models = dict(s.MODELS)
-            for own in (getattr(s, "OWN_PATH_FAMILIES", None) or {}).values():
-                for m, d in own.get("models", {}).items():
-                    models.setdefault(m, d)
-            return models, {**s.FAMILIES, **self.own_families()}, list(s.CONTEXTS), "setup.py"
+            return s.MODELS, {**s.FAMILIES, **self.own_families()}, list(s.CONTEXTS), "setup.py"
         return FALLBACK_MODELS, FALLBACK_FAMILIES, FALLBACK_CONTEXTS, "built-in table (setup.py not importable)"
 
     def own_families(self) -> dict:
@@ -542,8 +613,17 @@ class Strata:
         out = {}
         for f, d in (getattr(s, "OWN_PATH_FAMILIES", None) or {}).items():
             out[f] = {"title": d["title"], "about": d.get("about"), "tag": d["tag"], "license": d.get("license"),
-                      "vision": bool(d.get("vision", True)), "own_path": True}
+                      "vision": bool(d.get("vision", True)), "own_path": True, **({"feed": True} if d.get("feed") else {})}
         return out
+
+    def own_size_names(self) -> list:
+        """The size names of the families that have an engine path of their own (Qwen3.6): the install tool accepts them as `model`."""
+        s = self.setup_module()
+        names = []
+        for table in ("OWN_PATH_FAMILIES",):
+            for fam in (getattr(s, table, None) or {}).values():
+                names.extend(n for n in fam.get("models", {}) if n not in names)
+        return names
 
     def own_size(self, family, model) -> dict | None:
         """One size of an own-path family as a model-table row for install_plan / model_table (None: not an own-path size).
@@ -555,7 +635,16 @@ class Strata:
         return {"about": d["models"][model]["about"], "download_gb": round(size_gb, 1), "ram_gb": d["models"][model]["ram_gb"],
                 # the routed experts are ~93% of the file (setup.own_path_parallel_fits_all); the dense part and buffers ~1 GB more
                 "arena_gb": round(size_gb * 0.93, 1), "vision": bool(d.get("vision", True)),
-                "engine": OWN_PATH_ENGINE, "families": (family,)}
+                "engine": OWN_PATH_ENGINE, "families": (family,), "context_fit": self.own_context_fit(d, model)}
+
+    @staticmethod
+    def own_context_fit(fam: dict, model) -> dict | None:
+        """Which context fits a card for this own-path size (#5715): strata_control/own_path_fit.py's inputs, the figures the app's estimate uses."""
+        try:
+            from strata_control import own_path_fit
+            return own_path_fit.inputs(fam.get("name"), model)
+        except ImportError:
+            return None
 
     def sizes_of(self, models, family) -> list:
         """The family's sizes as setup lists them: an experimental one last (never the default)."""
@@ -616,8 +705,12 @@ class Strata:
 
     # ---- what is installed
     def configs(self) -> list[Path]:
-        return sorted((p for p in self.root.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")),
+        have = sorted((p for p in self.root.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")),
                       key=lambda p: p.stat().st_mtime, reverse=True)   # #346: the Chat settings file is no config
+        own = (self.host or {}).get("config")            # the config of the server this chat runs on, wherever it is
+        if own and own.is_file() and all(norm(own) != norm(p) for p in have):
+            have.insert(0, own)
+        return have
 
     @staticmethod
     def read_config(path: Path) -> dict:
@@ -644,7 +737,8 @@ class Strata:
         plan = self.removal_plan(path)
         return {"model": tag, "config": path.name, "model_name": cfg.get("model_name"),
                 "context": int(val("--max-context")) if str(val("--max-context") or "").isdigit() else None,
-                "kv": val("--kv"), "images": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "off",
+                "kv": val("--kv"), "images": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict)
+                else "off",
                 "port": cfg.get("port", DEFAULT_PORT), "host": cfg.get("host", "127.0.0.1"),
                 "gpu": cfg.get("gpu"), "gpu_roles": cfg.get("gpu_roles"), "api_key_set": bool(cfg.get("api_key")),
                 "low_ram": "--resident-experts" in a or "--mmap-experts" in a,
@@ -677,6 +771,23 @@ class Strata:
                 seen_d.add(norm(d))
                 once_d.append(d)
         return once, once_d
+
+    @staticmethod
+    def with_shards(files: list) -> list:
+        """The files plus the other parts of every multi-part GGUF among them (name-00001-of-00004.gguf: the config names only the
+        first), so deleting a model takes all its parts and never leaves 100 GB behind (#3716)."""
+        out, seen = [], set()
+        for f in files:
+            names = [Path(f)]
+            m = SHARD_NAME.match(str(f))
+            if m:
+                names += [Path(f"{m.group(1)}-{i:05d}-of-{m.group(3)}.gguf") for i in range(1, int(m.group(3)) + 1)]
+            for n in names:
+                key = norm(n)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(n)
+        return out
 
     @staticmethod
     def tree_bytes(path: Path) -> int:
@@ -749,16 +860,29 @@ class Strata:
         return {"models": models, "shared_bytes": shared_bytes, "shared_gb": round(shared_bytes / 1e9, 2),
                 "total_bytes": total, "total_gb": round(total / 1e9, 2)}
 
+    @staticmethod
+    def made_by_strata(p: Path, is_dir: bool) -> bool:
+        """A download or pack Strata wrote itself, even in a models folder the person picked or the app chose: a finished GGUF has its
+        .done mark beside it, a prepared pack has its conversion record. The person's own GGUF files have neither (#3716)."""
+        try:
+            if is_dir:
+                return any((p / n).is_file() for n in ("conversions.json", "experts.bin.src.json"))
+            return p.with_name(p.name + ".done").is_file()
+        except OSError:
+            return False
+
     def removal_plan(self, config: Path) -> dict:
         """What deleting this model removes and what it keeps. A file or folder another installed model's config still names
         (the shared MTP draft, a shared PLE shard) is kept; so is anything outside Strata's own folders."""
         cfg = self.read_config(config)
         files, dirs = self.model_paths(cfg)
+        files = self.with_shards(files)
         used_files, used_dirs = set(), set()
         for other in self.configs():
             if norm(other) == norm(config):
                 continue
             f, d = self.model_paths(self.read_config(other))
+            f = self.with_shards(f)
             used_files |= {norm(x) for x in f}
             used_dirs |= {norm(x) for x in d}
         remove, keep = [], []
@@ -772,7 +896,7 @@ class Strata:
         for p, is_dir in [(x, False) for x in files] + [(x, True) for x in dirs]:
             if not p.exists():
                 continue
-            if not self.allowed(p):
+            if not self.allowed(p) and not self.made_by_strata(p, is_dir):
                 keep.append({"path": str(p), "reason": "outside Strata's folders"})
             elif shared(p, is_dir):
                 keep.append({"path": str(p), "reason": "another installed model still uses it"})
@@ -919,6 +1043,18 @@ class Strata:
             amd = []
         if not WIN and not amd and shutil.which("rocm-smi"):
             amd = rocm_smi_gpus()
+        if not WIN and not amd:                         # no setup module, no rocm-smi (ROCm from a Python venv): the kernel's own list
+            amd = kfd_gpus()
+        # A PC whose only NVIDIA cards are Pascal / Volta (two GTX 1080s) and that has no AMD card Strata can use: setup runs them with the
+        # CUDA 12 engine (old_gpus_opt_in), so the app must not call it "no supported graphics card" and start both cards Off (#3655).
+        # A PC with a newer card keeps recommending that one; naming an old card is still the opt-in.
+        try:
+            if S and nv and S.old_gpus_opt_in(nv, (), None, any(g.get("usable") for g in amd)):
+                for g in nv:
+                    if S.sm60_card(g["arch"]) and g.get("problem") and "older than the RTX 20" in str(g["problem"]):
+                        g["problem"], g["usable"], g["engine_variant"] = None, True, "cuda12"
+        except Exception:                               # noqa: BLE001 - the hardware page never breaks over this
+            pass
         if any(g.get("usable") for g in nv):
             for g in amd:                             # a Ryzen's integrated graphics beside an NVIDIA card: the engine runs on the NVIDIA card
                 if g.get("uma") and g.get("usable"):
@@ -927,7 +1063,31 @@ class Strata:
             mark_display(nv + amd, nvidia_display_active() if nv else {}, windows_desktop_adapters() if WIN and amd else [])
         except Exception:                               # noqa: BLE001 - unknown stays unknown: the app then keeps its safety default
             pass
-        hw["gpus"] = nv + amd
+        try:                                            # the reserve setup writes for this chip when a run config names none (strata_control/setup_config.py UMA_WIN_RESERVE_MIB, G16):
+            # the app's Load uses it on a one-card run whose config has no reserve of setup's, so the app and `strata launch` start the same engine line (QAGUI-STRIX 11-09).
+            # The same condition as setup_config.config_for: Windows, the HIP engine (an AMD card), unified memory, gfx1151 exactly (gfx_arch_is: "gfx1151" or "gfx1151:...").
+            if WIN and amd:
+                if str(self.src) not in sys.path:
+                    sys.path.insert(0, str(self.src))
+                from strata_control import setup_config
+                for g in amd:
+                    arch = str(g.get("arch") or "")
+                    if g.get("uma") and (arch == "gfx1151" or arch.startswith("gfx1151:")):
+                        g["setup_reserve_mib"] = setup_config.UMA_WIN_RESERVE_MIB
+        except Exception:                               # noqa: BLE001 - an older Control folder: no field, the app keeps its own floor
+            pass
+        arc = []
+        if not WIN:                                     # an Intel Arc (Linux, the SYCL engine): only a PC with no usable NVIDIA or AMD card gets one (strata_control/intel_app.py)
+            try:
+                if str(self.src) not in sys.path:
+                    sys.path.insert(0, str(self.src))
+                from strata_control import intel_app
+                arc = intel_app.cards_to_add(nv, amd)
+            except Exception:                           # noqa: BLE001 - an older Control folder without it: the report is what it was
+                arc = []
+        hw["gpus"] = nv + amd + arc
+        for g in hw["gpus"]:                            # each make numbers its cards from 0 (the engine drives one make): a stable id tells two cards apart
+            g.setdefault("id", f"{g.get('vendor') or 'gpu'}:{g.get('index')}")
         try:                                            # how fast each card is (SMs x clock): the app and the Terminal pick the Main card by it
             from strata_control import gpu_roles
             gpu_roles.add_speeds(hw["gpus"])
@@ -1019,22 +1179,18 @@ class Strata:
         return hw
 
     def _mac_sizes(self, models: dict, family: str = "qwen") -> list:
-        """The sizes the app offers on a Mac: the GSQ-RCO files of the Qwen family (two shards, no repack) and agentionai's Gyro files (one
-        file, no repack). Unsloth's many-shard files need metal/tools/metal_repack.py, which the Terminal's setup uses; the app does not
-        offer them yet."""
+        """The sizes the app offers on a Mac: the GSQ-RCO files of the Qwen family (two shards, no repack), agentionai's Gyro files (one
+        file, no repack) and, since round 0214, Unsloth's sets (many shards: setup.py's Mac install repacks them with
+        metal/tools/metal_repack.py, as the Terminal's setup does); a set the Metal engine cannot run yet is left out (mac_fit.MAC_MODELS "missing")."""
         mf = self.mac()
-        return [m for m, d in mf.MAC_MODELS.items() if d.get("family", "qwen") == family and m in models] if mf else []
+        return [m for m in mf.app_sizes(family) if m in models] if mf else []
 
     def _mac_verdict(self, model: str, ram: float) -> str:
         mf = self.mac()
+        from strata_control import fit_label
         if ram < mf.MIN_STREAM_RAM_GB:
-            return "does not fit"
-        if not mf.streams(model, ram):
-            return "fits"
-        speed = mf.STREAM_MEASURED.get(model)
-        if speed:
-            return (f"part of its experts in memory, the rest read from the SSD (slower: {speed} measured on a 32 GB Mac mini)")
-        return "slow here: part of its experts read from the SSD (slower, not measured on a Mac of this size)"
+            return fit_label.SLOWER                          # too little memory for the Metal engine's streaming: the same two words, said not refused
+        return fit_label.SLOWER if mf.streams(model, ram) else fit_label.FITS          # the Mac's own count of what stays in memory (strata_control/mac_fit.py)
 
     def _mac_recommend(self, hw: dict, models: dict, families: dict) -> dict:
         mf = self.mac()
@@ -1064,10 +1220,11 @@ class Strata:
 
     def _mac_model_table(self, hw: dict) -> list:
         models, families, _ctx, _src = self.tables()
+        from strata_control import fit_label
         ram = float(hw.get("ram_gb") or 0)
         have = {c.stem[len("strata-"):] for c in self.configs()}
         out = []
-        for family in ("qwen",):                      # fork: upstream also lists Gyro here; the fork's Metal engine does not load it yet
+        for family in (self.mac().all_families() if self.mac() else ("qwen", "gyro")):      # Qwen, Unsloth's sets, then Gyro: never the default
             fd = families.get(family)
             if fd is None:
                 continue
@@ -1079,28 +1236,38 @@ class Strata:
                               "images": d.get("vision", fd.get("vision", True)) is not False,   # the Mac engine carries the picture reader (Metal)
                               "ram_needed_gb": d["ram_gb"], "experts_gb": d.get("arena_gb"), "mem_total": False,
                               "memory_gb": round(float(d.get("arena_gb") or d["ram_gb"]) + 1.0, 1),
+                              "fit_gb": fit_label.files_gb(family, m, d),
                               "on_this_pc": self._mac_verdict(m, ram) if ram else None, "installed": tag in have, "id": tag})
             if sizes:
                 out.append({"family": family, "title": fd["title"], "about": fd.get("about"), "experimental": False,
                             "images": any(x["images"] for x in sizes), "sizes": sizes})
-        if "qwen36" in families:
-            fd36 = families["qwen36"]
-            q36_sizes = []
-            for m in self.sizes_of(models, "qwen36"):
-                d = self.own_size("qwen36", m) or models.get(m, {})
-                tag = (fd36.get("tag", "") + m).lower()
-                is_installed = tag in have or (m == "UD-Q2_K_XL" and any(c in have for c in ("q36_q2", "q36", tag)))
-                active_id = "q36_q2" if "q36_q2" in have and m == "UD-Q2_K_XL" else ("q36" if "q36" in have and m == "UD-Q2_K_XL" else tag)
-                q36_sizes.append({
-                    "model": m, "about": d.get("about", "Qwen3.6-35B-A3B Metal native GGUF with MTP"),
-                    "download_gb": d.get("download_gb", 12.6),
-                    "experimental": False, "images": False, "ram_needed_gb": d.get("ram_gb", 16.0), "experts_gb": d.get("arena_gb", 11.7),
-                    "mem_total": True, "memory_gb": float(d.get("ram_gb", 16.0)), "on_this_pc": "fits" if ram >= d.get("ram_gb", 16.0) else "tight",
-                    "installed": is_installed, "id": active_id, "engine_min": None
-                })
-            if q36_sizes:
-                out.append({"family": "qwen36", "title": fd36["title"], "about": fd36.get("about", "35B MoE with Metal kernels"), "experimental": False, "images": False, "sizes": q36_sizes})
-        return out
+        q36 = self._mac_qwen36(families, have, ram)      # Qwen3.6-35B-A3B on this fork's Metal engine path: after the Flash-Next families
+        if q36 is not None:
+            out.append(q36)
+        return self._feed_rows(out, self.setup_module())
+
+    def _mac_qwen36(self, families: dict, have: set, ram: float) -> dict | None:
+        """Qwen3.6-35B-A3B for a Mac: the sizes this fork's Metal engine path runs (strata_control/mac_q36.py), with the same numbers setup uses
+        (metal/setup_mac_q36.py).  None when setup.py has no such family, or this Strata folder does not carry the Mac table."""
+        fam = families.get("qwen36")
+        if not fam:
+            return None
+        try:
+            from strata_control import mac_q36
+        except Exception as e:                          # noqa: BLE001
+            log(f"strata_control/mac_q36.py could not be imported ({e})")
+            return None
+        sizes = []
+        for m, d in mac_q36.MAC_SIZES.items():
+            tag = (fam.get("tag", "") + m).lower()
+            ids = [i for i in (tag, *mac_q36.EARLIER_IDS.get(m, ())) if i in have]     # a config an earlier setup wrote keeps its own name
+            sizes.append({"model": m, "about": d["about"], "download_gb": d["download_gb"], "experimental": False, "images": False,
+                          "ram_needed_gb": d["ram_gb"], "experts_gb": d["arena_gb"], "mem_total": True, "memory_gb": float(d["ram_gb"]),
+                          "on_this_pc": ("fits" if ram >= d["ram_gb"] else "may run slower") if ram else None,
+                          "installed": bool(ids), "id": ids[0] if ids else tag, "engine_min": None})
+        if not sizes:
+            return None
+        return {"family": "qwen36", "title": fam["title"], "about": fam.get("about"), "experimental": False, "images": False, "sizes": sizes}
 
     def recommend(self, hw: dict) -> dict:
         """setup.py's own rules: the size it preselects (IQ3_XXS from 60 GB of RAM, else the first, Q2_0), the
@@ -1120,7 +1287,7 @@ class Strata:
             return {"family": None, "model": None, "why": why}
         best = max(usable, key=lambda g: (round(g["vram_gb"]), -g.get("index", 0)))
         vram = best["vram_gb"]
-        backend = "hip" if best.get("vendor") == "amd" else "cuda"
+        backend = "hip" if best.get("vendor") == "amd" else "sycl" if best.get("vendor") == "intel" else "cuda"
 
         def low_fits(m):
             try:
@@ -1166,7 +1333,7 @@ class Strata:
             return {"family": None, "model": None, "why": f"{ram:.0f} GB of RAM: Strata needs 32 GB or more "
                                                           "(the smallest model, the Coder, keeps ~23 GB of experts in "
                                                           "RAM)"}
-        ctx = 32768 if vram < 14 else 65536 if vram < 20 else 131072
+        ctx = 131072                                       # 128K on every card (owner, 2026-11-01)
         # #3425: the tiers count RAM + VRAM together, but the desktop keeps about 10 GB of the RAM and the card keeps ~6 GB for
         # its dense weights, so a PC at the floor of its tier reads part of the experts from the SSD at every answer.  Said
         # plainly beside the pick (the same arithmetic as the app's "This computer" card); the pick itself stays the owner's tier.
@@ -1183,8 +1350,11 @@ class Strata:
                          "older CPU (10-20 minutes), and the CPU's share of the experts runs a few times slower")
         if backend == "hip":
             notes.append("AMD (experimental): pictures are on; the reader runs on the CPU under 24 GB of VRAM and on the GPU from 24 GB")
+        if backend == "sycl":
+            from strata_control import intel_app
+            notes.append(intel_app.NO_DOWNLOAD)
         cmd = (("START-HERE.bat --setup" if WIN else "./setup.sh --setup") +
-               f" --yes --family {fam} --model {model} --context {ctx}" + (" --backend hip" if backend == "hip" else ""))
+               f" --yes --family {fam} --model {model} --context {ctx}" + (f" --backend {backend}" if backend in ("hip", "sycl") else ""))
         return {"family": fam, "model": model, "title": families[fam]["title"] + " " + model, "context": ctx,
                 "backend": backend, "gpu": {k: best.get(k) for k in ("index", "name", "vram_gb")},
                 "download_gb": models[model]["download_gb"], "why": why, "notes": notes, "setup_command": cmd}
@@ -1197,33 +1367,23 @@ class Strata:
         ram = (hw or {}).get("ram_gb")
         usable = self.engine_gpus(hw)
         vram = max((g["vram_gb"] for g in usable), default=0.0)
+        from strata_control import fit_label
+        card_room = fit_label.card_room_gb(usable)
         have = {c.stem[len("strata-"):] for c in self.configs()}
         out = []
-        for f, fd in families.items():
+        for f, fd in sorted(families.items(), key=lambda kv: bool(kv[1].get("feed"))):      # the signed feed's models after the built-in ones (False sorts first, the order is kept)
             sizes = []
             for m in self.sizes_of(models, f):
                 own = self.own_size(f, m)
                 d = own or models[m]
                 tag = (fd.get("tag", "") + m).lower()
+                # the model's files without the lookup table's file (download size minus the table) against the card's memory plus the RAM: "fits" or "may run slower"
+                # (strata_control/fit_label.py, the owner's one rule)
+                memory_gb = round(float(d["ram_gb"]) if d.get("mem_total") else float(d.get("arena_gb") or d["ram_gb"]) + 1.0, 1)      # the placement estimate (experts + dense)
+                fit_gb = fit_label.files_gb(f, m, d)          # what the label and the Terminal's "Needs" column use
                 verdict = None
                 if ram is not None:
-                    have_gb = ram + vram if d.get("mem_total") else ram     # Gyro: VRAM and RAM together
-                    verdict = "fits" if have_gb >= d["ram_gb"] else "tight" if have_gb >= d["ram_gb"] - 8 else "does not fit"
-                    try:
-                        if own:                         # its own engine path: no budget or low-RAM mode of Flash-Next's to judge by
-                            pass
-                        elif d.get("budget") and S and hasattr(S, "unsloth_budget") and not S.unsloth_budget(m, ram):
-                            verdict = ("experimental: " if d.get("experimental") else "") + "fits (all of its experts in RAM)"
-                        elif d.get("budget"):
-                            verdict = (("experimental: " if d.get("experimental") else "")
-                                       + "part of its experts in RAM, the rest read from the SSD"
-                                       if ram >= d["ram_gb"] else
-                                       "slow here: part of its experts in RAM, the rest read from the SSD (setup "
-                                       "asks first)" if ram >= 48 else "does not fit")
-                        elif not d.get("mem_total") and S and S.low_ram_needed(m, ram) and S.low_ram_fits(m, ram, vram):
-                            verdict = "fits in the low-RAM mode (slower: the GPU holds part of the experts)"
-                    except Exception:                   # noqa: BLE001
-                        pass
+                    verdict = fit_label.label(fit_gb, ram, card_room)
                 sizes.append({"model": m, "about": d["about"], "download_gb": d["download_gb"],
                               "experimental": bool(d.get("experimental")),
                               "images": d.get("vision", fd.get("vision", True)) is not False,
@@ -1233,12 +1393,17 @@ class Strata:
                               "ram_needed_gb": d["ram_gb"], "experts_gb": d.get("arena_gb"),
                               # RAM + VRAM the weights need together, WITHOUT the n-gram table (that stays on the SSD): Gyro states it
                               # (mem_total), for the rest the experts plus ~1 GB for the dense part (Swift IQ2_XS: 35.5 + 1 = 36.5)
-                              "mem_total": bool(d.get("mem_total")),
+                              "mem_total": bool(d.get("mem_total")), "multi_file": False,
+                              "disk_gb": None,
                               # the first engine that reads this size's files (setup.py "engine"); the app says "needs a newer engine"
                               # with the update step when the installed one is older. None: any engine that setup accepts.
                               "engine_min": ".".join(map(str, d["engine"])) if d.get("engine") else None,
-                              "memory_gb": round(float(d["ram_gb"]) if d.get("mem_total") else float(d.get("arena_gb") or d["ram_gb"]) + 1.0, 1),
+                              "memory_gb": memory_gb, "fit_gb": fit_gb,
+                              # Qwen3.6: the conversation memory per token and what the card holds before it (strata_control/own_path_fit.py,
+                              # #5715): the app's context estimate and its warning use these; absent for every other model
+                              **({"context_fit": d["context_fit"]} if d.get("context_fit") else {}),
                               "on_this_pc": verdict, "installed": tag in have, "id": tag,
+                              "rdna4_faster": None,
                               # which graphics cards to use for it (strata_control/gpu_fit.py, the one rule app / Terminal / setup share):
                               # only with two or more cards that count; "recommended" names the pre-selected option
                               "gpu_options": None if own else self.gpu_options(d, ram, hw)})   # Qwen3.6 runs on one card so far
@@ -1246,6 +1411,21 @@ class Strata:
                         "experimental": bool(fd.get("experimental")),
                         "images": any(x["images"] for x in sizes) if sizes else fd.get("vision", True) is not False,
                         "sizes": sizes})
+        return self._feed_rows(out, S)
+
+    def _feed_rows(self, out: list, S) -> list:
+        """The signed feed's models in a model table: their family rows carry `feed: true`; a model this engine does not run has `available: false` and the reason
+        (`sizes` empty when it is not offered, kept when the owner's rule allows the install: feed_models.UNAVAILABLE_POLICY)."""
+        unavailable = (getattr(S, "FEED_UNAVAILABLE", None) or {}) if S else {}
+        for row in out:
+            if (getattr(S, "FEED_MODELS", None) or {}).get(row["family"]):
+                row["feed"] = True
+                if row["family"] in unavailable:
+                    row["available"], row["unavailable_reason"] = False, unavailable[row["family"]]["reason"]
+        for fid, u in unavailable.items():
+            if not any(r["family"] == fid for r in out):
+                out.append({"family": fid, "title": u["title"], "about": u["reason"], "experimental": False, "images": False, "sizes": [], "feed": True,
+                            "available": False, "unavailable_reason": u["reason"]})
         return out
 
     @staticmethod
@@ -1273,7 +1453,7 @@ class Strata:
     def ports(self, port: int | None) -> list[int]:
         if port:
             return [port]
-        ps = [self.state("server").get("port")] + [self.describe_config(c)["port"] for c in self.configs()]
+        ps = [(self.host or {}).get("port"), self.state("server").get("port")] + [self.describe_config(c)["port"] for c in self.configs()]
         return list(dict.fromkeys(int(p) for p in [*ps, DEFAULT_PORT] if isinstance(p, int)))
 
     def api_key_for(self, port: int) -> str | None:
@@ -1281,6 +1461,8 @@ class Strata:
         def real(cfg):                                   # "api_key": "none" = served without a key on purpose
             k = cfg.get("api_key")
             return k if k and str(k).strip().lower() != "none" else None
+        if self.host and port == self.host["port"] and self.host["key"]:
+            return self.host["key"]                      # the key of the server that started these tools
         for c in self.configs():
             cfg = self.read_config(c)
             if real(cfg) and int(cfg.get("port", DEFAULT_PORT)) == port:
@@ -1611,7 +1793,18 @@ def own_nvidia_gpus() -> list:
     for line in s.strip().splitlines():
         try:
             idx, name, mem, cc, drv = [x.strip() for x in line.split(",")]
-            found.append({"index": int(idx), "name": name, "vram_gb": float(mem) / 1024.0,
+            try:
+                mem_gb = float(mem) / 1024.0
+            except ValueError:
+                if platform.machine().lower() not in ("aarch64", "arm64"):
+                    raise            # as before on x86: a card whose memory nvidia-smi does not report is not listed
+                # a DGX Spark (GB10): one memory for the CPU and the GPU, memory.total is [N/A]; counted as setup.py's gpus() counts it
+                # (the RAM less the OS's 6 GB, none of it room beside the RAM)
+                shared = max(0.0, own_ram_gb() - 6)
+                found.append({"index": int(idx), "name": name, "vram_gb": shared, "arch": cc.replace(".", ""), "driver": drv,
+                              "uma": True, "dedicated_gb": 0.0, "shared_gb": shared})
+                continue
+            found.append({"index": int(idx), "name": name, "vram_gb": mem_gb,
                           "arch": cc.replace(".", ""), "driver": drv})
         except ValueError:
             continue
@@ -1664,6 +1857,43 @@ def windows_video_controllers() -> list:
         return []
     d = [d] if isinstance(d, dict) else d
     return [{"name": x.get("Name"), "driver": x.get("DriverVersion")} for x in d if isinstance(x, dict)]
+
+
+KFD_SUPPORTED = ("gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201", "gfx1030", "gfx1031", "gfx1151")
+
+
+def kfd_gpus(sysfs: str = "/sys") -> list:
+    """AMD cards from the kernel's KFD topology and the amdgpu driver's files, with no ROCm tool and no setup module: a PC that has only the
+    driver plus the engine's own runtime has no rocm-smi, amd-smi or rocminfo, and the cards were then not counted at all (a 4-card PC ran on one).
+    Numbered as HIP numbers them (the GPU nodes in order, CPU nodes skipped)."""
+    base = Path(sysfs) / "class/kfd/kfd/topology/nodes"
+    out = []
+    try:
+        nodes = sorted((p for p in base.iterdir() if p.name.isdigit()), key=lambda p: int(p.name))
+    except OSError:
+        return out
+    for node in nodes:
+        try:
+            props = dict(line.partition(" ")[::2] for line in (node / "properties").read_text().splitlines())
+            ver, simd = int(props.get("gfx_target_version") or 0), int(props.get("simd_count") or 0)
+        except (OSError, ValueError):
+            continue
+        if ver == 0 or simd == 0:
+            continue
+        arch = f"gfx{ver // 10000}{(ver // 100) % 100:x}{ver % 100:x}"
+        dev = Path(sysfs) / f"class/drm/renderD{props.get('drm_render_minor', '').strip()}/device"
+        try:
+            vram = int((dev / "mem_info_vram_total").read_text()) / 2 ** 30
+        except (OSError, ValueError):
+            vram = 0.0
+        try:
+            name = (dev / "product_name").read_text().strip() or f"AMD Radeon ({arch})"
+        except OSError:
+            name = f"AMD Radeon ({arch})"
+        ok = arch in KFD_SUPPORTED
+        out.append({"index": len(out), "name": name, "vram_gb": round(vram, 1), "arch": arch, "driver": "amdgpu", "vendor": "amd",
+                    "usable": ok, "problem": None if ok else f"not supported - Strata's AMD backend does not list {arch}"})
+    return out
 
 
 def rocm_smi_gpus() -> list:
@@ -1735,7 +1965,7 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
              "family": {"type": "string", "enum": list(families),
                         "description": "qwen = Qwen3.8-Flash-Next (the original), swift = Swift 1.5 (thinks "
                                        "shorter), coder = the Coder (half the experts, ~32 GB RAM, for code), "
-                                       "unsloth = Unsloth's 4- to 8-bit files (UD-IQ4_XS, UD-Q4_K_XL, UD-Q5_K_XL, "
+                                       "unsloth = Unsloth's 1- to 8-bit files (UD-IQ4_XS, UD-Q4_K_XL, UD-Q5_K_XL, "
                                        "UD-Q6_K_XL, Q8_0): every expert in RAM where they fit, else part of them read "
                                        "from the SSD"},
              "model": {"type": "string", "enum": list(models),
@@ -1755,8 +1985,9 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                      "description": "one GPU, as nvidia-smi numbers them (default: the one with the most VRAM)"},
              "gpus": {"type": "string", "pattern": GPUS_PATTERN, "maxLength": 40,
                       "description": "several GPUs sharing the model: '0,2' or 'all' (experimental)"},
-             "backend": {"type": "string", "enum": ["auto", "cuda", "hip"],
-                         "description": "auto (default), cuda = NVIDIA, hip = AMD on Linux (experimental)"},
+             "backend": {"type": "string", "enum": ["auto", "cuda", "hip", "sycl"],
+                         "description": "auto (default), cuda = NVIDIA, hip = AMD on Linux (experimental), sycl = Intel Arc on Linux "
+                                        "(experimental; the model's files must already be on this computer: gguf_dir)"},
              "low_ram": {"type": "string", "enum": ["auto", "on", "off", "resident", "mmap"],
                          "description": "setup's low-RAM mode (default auto)"},
              "port": {**port, "description": "the port the model will listen on (default 8080)"},
@@ -1765,6 +1996,9 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                          "Strata folder). Only the current data folder, a folder inside the Strata "
                                          "folder, or a new absolute path whose last folder is named Strata... "
                                          "(e.g. D:\\Strata-data) outside system folders"},
+             "drafter": {"type": "string", "enum": ["mtp", "dflash2"],
+                         "description": "which drafter this model will use: dflash2 downloads only DFlash2's drafter (a separate step), not the MTP draft layer's ~5 GB; "
+                                        "mtp (the default) downloads the draft layer"},
              "gguf_dir": {"type": "string", "maxLength": 260,
                           "description": "a folder that already holds this model's GGUF files under their original names: setup "
                                          "checks them (size and SHA-256) and does not download them again"},
@@ -1828,7 +2062,8 @@ class Tools:
         self.s = strata
 
     def defs(self) -> list:
-        return tool_defs(*self.s.tables()[:3])
+        models, families, contexts = self.s.tables()[:3]
+        return tool_defs({**{name: {} for name in self.s.own_size_names() if name not in models}, **models}, families, contexts)
 
     def call(self, name: str, args) -> dict:
         defs = {d["name"]: d for d in self.defs()}
@@ -1860,6 +2095,11 @@ class Tools:
         elif tracked and tracked.get("ended"):
             out["last_start"] = {"model": tracked.get("model"), "ended": True,
                                  "last_log_lines": read_tail(Path(tracked.get("log", "")), 6)}
+        host = next((x for x in running if s.host and x["port"] == s.host["port"]), None)
+        if host:
+            host["this_chat"] = True
+            host["started_by"] = HOST_WORDS
+            running.sort(key=lambda x: not x.get("this_chat"))
         for x in running:
             x.setdefault("started_by", "outside this MCP server (its own window, a start script or a service)")
         out["running"] = running
@@ -1870,6 +2110,9 @@ class Tools:
             r = running[0]
             summary = (f"Strata is running on port {r['port']}: {r.get('model')}"
                        + (", busy" if r.get("busy") else ", idle")
+                       + (" (this is the server and the model this chat runs on"
+                          + ("; the request that keeps it busy can be this chat's own turn)" if r.get("busy") else ")")
+                          if r.get("this_chat") else "")
                        + ("" if r.get("loaded", True) else " (model unloaded; the next request loads it)"))
         elif "loading" in out:
             summary = f"Strata is loading {out['loading']['model']} (port {out['loading']['port']})"
@@ -1970,7 +2213,7 @@ class Tools:
                                 "model files")
             if not p.parent.is_dir():
                 raise ToolError(f"data_dir {raw!r}: its parent folder {p.parent} does not exist")
-            if any(n == f or is_inside(n, f) for f in system_folders()):
+            if not mounted_drive(n) and any(n == f or is_inside(n, f) for f in system_folders()):
                 raise ToolError(f"data_dir {raw!r} is inside a system folder")
             if p.exists() and not p.is_dir():
                 raise ToolError(f"data_dir {raw!r} is a file")
@@ -1978,7 +2221,7 @@ class Tools:
 
     def strata_install(self, family=None, model=None, context=None, vision=None, kv=None, gpu=None, gpus=None,
                        backend=None, low_ram=None, port=None, data_dir=None, confirm=False, cancel=False,
-                       gguf_dir=None) -> dict:
+                       gguf_dir=None, drafter=None) -> dict:
         s = self.s
         with s.lock:
             job = s.install_job()
@@ -2011,7 +2254,7 @@ class Tools:
                                 "fix the problem above and call strata_install again with confirm=true (finished "
                                 "steps are skipped)"}
             plan, args = self.install_plan(family, model, context, vision, kv, gpu, gpus, backend, low_ram, port,
-                                           data_dir, gguf_dir)
+                                           data_dir, gguf_dir, drafter)
             tracked = s.tracked_server()
             if tracked and not tracked.get("ended"):
                 raise ToolError("Strata is running (started by strata_start): stop it first with strata_stop - setup "
@@ -2025,7 +2268,7 @@ class Tools:
                 raise ToolError(plan["disk_short"])
             return self.launch_install(plan, args)
 
-    def install_plan(self, family, model, context, vision, kv, gpu, gpus, backend, low_ram, port, data_dir, gguf_dir=None):
+    def install_plan(self, family, model, context, vision, kv, gpu, gpus, backend, low_ram, port, data_dir, gguf_dir=None, drafter=None):
         s = self.s
         models, families, contexts, _src = s.tables()
         if gpu is not None and gpus is not None:
@@ -2062,10 +2305,10 @@ class Tools:
         if context is None:
             usable = s.engine_gpus(hw)
             vram = max((g["vram_gb"] for g in usable), default=12)
-            context = 32768 if vram < 14 else 65536 if vram < 20 else 131072
-            if md.get("budget") and (not hasattr(s.setup_module(), "unsloth_budget") or
-                                                s.setup_module().unsloth_budget(model, hw.get("ram_gb") or 0.0)):
-                context = 8192 if vram < 14 else 32768
+            context = 131072                          # 128K on every card (owner, 2026-11-01; strata_control/default_context.py)
+            own = (getattr(s.setup_module(), "OWN_PATH_FAMILIES", None) or {}).get(family)
+            if own:                                   # Qwen3.6: the largest size that fits the card when 128K does not (#5715, setup's own rule)
+                context = s.setup_module().own_path_context(own, max((g["vram_gb"] for g in usable), default=0.0), model)
         if vision in ("yes", "gpu", "cpu") and md.get("vision", families[family].get("vision")) is False:
             raise ToolError(f"images are not available with {families[family]['title']} {model} yet: use vision=no")
         if vision is None:
@@ -2076,8 +2319,21 @@ class Tools:
         target = self.check_data_dir(data_dir) if data_dir else s.data_dir()
         tag = (families[family].get("tag", "") + model)
         have_dir = target / "models" / tag
+        # An Intel Arc (Linux, the SYCL engine): setup.py's `--backend sycl` in its CONTROL mode prepares the model's files and writes the run config, as the
+        # Terminal does (strata_control/intel_app.py); it downloads nothing. NVIDIA and AMD never come here.
+        arc = backend == "sycl" or (backend in (None, "auto") and any(g.get("vendor") == "intel" for g in hw.get("gpus", [])))
+        if arc:
+            from strata_control import intel_app
+            if mac or not intel_app.supported_here() or not any(g.get("vendor") == "intel" for g in hw.get("gpus", [])):
+                raise ToolError("no Intel Arc card Strata can use was found in this computer (the Intel Arc engine runs on Linux)")
+            if not intel_app.can_set_up(family, families[family]):
+                raise ToolError(f"{families[family]['title']} {model} can't be set up for an Intel Arc card yet; "
+                                "the Qwen3.8-Flash-Next, Swift, Coder, Gyro and Unsloth sizes can")
+            backend, vision = "sycl", "no"                  # pictures stay off on an Arc (strata_cli/launch/adopt.py)
+            if not gguf_dir and not intel_app.model_files_in(have_dir, family, families[family]):
+                raise ToolError(intel_app.NO_DOWNLOAD)
         partly = (have_dir.is_dir() and any(have_dir.glob("*.gguf*"))) or bool(gguf_dir)   # a local folder: nothing to download
-        need = (8 if partly else md["download_gb"] + 8) + (1 if vision in ("yes", "gpu", "cpu") else 0)
+        need = (8 if partly else md["download_gb"] + 8) + (1 if vision in ("yes", "gpu", "cpu") else 0)             + (s.mac().repacked_gb(model) if mac and s.mac() else 0)       # a Mac repacks Unsloth's shards into one file for the GPU (mac_fit.repacked_gb)
         free = s.disk_free(target)
         short = None
         if free is not None and free < need:
@@ -2099,13 +2355,15 @@ class Tools:
             if not local.is_absolute() or not local.is_dir() or ".." in local.parts:
                 raise ToolError("gguf_dir must be an existing absolute folder")
             args += ["--gguf-dir", str(local)]
-        if backend in ("cuda", "hip"):
+        if backend in ("cuda", "hip", "sycl"):
             args += ["--backend", backend]
+        if drafter in ("mtp", "dflash2") and backend != "sycl":      # an Arc runs with no drafter the installer sets up (the Terminal's adopted config has none either)
+            args += ["--drafter", drafter]
         fit = None
         ram = hw.get("ram_gb")
         if ram is not None:
-            need_ram = md["ram_gb"]
-            fit = "fits" if ram >= need_ram else f"needs ~{need_ram} GB of RAM, this PC has {ram:.0f} GB"
+            from strata_control import fit_label
+            fit = fit_label.label(fit_label.files_gb(family, model, md), ram, fit_label.card_room_gb(s.engine_gpus(hw)))
         installed = (s.root / f"strata-{tag.lower()}.json").exists()
         plan = {"title": f"{families[family]['title']} {model}", "family": family, "model": model,
                 "context": context, "images": vision or "no", "download_gb": md["download_gb"],
@@ -2274,6 +2532,10 @@ class Tools:
             for p in s.ports(port):
                 info = s.probe(p, deep=False)
                 if info and not info.get("other"):
+                    if s.host and p == s.host["port"]:   # never from inside its own chat, with force or without
+                        raise ToolError(f"port {p} is the Strata server this chat runs on: stopping it here would end this "
+                                        "answer. The person stops it with the Unload button on the page, or with "
+                                        "`strata launch --stop` in a terminal")
                     key = s.api_key_for(p)
                     st, body = http_json(f"http://127.0.0.1:{p}/unload", "POST", api_key=key, timeout=120)
                     r = body.get("status") if isinstance(body, dict) else None
@@ -2292,20 +2554,22 @@ class Tools:
     # ---- strata_logs
     def strata_logs(self, source=None, model=None, lines=80) -> dict:
         s = self.s
+        hosted = bool(s.host and s.host["config"] and not s.tracked_server())
         if source is None:
             job = s.install_job()
-            source = "setup" if job and job["running"] else "server"
+            source = "setup" if job and job["running"] else "engine" if hosted else "server"
         if source == "setup":
             path = s.state_dir / "setup.log"
         elif source == "server":
             path = s.state_dir / "server.log"
         else:
-            cfg = s.find_config(model or (s.state("server").get("model")))
+            own = hosted and not model                   # the engine log of the server this chat runs on
+            cfg = s.host["config"] if own else s.find_config(model or (s.state("server").get("model")))
             raw = s.read_config(cfg).get("log")
             if not raw:
                 raise ToolError(f"{cfg.name} names no engine log")
             path = Path(raw)
-            if not s.allowed(path):
+            if not own and not s.allowed(path):
                 raise ToolError(f"{cfg.name}'s log {raw} is outside the Strata folder and its data folder: not shown")
         if not path.exists():
             return {"summary": f"no {source} log yet ({path})", "log": str(path), "lines": []}
@@ -2327,6 +2591,12 @@ class Tools:
         key = s.api_key_for(p)
         st, stat = http_json(f"http://127.0.0.1:{p}/status", api_key=key, timeout=3)
         if st == 200 and isinstance(stat, dict) and (stat.get("busy") or stat.get("queued")):
+            if s.host and p == s.host["port"]:           # the running request is this chat's own turn: no second request can be timed
+                last = (s.probe(p) or {}).get("last_request")
+                return {"summary": "this chat runs on this server, so a separate speed test cannot run while it answers; "
+                                   + ("the numbers of its last finished request are given instead" if last else
+                                      "it has no finished request to report yet"),
+                        "port": p, "model": target.get("model"), "this_chat": True, "last_request": last}
             raise ToolError("Strata is busy with a request; run the speed test when it is idle")
         body = {"model": target.get("model") or "strata", "max_tokens": max_tokens, "temperature": 0,
                 "reasoning_effort": "none", "stream": False,
@@ -2417,6 +2687,16 @@ class McpServer:
         self.write_lock = threading.Lock()
         self.protocol = PROTOCOL
 
+    def host_words(self) -> str:
+        """What an assistant is told when a Strata server started these tools for its own chat: which server is its own."""
+        host = self.strata.host
+        if not host:
+            return ""
+        return (f" These tools were started by the Strata server on port {host['port']} for its own chat. If you are "
+                "the assistant in that chat, that server is the model you are: strata_status marks it "
+                "\"this_chat\", its numbers (speed of the last request, memory, context) are your own, and "
+                "strata_logs shows its engine log. It was not started by these tools, so strata_stop refuses to stop it.")
+
     def send(self, msg: dict) -> None:
         data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
         with self.write_lock:
@@ -2448,7 +2728,7 @@ class McpServer:
             return self.result(rid, {"protocolVersion": self.protocol,
                                      "capabilities": {"tools": {"listChanged": False}},
                                      "serverInfo": {"name": "strata", "title": "Strata", "version": VERSION},
-                                     "instructions": INSTRUCTIONS})
+                                     "instructions": INSTRUCTIONS + self.host_words()})
         if method == "ping":
             return self.result(rid, {})
         if method == "tools/list":

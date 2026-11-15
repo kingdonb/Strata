@@ -5,13 +5,13 @@
 #
 # Build it with docker/build.sh (it assembles the build context: the Terminal sources and the package folder):
 #
-#     docker/build.sh --flavor cuda --engine /path/to/0.2.0-linux-x86_64-cuda-cuda13 --tag strata:0.2.0-cuda13
+#     docker/build.sh --flavor cuda --engine /path/to/0.1.45.3-linux-x86_64-cuda-cuda13 --tag strata:0.2.7-cuda13
 #
 # Plain `docker build` also works when the context folder has this layout (build.sh makes it):
 #     terminal-src/   the files package_terminal.py needs (packaging/, strata_cli/, strata_control/, serve/, tools/, data/, ...)
 #     engine/         one folder per engine package, exactly as `package_engine.py` wrote it (engine-component.json inside)
 #     docker/         entrypoint.sh, strata-wrapper.sh, healthcheck.sh
-#   docker build --build-arg FLAVOR=cuda -t strata:0.2.0-cuda13 -f Dockerfile <context>
+#   docker build --build-arg FLAVOR=cuda -t strata:0.2.7-cuda13 -f Dockerfile <context>
 #
 # FLAVOR picks the small set of system libraries the runtime image adds and its base:
 #   cuda  NVIDIA: the engine package carries cudart/cublas; the driver's libcuda comes from nvidia-container-toolkit
@@ -31,20 +31,17 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY terminal-src/ /src/
+# the sources have no .git here (and the image has no git): build.sh passes the commit they are from, package_terminal.py writes it to COMMIT
+ARG STRATA_COMMIT=
+ENV STRATA_BUILD_COMMIT=${STRATA_COMMIT}
 RUN python3 /src/packaging/package_terminal.py --out /out --cache /cache \
  && mkdir -p /opt/strata \
  && tar -xzf /out/strata-terminal-*-linux-x86_64.tar.gz -C /opt/strata \
  && mv /opt/strata/strata-terminal-* /opt/strata/terminal \
  && /opt/strata/terminal/bin/strata --version
-# llama.cpp at the commit setup.py pins: fetched here, so the first start does not depend on GitHub. Only gguf-py (the model preparation
-# tools) and the file setup.py looks for (ggml/CMakeLists.txt) are kept: 170 MB become a few
-RUN cd /opt/strata/terminal && STRATA_CONTROL_INSTALL=1 STRATA_INSTALL_DIR=/opt/strata/seed PYTHONNOUSERSITE=1 \
-      /opt/strata/terminal/python/bin/python3 -c "import setup; print(setup.get_llama_cpp())" \
- && rm -rf /opt/strata/seed/third_party/*.zip* \
- && cd /opt/strata/seed/third_party/llama.cpp \
- && find . -mindepth 1 -maxdepth 1 ! -name gguf-py ! -name ggml ! -name 'LICENSE*' -exec rm -rf {} + \
- && find ggml -mindepth 1 -depth ! -type d ! -name CMakeLists.txt -delete && find ggml -mindepth 1 -type d -empty -delete \
- && du -sh /opt/strata/seed
+# gguf-py (the model preparation tools) is part of the Terminal archive (third_party/strata-gguf-py), so the first start fetches nothing from
+# GitHub and the image needs no llama.cpp: check that it is there
+RUN test -f /opt/strata/terminal/third_party/strata-gguf-py/gguf/__init__.py
 
 # ---- 2. the engine package, checked before it is allowed into the image: every file's hash, and every library it imports is
 #         bundled or belongs to the OS / GPU driver (packaging/binary_deps.py, the check the packager runs)
@@ -79,7 +76,6 @@ RUN set -e; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
 COPY --from=terminal /opt/strata/terminal /opt/strata/terminal
-COPY --from=terminal /opt/strata/seed /opt/strata/seed
 COPY --from=verify /engine/ /opt/strata/components/engine/
 COPY docker/entrypoint.sh docker/healthcheck.sh /opt/strata/
 COPY docker/strata-wrapper.sh /usr/local/bin/strata
@@ -111,6 +107,9 @@ VOLUME ["/data"]
 EXPOSE 8080
 
 LABEL org.opencontainers.image.title="Strata" \
+      org.opencontainers.image.source="https://github.com/Niko1221/Strata" \
+      org.opencontainers.image.url="https://github.com/Niko1221/Strata" \
+      org.opencontainers.image.documentation="https://github.com/Niko1221/Strata/blob/main/docs/DOCKER.md" \
       org.opencontainers.image.description="Strata local LLM server (Terminal + engine package), flavor ${FLAVOR}" \
       org.opencontainers.image.version="${STRATA_VERSION}" \
       org.opencontainers.image.licenses="see LICENSE" \

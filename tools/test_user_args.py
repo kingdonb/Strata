@@ -36,7 +36,6 @@ class Rule(unittest.TestCase):
         self.assertEqual(user_args.merge(["--a", "1", "--b", "2", "--a", "3"], ["--a", "9", "--z"]), ["--b", "2", "--a", "9", "--z"])
         self.assertEqual(user_args.merge(["--a", "1"], []), ["--a", "1"])
 
-    @unittest.skip("fork: setup.py is not carried in this sync (skip-listed); this exercises setup.py's write path")
     def test_capture_tells_hand_edits_from_what_was_written(self):
         written = ["--max-context", "32768", "--vram-reserve-mib", "700", "--spec", "4"]
         cfg = {"args": written + CVEC, "args_written": written}
@@ -54,7 +53,6 @@ class Rule(unittest.TestCase):
         self.assertEqual(user_args.capture({"args": CVEC, "user_args": ["--a", "1"]}), ["--a", "1"])
 
 
-@unittest.skip("fork: setup.py is not carried in this sync (skip-listed); these exercise setup.py's rerun behavior")
 class SetupRerun(unittest.TestCase):
     """The app's Load runs setup again whenever the context, KV type or pictures differ from the installed ones."""
 

@@ -516,7 +516,10 @@ Error launch_host_func(Stream st, HostFn fn, void* arg) {
 }
 
 Error event_create(Event* e, unsigned) { *e = new EventImpl; return kSuccess; }
-Error event_destroy(Event e) { delete e; return kSuccess; }
+Error event_destroy(Event e) {
+    delete e;
+    return kSuccess;
+}
 Error event_record(Event e, Stream st) {
     StreamImpl* s = S(st);
     if (s->rec) {

@@ -369,6 +369,38 @@ void test_resident_exchange() {
     require(offsets == before, "exchanging back did not restore the plan");
 }
 
+// #4051: the wait for the RAM an arena needs (an engine still exiting gives it back a few seconds late)
+void test_wait_for_ram() {
+    using namespace strata::core::detail;
+    constexpr uint64_t GiB = 1ull << 30;
+    double waited = -1.0;
+    uint64_t avail = 0;
+    int slept = 0, noted = 0;
+    const auto sleeper = [&](double) { ++slept; };
+    const auto note = [&](double, uint64_t) { ++noted; };
+    // enough at once: no wait, no sleep, no note
+    require(wait_for_ram(40 * GiB, 20.0, 0.25, 5.0, [](uint64_t& a) { a = 50 * GiB; return true; }, sleeper, note, waited, avail) &&
+                waited == 0.0 && slept == 0 && noted == 0 && avail == 50 * GiB, "RAM that was there was waited for");
+    // 10 GiB free for a 40 GiB arena, the exiting engine gives its 50 GiB back after 3 s (12 steps of 0.25 s)
+    int reads = 0;
+    slept = noted = 0;
+    require(wait_for_ram(40 * GiB, 20.0, 0.25, 5.0, [&](uint64_t& a) { a = ++reads > 12 ? 60 * GiB : 10 * GiB; return true; },
+                         sleeper, note, waited, avail) && waited == 3.0 && slept == 12 && noted == 1 && avail == 60 * GiB,
+            "RAM that came back after 3 s was not waited for");
+    // it never comes: the wait ends at the limit and says so (the load then goes on and warns)
+    slept = noted = 0;
+    require(!wait_for_ram(40 * GiB, 20.0, 0.25, 5.0, [](uint64_t& a) { a = 10 * GiB; return true; }, sleeper, note, waited, avail) &&
+                waited == 20.0 && slept == 80 && noted == 4 && avail == 10 * GiB, "the wait did not end at its limit");
+    // no wait asked for: one reading
+    slept = 0;
+    require(!wait_for_ram(40 * GiB, 0.0, 0.25, 5.0, [](uint64_t& a) { a = 10 * GiB; return true; }, sleeper, note, waited, avail) &&
+                waited == 0.0 && slept == 0, "a zero wait slept");
+    // the RAM cannot be read: the wait ends at once
+    slept = 0;
+    require(!wait_for_ram(40 * GiB, 20.0, 0.25, 5.0, [](uint64_t&) { return false; }, sleeper, note, waited, avail) && slept == 0,
+            "an unreadable RAM was waited for");
+}
+
 // #1250: when the page-locked complement is registered in steps, and what a meminfo reading says
 void test_pin_pacing() {
     using namespace strata::core::detail;
@@ -397,6 +429,51 @@ void test_pin_pacing() {
             page_cache_hint(info).find("STRATA_DROP_CACHE_ON_EXIT") != std::string::npos &&
             page_cache_hint(info).find("52.0 GiB") != std::string::npos, "the cache hint is incomplete");
     require(page_cache_hint("MemFree: 100 kB\nCached: 1000 kB\n").empty(), "a small cache was reported");
+}
+
+// NUMA split: per-slice byte ranges of one complement slot (page rule: a page holding a slice-0 byte is slice 0's)
+void test_numa_slice_ranges() {
+    using strata::core::detail::numa_slice_ranges;
+    constexpr uint64_t P = 4096;
+    const uint64_t roles[3] = {870400, 870400, 921600};
+    const uint64_t slot_bytes = roles[0] + roles[1] + roles[2];
+    const uint64_t offs[3] = {0, 2662400ull * 7, P * 3 + 100};
+    for (uint64_t off : offs) {
+        const auto r0 = numa_slice_ranges(off, roles, 0), r1 = numa_slice_ranges(off, roles, 1);
+        for (int r = 0; r < 3; ++r) {
+            require(r0[r].first % P == 0 && r0[r].second % P == 0 && r1[r].first % P == 0 && r1[r].second % P == 0,
+                    "a slice range boundary was not page aligned");
+            require(r0[r].first <= r0[r].second && r1[r].first <= r1[r].second, "a slice range was inverted");
+        }
+        // every page fully inside the slot is in exactly one of the six ranges (and none is in two)
+        for (uint64_t pg = (off + P - 1) / P * P; pg + P <= off + slot_bytes; pg += P) {
+            int hits = 0;
+            for (int r = 0; r < 3; ++r) {
+                hits += (pg >= r0[r].first && pg + P <= r0[r].second);
+                hits += (pg >= r1[r].first && pg + P <= r1[r].second);
+            }
+            require(hits == 1, "a page was in " + std::to_string(hits) + " slice ranges, not exactly one");
+        }
+    }
+    // (b) no slice-1 range intersects a slice-0 range, within a slot and across two consecutive slots
+    const auto meet = [](const std::pair<uint64_t, uint64_t>& x, const std::pair<uint64_t, uint64_t>& y) {
+        return x.first < y.second && y.first < x.second;
+    };
+    for (uint64_t off : offs) {
+        const auto s0 = numa_slice_ranges(off, roles, 0), s1 = numa_slice_ranges(off, roles, 1);
+        const auto n0 = numa_slice_ranges(off + slot_bytes, roles, 0), n1 = numa_slice_ranges(off + slot_bytes, roles, 1);
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) {
+                require(!meet(s0[i], s1[j]), "a slice-1 range intersects a slice-0 range of the same slot");
+                require(!meet(s1[i], n0[j]) && !meet(n1[i], s0[j]),
+                        "a slice-1 range intersects a slice-0 range of the neighbouring slot");
+            }
+    }
+    const auto a = numa_slice_ranges(0, roles, 0), b = numa_slice_ranges(0, roles, 1);
+    require(a[0].first <= 435199 && 435199 < a[0].second, "last slice-0 gate byte not in slice 0's gate range");
+    require(b[0].first <= 435200 + P && 435200 + P < b[0].second, "a slice-1 gate byte not in slice 1's gate range");
+    require(a[1].first <= 870400 && 870400 < a[1].second, "the gate/up boundary page was not slice 0's up range");
+    require(!(b[0].first <= 870400 && 870400 < b[0].second), "the gate/up boundary page was in slice 1's gate range");
 }
 
 void test_resident_memory_budget() {
@@ -586,11 +663,26 @@ void test_host_memory() {
     put("fs/box/memory.current", std::to_string(16 * GiB) + "\n");
     put("fs/box/memory.stat", "inactive_file " + std::to_string(4 * GiB) + "\nfile_dirty 0\nfile_writeback 0\n");
     require(probe("0::/box\n") && m.available == 36 * GiB - 48 * GiB / 64 && m.cgroup_limit == 48 * GiB, "v2 limit");
-    // 149: with "file" (active + inactive cache) the active part counts too: 12 GiB of cache, 4 GiB anonymous
-    put("fs/box/memory.stat", "file " + std::to_string(12 * GiB) + "\ninactive_file " + std::to_string(4 * GiB) +
-                              "\nfile_dirty 0\nfile_writeback 0\n");
+    // 149: the active page cache counts too: 12 GiB of cache (8 active, 4 inactive), 4 GiB anonymous
+    put("fs/box/memory.stat", "file " + std::to_string(12 * GiB) + "\nactive_file " + std::to_string(8 * GiB) +
+                              "\ninactive_file " + std::to_string(4 * GiB) + "\nfile_dirty 0\nfile_writeback 0\n");
     require(probe("0::/box\n") && m.available == 44 * GiB - 48 * GiB / 64 && m.cgroup_limit == 48 * GiB,
             "v2 limit, the active page cache credited");
+    // 3 GiB of shmem (a memfd, the KV pool) is in "file" but on the anon lists: it cannot be reclaimed without swap, and an
+    // allocation up to a figure that counted it was OOM-killed in a 24 GiB scope.  Under a container's limit (below
+    // MemTotal) it is not credited; nor are locked pages (the unevictable list)
+    put("fs/box/memory.stat", "file " + std::to_string(15 * GiB) + "\nshmem " + std::to_string(3 * GiB) + "\nactive_file " +
+                              std::to_string(8 * GiB) + "\ninactive_file " + std::to_string(4 * GiB) + "\nunevictable " +
+                              std::to_string(2 * GiB) + "\nfile_dirty 0\nfile_writeback 0\n");
+    put("fs/box/memory.current", std::to_string(19 * GiB) + "\n");
+    require(probe("0::/box\n") && m.available == 41 * GiB - 48 * GiB / 64, "container: shmem and locked pages are not credited");
+    set_env("STRATA_MEM_CREDIT_INACTIVE", "1");
+    require(probe("0::/box\n") && m.available == 44 * GiB - 48 * GiB / 64, "STRATA_MEM_CREDIT_INACTIVE=1: the earlier file credit");
+    set_env("STRATA_MEM_CREDIT_INACTIVE", nullptr);
+    put("meminfo", "MemTotal: 41943040 kB\nMemAvailable: 104857600 kB\n");   // 40 GiB: the 48 GiB limit is not a container's
+    require(probe("0::/box\n") && m.available == 44 * GiB - 48 * GiB / 64, "a limit above MemTotal: the earlier file credit");
+    put("meminfo", "MemTotal: 134217728 kB\nMemAvailable: 104857600 kB\n");
+    put("fs/box/memory.current", std::to_string(16 * GiB) + "\n");
     put("fs/box/memory.stat", "inactive_file " + std::to_string(4 * GiB) + "\nfile_dirty 0\nfile_writeback 0\n");
     put("fs/box/memory.max", "max\n");
     require(probe("0::/box\n") && m.available == 100 * GiB && m.cgroup_limit == ~0ull, "v2 max");
@@ -934,6 +1026,28 @@ void test_replace_resident(bool pin) {
     require(src.commit_exchanges() == 1 && src.has_resident(0, 3) && holds(3) && !src.has_resident(0, 1),
             "exchange after replace wrong");
     require(src.ram_adapts() == 2, "accounting wrong");
+    // a staged incoming blob: RAM {2,3}, VRAM {0,1}, 4 on the file tier
+    require(!src.replace_resident_staged(0, 4, 3) && src.has_resident(0, 3) && src.ram_adapts() == 2,
+            "an unstaged expert moved");
+    std::string why;
+    set_env("STRATA_UNBUFFERED_LOAD", "1");
+    const bool unbuffered = src.set_unbuffered(0, why);
+    set_env("STRATA_UNBUFFERED_LOAD", nullptr);
+    if (unbuffered && src.stages_blobs()) {
+        require(!src.replace_resident_staged(0, 4, 3) && holds(3), "moved before any demand read");
+        require(!src.has_resident(0, 4) && holds(4), "demand read wrong");   // leaves 4 in a stage buffer
+        require(!src.replace_resident_staged(0, 4, 0) && !src.replace_resident_staged(0, 2, 3),
+                "invalid staged pair accepted");
+        require(src.replace_resident_staged(0, 4, 3) && src.has_resident(0, 4) && !src.has_resident(0, 3),
+                "staged replacement residency wrong");
+        require(src.resident_blob(0, 4) != nullptr && !std::memcmp(src.resident_blob(0, 4), truth[4].data(), bytes),
+                "staged replacement bytes wrong");
+        require(holds(2) && holds(3) && src.ram_adapts() == 3 && src.ram_staged() == 1,
+                "staged replacement changed another expert");
+        std::cout << "replace_resident_staged: pinned=" << pin << " exact_bytes=PASS\n";
+    } else {
+        std::cout << "replace_resident_staged: pinned=" << pin << " unbuffered unavailable here (" << why << "), positive case SKIPPED\n";
+    }
     std::cout << "replace_resident: pinned=" << pin << " exact_bytes=PASS\n";
 }
 
@@ -947,6 +1061,8 @@ int main(int argc, char** argv) {
         test_resident_exchange();
         test_resident_memory_budget();
         test_pin_pacing();
+        test_wait_for_ram();
+        test_numa_slice_ranges();
         test_cgroup_memory_budget();
         test_host_memory();
         test_canonical_layout();

@@ -12,6 +12,7 @@
 #   ninja -C build-metal
 cmake_minimum_required(VERSION 3.24)
 project(strata_metal LANGUAGES C CXX OBJCXX)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/strata_geometry.cmake)   # -DSTRATA_GEOMETRY=<name> (default flash_next, no flag added)
 
 if(NOT APPLE)
   message(FATAL_ERROR "metal/ builds on macOS only")
@@ -27,11 +28,11 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O2")
 set(CMAKE_OBJCXX_FLAGS_RELEASE "-O2")
 
 get_filename_component(STRATA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
-set(GGML_COMMON "${STRATA_ROOT}/third_party/ggml/ggml-common.h")
+set(GGML_COMMON "${STRATA_ROOT}/third_party/strata-ggml/strata-quant-common.h")   # the quant header's text (third_party/ggml/ggml-common.h forwards to it)
 
 # ---- the kernel tree (mac-kern) ------------------------------------------------------------------------------------
 add_library(mtl_rt STATIC src/mtl_rt.mm src/ref_quant.cpp src/gguf_lite.cpp)
-target_include_directories(mtl_rt PUBLIC src ${STRATA_ROOT}/third_party/ggml)
+target_include_directories(mtl_rt PUBLIC src ${STRATA_ROOT}/third_party/ggml ${STRATA_ROOT}/include)
 target_compile_options(mtl_rt PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 target_compile_definitions(mtl_rt PRIVATE
   STRATA_GGML_COMMON_DEFAULT="${GGML_COMMON}"
@@ -67,25 +68,31 @@ target_link_libraries(runtime_hello PRIVATE strata_core_metal)
 enable_testing()
 add_test(NAME runtime_hello COMMAND runtime_hello)
 
-# The engine: ggml (the native expert formats' type traits and ggml-cpu) from a llama.cpp checkout at the commit the
-# PC build pins (CMakeLists.txt: 3cf03257).
+# The engine: ggml (the native expert formats' type traits and ggml-cpu) from the tree vendored in third_party/strata-ggml (frozen at the
+# commit the PC build pins, 3cf03257).  -DSTRATA_GGML_DIR=<llama.cpp checkout> builds from that checkout instead (an override kept for two releases).
 option(STRATA_METAL_ENGINE "Build the engine (strata) for Metal" ON)
-set(STRATA_GGML_DIR "" CACHE PATH "llama.cpp checkout at the pinned commit")
+set(STRATA_GGML_DIR "" CACHE PATH "llama.cpp checkout to take ggml from instead of the vendored third_party/strata-ggml (empty: the vendored tree)")
 if(NOT STRATA_METAL_ENGINE)
   return()
 endif()
-if(NOT EXISTS "${STRATA_GGML_DIR}/ggml/CMakeLists.txt")
-  message(FATAL_ERROR "STRATA_GGML_DIR='${STRATA_GGML_DIR}' is not a llama.cpp checkout")
+include(${STRATA_ROOT}/cmake/strata_ggml.cmake)        # -DSTRATA_GGML_DIR, or the vendored third_party/strata-ggml
+include(${STRATA_ROOT}/cmake/backends/metal.cmake)
+strata_ggml_resolve("${STRATA_ROOT}")
+if(NOT EXISTS "${_strata_ggml_root}/ggml/CMakeLists.txt")
+  message(FATAL_ERROR "ggml sources not found in '${_strata_ggml_root}' (third_party/strata-ggml, or the -DSTRATA_GGML_DIR checkout)")
 endif()
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(GGML_STATIC ON CACHE BOOL "" FORCE)
-set(GGML_METAL OFF CACHE BOOL "" FORCE)
-set(GGML_BLAS OFF CACHE BOOL "" FORCE)
-set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
-set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
-set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(${STRATA_GGML_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
+strata_metal_ggml()
+# OWN-2N: the CPU expert rows and the --mtp-q4 requantizer on the Strata quant layer (src/quant, its Arm NEON tier, no ggml-cpu
+# call from the pool) instead of ggml-cpu's type traits.  OFF by default on Metal until the layer's oracle (tests/quant/run_oracle.sh, Apple Clang) and unit tests
+# have passed on the Mac; -DSTRATA_OWN_CPU_QUANT=ON builds the engine on the layer.
+option(STRATA_OWN_CPU_QUANT "CPU expert pool and --mtp-q4 on the Strata quant layer instead of ggml-cpu's type traits" OFF)
+option(STRATA_BUILD_TESTS "Build the quant layer's self-test and ggml oracle test (needs STRATA_OWN_CPU_QUANT)" OFF)
+if(STRATA_OWN_CPU_QUANT)
+  set(STRATA_QUANT_ROOT ${STRATA_ROOT})
+  set(STRATA_CPU_X86 OFF)
+  include(${STRATA_ROOT}/cmake/backends/quant.cmake)
+  strata_quant_layer()
+endif()
 
 set(S ${STRATA_ROOT}/src)
 set(STRATA_METAL_HOST_SOURCES
@@ -94,12 +101,13 @@ set(STRATA_METAL_HOST_SOURCES
   ${S}/core/native_head.cpp ${S}/core/native_dense.cpp ${S}/core/verify.cpp ${S}/core/mtp.cpp
   ${S}/core/conversation_snapshot.cpp ${S}/core/conversation_state.cpp ${S}/core/conversation_memory.cpp
   ${S}/core/peer_experts.cpp ${S}/core/arch_defaults.cpp ${S}/core/vmm.cpp ${S}/core/conversation_file.cpp
-  ${S}/kernels/ngram.cpp ${S}/ngram/ple_reader.cpp ${S}/platform/direct_file.cpp
+  ${S}/kernels/ngram.cpp ${S}/ngram/ple_reader.cpp ${S}/platform/direct_file.cpp ${S}/platform/io_priority.cpp
   ${S}/prefill/prefill.cpp
   ${S}/spec/suffix_drafter.cpp ${S}/spec/controller.cpp ${S}/spec/draft_policy.cpp ${S}/spec/draft_source.cpp
   ${S}/kernels/cpu/pool.cpp ${S}/kernels/cpu/expert_layout.cpp ${S}/kernels/cpu/native_expert.cpp
   ${S}/kernels/cpu/hadamard.cpp ${S}/kernels/cpu/tq_cpu.cpp)   # Gyro: the Hadamard rotation, the scalar trellis rows
-set_source_files_properties(${S}/core/device.cu ${S}/core/pinned.cu PROPERTIES LANGUAGE CXX)
+set_source_files_properties(${S}/core/device.cu ${S}/core/pinned.cu
+                            PROPERTIES LANGUAGE CXX)
 
 # The kernel library: Metal implementations (src/engine/*.cpp) and, for every entry point not ported yet, a stub
 # that stops the engine with the entry point's name (src/engine/stubs.cpp, generated by tools/gen_stubs.py).
@@ -107,10 +115,14 @@ file(GLOB STRATA_METAL_ENGINE_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_D
 
 add_library(strata_metal_host STATIC ${STRATA_METAL_HOST_SOURCES})
 target_include_directories(strata_metal_host PUBLIC ${STRATA_ROOT}/include ${S}/core ${STRATA_ROOT}/third_party/ggml
-                           ${STRATA_GGML_DIR}/ggml/include ${STRATA_GGML_DIR}/ggml/src ${STRATA_GGML_DIR}/ggml/src/ggml-cpu)
-target_compile_definitions(strata_metal_host PUBLIC STRATA_NATIVE_EXPERTS=1 STRATA_VERSION="0.1.45.3-metal")
+                           ${_strata_ggml_root}/ggml/include ${_strata_ggml_root}/ggml/src ${_strata_ggml_root}/ggml/src/ggml-cpu)
+target_compile_definitions(strata_metal_host PUBLIC STRATA_NATIVE_EXPERTS=1 STRATA_HAVE_DFLASH2=1 STRATA_VERSION="0.1.60-metal")
 target_compile_options(strata_metal_host PRIVATE -Wno-unused-parameter -Wno-deprecated-declarations)
 target_link_libraries(strata_metal_host PUBLIC strata_gpu_metal ggml-cpu ggml-base)
+if(STRATA_OWN_CPU_QUANT)
+  target_link_libraries(strata_metal_host PUBLIC strata_quant)
+  target_compile_definitions(strata_metal_host PUBLIC STRATA_OWN_CPU_QUANT=1)
+endif()
 
 add_library(strata_metal_kernels STATIC ${STRATA_METAL_ENGINE_SOURCES})
 target_include_directories(strata_metal_kernels PRIVATE src ${STRATA_ROOT}/third_party/ggml)
@@ -123,3 +135,6 @@ target_link_libraries(strata_metal_kernels PUBLIC strata_metal_host mtl_rt)
 add_executable(strata ${S}/program/generate.cpp)
 target_compile_definitions(strata PRIVATE STRATA_HAVE_QWEN35=1)
 target_link_libraries(strata PRIVATE strata_metal_kernels strata_metal_host strata_metal_kernels)
+# the decode window on its own (probe/window_probe.cpp): the engine's process state without the engine, for looking at a Metal fault
+add_executable(window_probe probe/window_probe.cpp)
+target_link_libraries(window_probe PRIVATE strata_metal_kernels strata_metal_host strata_metal_kernels)

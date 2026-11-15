@@ -200,6 +200,7 @@ class StartNeverAcquiresTests(unittest.TestCase):
             st.enter_context(mock.patch.object(setup, "ROOT", self.root))
             st.enter_context(mock.patch.object(sys, "argv", ["setup.py", *argv]))
             st.enter_context(mock.patch.object(urllib.request, "urlopen", rec.urlopen))
+            st.enter_context(mock.patch.object(setup.netpolicy, "urlopen", rec.urlopen))
             for n in ("run", "call", "Popen", "check_call", "check_output"):
                 st.enter_context(mock.patch.object(subprocess, n, rec.program))
             st.enter_context(mock.patch.object(setup, "gpus", lambda: gpus or []))
@@ -270,7 +271,7 @@ class StartNeverAcquiresTests(unittest.TestCase):
             lambda: setup.cmake_build(self.root, self.root / "b", "strata", [], None, ""),
             lambda: setup.pip_cuda_libs(13),
         ]
-        with mock.patch.object(urllib.request, "urlopen", rec.urlopen), \
+        with mock.patch.object(urllib.request, "urlopen", rec.urlopen), mock.patch.object(setup.netpolicy, "urlopen", rec.urlopen), \
                 mock.patch.object(subprocess, "run", rec.program), mock.patch.object(subprocess, "Popen", rec.program):
             with acquisition.forbidden():
                 for i, call in enumerate(calls):
@@ -313,7 +314,15 @@ class CliServeIsOfflineTests(unittest.TestCase):
                     contextlib.redirect_stdout(out):
                 code = cli.main(["serve", "--profile", str(cfg), "--plan", "--output", "json"])
         self.assertEqual(code, 0, out.getvalue())
-        self.assertEqual((rec.network, rec.programs), ([], []))
+        # Reading the hardware is not acquiring anything: nvidia-smi / hipInfo / rocminfo and PowerShell's Get-CimInstance (display adapters) only
+        # print what is here. Whether a PC runs them depends on the PC (a machine with nvidia-smi on PATH does), so the check is that nothing else runs.
+        probes = {"nvidia-smi", "hipinfo", "rocminfo", "rocm-smi", "vulkaninfo"}
+
+        def read_only(argv):
+            stem = Path(argv[0]).stem.lower()
+            return stem in probes or (stem in ("powershell", "pwsh") and any("Get-CimInstance" in a for a in argv))
+        self.assertEqual(rec.network, [])
+        self.assertEqual([a for a in rec.programs if not read_only(a)], [])
         self.assertNotIn("setup", sys.modules.get("strata_cli.cli").__dict__.get("__name__", ""))
 
     def test_strata_install_without_the_installer_is_a_typed_error(self):

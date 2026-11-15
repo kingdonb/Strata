@@ -44,7 +44,6 @@ class CyrillicFolder(unittest.TestCase):
         self.assertEqual(out[0], str(self.dir))
         self.assertEqual(out[1], "True")
 
-    @unittest.skip("fork: START-HERE.bat stays at the 0.2.0 state (setup.py not carried); upstream added the UTF-8 mode line there")
     def test_windows_launchers_set_utf8_mode(self):
         for name in ("START-HERE.bat", "bin/strata.cmd", "bin/strata.ps1"):
             text = (ROOT / name).read_text(encoding="utf-8")

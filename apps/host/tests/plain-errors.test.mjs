@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { build } from 'esbuild';
 
-const languages = ['en', 'zh', 'ja', 'de', 'es', 'ru', 'pt', 'ko'];
-const catalogs = Object.fromEntries(await Promise.all(languages.map(async l => [l, JSON.parse(await readFile(`src/locales/${l}.json`, 'utf8'))])));
+const languages = ['en', 'zh', 'ja', 'de', 'es', 'ru', 'pt', 'ko', 'fr'];
+const catalogs = Object.fromEntries(await Promise.all(languages.map(async l => [l, ({ ...JSON.parse(await readFile(`src/locales/${l}.json`, 'utf8')), ...JSON.parse(await readFile(`src/locales/engine-${l}.json`, 'utf8')), ...JSON.parse(await readFile(`src/locales/gui-${l}.json`, 'utf8')) })])));
 const built = await build({ stdin: { contents: "export * from './src/lib/plain-errors'; export * from './src/lib/i18n';", resolveDir: process.cwd() }, bundle: true, write: false, format: 'esm', platform: 'node', loader: { '.json': 'json' } });
-const { plainFailure, plainFailureText, setTranslationLanguage } = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
+const { plainFailure, plainFailureText, setTranslationLanguage, loadCatalog } = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
+for (const l of ['zh', 'ja', 'de', 'es', 'ru', 'pt', 'ko', 'fr']) await loadCatalog(l);  // the non-English catalogs load on first use (src/lib/i18n.ts loadCatalog); load them before the first tr()
 
 const cases = [
   ['Strata’s tunnel for this address is already running (PID 31), so Strata did not start a second one. Stop it first (or use it as it is), then connect again here.', 'tunnel-own-running', /tunnel for this address is already running/],
@@ -51,13 +52,28 @@ for (const [raw, kind, message] of cases) {
   });
 }
 
+test('a DeepSeek model of an earlier Strata: Control’s own words, the folder and size kept, the next step apart (English only until the owner approves translations)', () => {
+  const d1 = 'DeepSeek-V4.1-Flash ISTA-DAS 2.00 bpw is a DeepSeek model. This version of Strata no longer runs DeepSeek models, so it was not started.';
+  const files = ' Its files are still on this computer: 257 GB in /home/me/Strata-data/models/deepseek-v4.1-flash-ist-das-2.00bpw. Nothing was changed or deleted.';
+  const next = 'Choose a Qwen model to run instead. If you no longer need the DeepSeek files, you can delete that folder to free the space.';
+  for (const message of [d1, d1 + files]) {
+    const f = plainFailure(message + ' ' + next);
+    assert.equal(f.kind, 'deepseek-retired');
+    assert.equal(f.message, message);
+    assert.equal(f.next, next);
+    assert.equal(plainFailure(JSON.stringify({ error: message + ' ' + next })).message, message, 'a wrapped error body too');
+  }
+  assert.notEqual(plainFailure('server_exited').kind, 'deepseek-retired');
+  assert.notEqual(plainFailure('The agent component (DeepSeek Harness) is not installed.').kind, 'deepseek-retired');
+});
+
 test('an ordinary sentence is left as it is and gets no Details', () => {
   const f = plainFailure('Some model files are missing. Use Download / repair to restore them.');
   assert.equal(f.kind, 'plain');
   assert.equal(f.detail, undefined);
 });
 
-test('every plain message and next step is translated in all eight languages', () => {
+test('every plain message and next step is translated in all nine languages', () => {
   const en = catalogs.en;
   const ids = Object.fromEntries(Object.entries(en).map(([id, text]) => [text, id]));
   for (const [raw] of cases) {
@@ -101,4 +117,9 @@ test('missing model files are named, in every language, with a next step (#3478)
   }
   setTranslationLanguage('en');
   assert.equal(plainFailure(missingFilesError('m', []).message).kind, 'plain', 'with no names the old sentence is left as it was');
+});
+
+test('the engine component is named in words, once (#3900)', async () => {
+  const { missingNames } = await import('../server/missing-files.mjs');
+  assert.deepEqual(missingNames([{ part: 'engine', file: 'component:strata-engine' }], ['component:strata-engine']), ['the engine program']);
 });

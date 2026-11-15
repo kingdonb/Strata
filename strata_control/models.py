@@ -19,6 +19,7 @@ import json
 import os
 import re
 import stat
+import sys
 from pathlib import Path
 
 from strata_control import discovery
@@ -28,7 +29,8 @@ from strata_control.profiles import ProfileError
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}\Z")
+# a dot is allowed inside the name (DeepSeek-V4.1-Flash: "deepseek-v4.1-flash-ist-das-2.00bpw"), never two in a row and never first
+MODEL_ID = re.compile(r"[a-z0-9](?:[a-z0-9_-]|\.(?!\.)){0,127}\Z")
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_CONFIGS = 128
 MAX_IMPORT_SHARDS = 128
@@ -36,6 +38,9 @@ SHARD = re.compile(r"(.+)-(\d{5})-of-(\d{5})\.gguf\Z", re.I)
 SUPPORTED_SELECTIONS = frozenset({"qwen/Q2_0", "qwen/IQ2_XS", "qwen/IQ3_XXS", "qwen/IQ3_S",
                                    "swift/IQ2_XS", "swift/IQ3_XXS", "swift/IQ3_S", "coder/IQ1_M",
                                    "unsloth/UD-IQ4_XS", "unsloth/UD-Q4_K_XL", "unsloth/UD-Q5_K_XL", "unsloth/UD-Q6_K_XL",
+                                   # round 0214: Unsloth's v3.1 sets (revision d9620119); the v3.1 UD-IQ4_XS has its own name, its Hub file names are UD-IQ4_XS's with four shards
+                                   "unsloth/UD-IQ1_M", "unsloth/UD-Q2_0", "unsloth/UD-IQ2_XS", "unsloth/UD-Q2_K_XL", "unsloth/UD-IQ3_XXS",
+                                   "unsloth/UD-Q3_K_XL", "unsloth/UD-IQ4_XS-v31",
                                    "unsloth/Q8_0", "gyro/Gyro-S", "gyro/Gyro-M"})
 
 
@@ -172,6 +177,14 @@ def _summary(model_id: str, path: Path, raw: bytes, cfg: dict, report: dict) -> 
 
 def _inspect_one(model_id: str, path: Path) -> tuple[dict, dict]:
     raw, cfg = _read(path)
+    from strata_control import retired
+    if retired.config_reason(cfg) or retired.config_file_reason(path):
+        # DeepSeek: listed so the person sees it and where its files are, never inspected, started or written (strata_control/retired.py)
+        report = {"ok": False, "issues": []}
+        summary = _summary(model_id, path, raw, cfg, report)
+        summary.update(component_status="retired", retired="deepseek", name=retired.title(cfg, path), retired_line=retired.row_line(cfg),
+                       refusal=retired.refusal(cfg, retired.title(cfg, path)), execution_compatibility="retired")
+        return summary, report
     try:
         report = inspect_components(path)
         after, _ = _read(path)
@@ -294,6 +307,65 @@ def _candidate_by_header(shards: list[Path], tensors: int, payload: int, experts
     return None
 
 
+def known_set_by_header(first_shard: Any) -> str | None:
+    """``family/model`` (``qwen/IQ3_S``, ``unsloth/UD-Q4_K_XL``) of the file set that starts at ``first_shard`` when its header is EXACTLY one row of data/gguf_fingerprints.json: the same tensor count,
+    the same payload size and the same expert formats over every shard (the other shards are found beside the first by their ``-00001-of-0000N`` names). Never the layout guess of
+    ``_candidate_by_layout``. None: no exact match, a shard missing, or a file that cannot be read."""
+    try:
+        path = Path(first_shard)
+        match = SHARD.match(path.name)
+        if match:
+            total = int(match.group(3))
+            if not 1 <= total <= MAX_IMPORT_SHARDS:
+                return None
+            shards = [path.with_name(f"{match.group(1)}-{i:05d}-of-{total:05d}.gguf") for i in range(1, total + 1)]
+            if not all(p.is_file() for p in shards):
+                return None
+        else:
+            shards = [path]
+        tensors = payload = 0
+        experts: set[str] = set()
+        for number, item in enumerate(shards):
+            inspected = inspect_metadata(item)
+            # the first shard names the architecture; a later shard of a split set (llama.cpp's gguf-split, Strata's own IQ3_S) carries tensors only: no architecture is no objection, another one is
+            if inspected["architecture"] != "qwen4exp" and (number == 0 or inspected["architecture"] is not None):
+                return None
+            experts.update(inspected["expert_tensor_types"])
+            tensors += inspected["tensor_count_scanned"]
+            payload += int(inspected.get("payload_bytes_required") or 0)
+        found = _candidate_by_header(shards, tensors, payload, experts)
+        return f"{found['family']}/{found['model']}" if found else None
+    except Exception:                         # noqa: BLE001 - a file that cannot be judged is not matched
+        return None
+
+
+def _candidate_by_layout(shards: list[Path], tensors: int, payload: int, experts: set[str]) -> dict | None:
+    """A qwen4exp file set that is no build Strata has tested (a fine-tune, a K-quant mix from another maker) but has the layout of one
+    (#3651 #3777): the closest row by expert formats, then by size. Strata uses the files as that model and says so; it never refuses a
+    working file for not being on the list (recommend, never force)."""
+    try:
+        catalog = json.loads((ROOT / "data" / "gguf_fingerprints.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    best = None
+    for selection in sorted(SUPPORTED_SELECTIONS):
+        row = catalog.get(selection) if isinstance(catalog, dict) else None
+        if not isinstance(row, dict) or row.get("tensors") != tensors or not isinstance(row.get("expert_bytes"), dict):
+            continue
+        have = set(row["expert_bytes"])
+        union = have | experts
+        score = (len(have & experts) / len(union)) if union else 0.0
+        key = (-score, abs(int(row.get("bytes") or 0) - payload), selection)
+        if score > 0 and (best is None or key < best[0]):
+            best = (key, selection, have)
+    if best is None:
+        return None
+    family, model = best[1].split("/", 1)
+    return {"family": family, "model": model, "basis": "same_layout_other_build",
+            "expected_expert_types": sorted(best[2] | experts), "expected_tensor_count": tensors,
+            "setup_args_hint": ["--family", family, "--model", model, "--gguf-dir", str(shards[0].parent)]}
+
+
 def _already_set_up(shards: list[Path], candidate: dict | None) -> dict | None:
     """Is this model already installed (a run config of any known install names the file) and what was prepared beside it (pack, draft
     layer, picture reader)? Read-only; None when the file set is not one Strata knows."""
@@ -301,7 +373,7 @@ def _already_set_up(shards: list[Path], candidate: dict | None) -> dict | None:
         return None
     first = shards[0]
     cfg = discovery.run_config_for(first, discovery.places(here=ROOT))
-    beside = discovery.prepared_beside(first)
+    beside = discovery.prepared_beside(first, discovery.remembered_data_dirs())     # the data folder in use too: a model folder outside it must not hide the draft layer setup wrote there
     if cfg is None and not any(beside.get(k) for k in ("pack", "mtp", "mmproj")):
         return {"config": None, "data_dir": str(beside["data_dir"]) if beside.get("data_dir") else None, "pack": None, "mtp": None, "mmproj": None}
     return {"config": str(cfg) if cfg else None, **{k: (str(v) if v else None) for k, v in beside.items()}}
@@ -442,6 +514,9 @@ SKIP_DIRS = frozenset({"packs", "mtp", "engine", "node_modules", "windows", "pro
                        "$recycle.bin", "system volume information", "appdata"})
 
 
+DRAFT_LAYER = re.compile(r"mtp[-_][a-z0-9_.-]*\.gguf")
+
+
 def _list_gguf(folder: Path) -> tuple[list[Path], list[str], bool]:
     """(model files, picture-reader file names, cut) of one folder. A link to a file counts (it is followed when read); a name that
     only ends in .gguf but is a folder does not."""
@@ -463,6 +538,8 @@ def _list_gguf(folder: Path) -> tuple[list[Path], list[str], bool]:
                 if low.startswith("mmproj"):
                     readers.append(entry.name)
                     continue
+                if DRAFT_LAYER.fullmatch(low):
+                    continue                          # Strata's own draft layer (mtp-q2_0.gguf) is not a second model (#4693)
                 if len(shards) >= MAX_LISTED:
                     cut = True
                     break
@@ -590,6 +667,9 @@ def plan_import(raw_path: str) -> dict:
         details = path.stat()
     except OSError:
         raise ProfileError("model import path does not exist (or is a link to something that is gone)", 5) from None
+    from strata_control import retired
+    if retired.folder_reason(path):                    # DeepSeek files: named, never set up (strata_control/retired.py)
+        raise ProfileError(retired.own_files(path), 5)
     notes: list[str] = []
     folder_holds: list[dict] = []
     issues: list[str] = []
@@ -709,6 +789,11 @@ def plan_import(raw_path: str) -> dict:
     candidate = _candidate_selection(shards)
     if candidate is None and metadata is not None and not issues:
         candidate = _candidate_by_header(shards, observed_tensor_count, observed_payload, observed_experts)
+        if candidate is None:
+            candidate = _candidate_by_layout(shards, observed_tensor_count, observed_payload, observed_experts)
+            if candidate is not None:
+                messages.append(f"These files are not exactly a build Strata has tested; they have the layout of {candidate['family']} "
+                                f"{candidate['model']}, so Strata uses them as that model. Check a few answers before you rely on them.")
     if "multiple_model_groups" in issues:
         candidate = None                                  # nothing is chosen for the person
     if candidate is None and not {"multiple_model_groups", "incomplete_or_invalid_shard_set"} & set(issues):
