@@ -235,7 +235,7 @@ class Config(unittest.TestCase):
         default_in_tree = builtin_strata_server()
         self.assertIsNotNone(default_in_tree,
                              "parameterless: derived from the serve process's own layout (this checkout is a Strata folder)")
-        self.assertTrue(default_in_tree["args"][0].endswith("tools/strata_mcp.py"))
+        self.assertEqual(Path(default_in_tree["args"][0]).parts[-2:], ("tools", "strata_mcp.py"))
         self.assertEqual(default_in_tree["args"][2], str(Path(__file__).resolve().parent.parent))
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "tools").mkdir()

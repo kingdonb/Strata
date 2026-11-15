@@ -101,7 +101,7 @@ class Config(unittest.TestCase):
         self.assertEqual(cfg["model_name"], "qwen3.6-35b-a3b-ud-q2_k_xl")
         self.assertEqual(cfg["backend"], "metal")
         args = cfg["args"]
-        self.assertEqual(args[:4], ["--native", "/m/q.gguf", "--max-context", "32768"])
+        self.assertEqual(args[:4], ["--native", str(Path("/m/q.gguf")), "--max-context", "32768"])
         self.assertEqual(args[args.index("--mtp") + 1], str(S.OWN_PATH_FAMILIES["qwen36"]["mtp"]))
         self.assertEqual(args[args.index("--draft-vocab") + 1], "8192")
         self.assertNotIn("--pack", args)

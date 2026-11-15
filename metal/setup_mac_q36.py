@@ -175,7 +175,7 @@ def main(argv, build_engine, start) -> int:
 
     # ---- 4. the engine
     S.step(4, "the Strata engine (Metal)")
-    llama = S.get_llama_cpp()
+    llama = S.llama_override()                         # None: ggml is the vendored third_party/strata-ggml (STRATA_GGML_DIR overrides)
     S.ok(f"llama.cpp {S.LLAMA_CPP_COMMIT[:7]} (ggml, gguf-py)")
     if a.build:
         (ROOT / "build-metal" / "BUILD.json").unlink(missing_ok=True)
@@ -206,7 +206,7 @@ def main(argv, build_engine, start) -> int:
     if not (pack / "tokenizer" / "vocab.json").exists():
         pack.mkdir(parents=True, exist_ok=True)
         S.run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(pack)],
-              env=dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py")))
+              env=dict(os.environ, **S.gguf_py_env()))
     S.ok(f"tokenizer: {pack / 'tokenizer'}")
 
     # ---- 7. the config, the start script
