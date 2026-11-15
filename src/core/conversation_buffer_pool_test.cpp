@@ -19,8 +19,13 @@ void check(bool value, const char* description) {
 constexpr size_t MiB = size_t(1) << 20;
 
 struct FakeOs final : SegmentPoolOs {
+#ifdef _MSC_VER                                          // fork: MSVC has no aligned_alloc (upstream v0.2.14 fails to build here)
+    void* reserve(size_t bytes) override { return _aligned_malloc(bytes, size_t(2) << 20); }
+    void unreserve(void* base, size_t) override { _aligned_free(base); }
+#else
     void* reserve(size_t bytes) override { return std::aligned_alloc(size_t(2) << 20, bytes); }
     void unreserve(void* base, size_t) override { std::free(base); }
+#endif
     bool commit(void*, size_t) override { return true; }
     bool populate(void*, size_t) override { return true; }
     void release(void* p, size_t n) override { std::memset(p, 0, n); }
