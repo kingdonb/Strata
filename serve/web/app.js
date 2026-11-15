@@ -1642,8 +1642,8 @@ async function start() {
   poll();
   requestAnimationFrame(fitHeader);
 }
-inlineSprite();
 start();
+inlineSprite();
 
 // ------------------------------------------------------------------ images (POST /v1/images/generations)
 $("img-form").onsubmit = async (ev) => {

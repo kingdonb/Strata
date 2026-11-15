@@ -89,7 +89,8 @@ class ToolRows(unittest.TestCase):
                              capture_output=True, text=True, timeout=30)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(json.loads(out.stdout), ["#i-tool", "#i-tool", "other.svg#i-tool", None])
-        self.assertIn("\ninlineSprite();\nstart();\n", self.src, "the page copies the icons in when it starts")
+        # after start(), not before it: serve/test_web_start_question.py runs the text up to "\nstart();" on its own
+        self.assertIn("\nstart();\ninlineSprite();\n", self.src, "the page copies the icons in when it starts")
         self.assertIn('use href="${SPRITE}#i-${name}"', self.src, "a later icon follows SPRITE, which is empty after the copy")
 
     def test_the_streaming_answer_uses_it(self):
