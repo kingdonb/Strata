@@ -3,8 +3,37 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const SPRITE = "web/sprite.svg";
+let SPRITE = "web/sprite.svg";                      // "" once the icons are in this page (inlineSprite): then a reference is "#i-name"
 const icon = (name, cls = "st-icon") => `<svg class="${cls}" aria-hidden="true"><use href="${SPRITE}#i-${name}"/></svg>`;
+// The icons are <use> references. Into web/sprite.svg they point at another document, and a browser may fetch or
+// resolve that document again when the page around an icon is laid out anew - seen as the tool rows' icons flickering
+// while an answer streams above them (this fork, 2026-11-15; not reproduced in every browser). So the symbols are
+// copied into this page once and every reference, present and later, points at the copy. When the file cannot be
+// read the page keeps the references it has.
+function spriteHref(href, base) { return href && href.startsWith(base + "#") ? href.slice(base.length) : href; }
+function inlineSprite() {
+  const base = SPRITE;
+  if (!base) return Promise.resolve(false);
+  return fetch(base).then((r) => (r.ok ? r.text() : Promise.reject(new Error("no sprite")))).then((text) => {
+    const from = new DOMParser().parseFromString(text, "image/svg+xml").documentElement;
+    const symbols = from && from.nodeName === "svg" ? from.querySelectorAll("symbol[id]") : [];
+    if (!symbols.length) return false;
+    const holder = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    holder.id = "st-sprite";
+    holder.setAttribute("aria-hidden", "true");
+    holder.setAttribute("width", "0");
+    holder.setAttribute("height", "0");
+    holder.style.position = "absolute";
+    symbols.forEach((s) => holder.appendChild(document.importNode(s, true)));
+    document.body.prepend(holder);
+    SPRITE = "";
+    document.querySelectorAll("use").forEach((u) => {
+      const now = u.getAttribute("href"), then = spriteHref(now, base);
+      if (then !== now) u.setAttribute("href", then);
+    });
+    return true;
+  }).catch(() => false);
+}
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const fmt = (n, d = 0) => (n == null || Number.isNaN(n) ? "–" : Number(n).toLocaleString(undefined, {maximumFractionDigits: d, minimumFractionDigits: d}));
 const kfmt = (n) => (n == null ? "–" : n >= 1000 ? `${fmt(n / 1000, n >= 10000 ? 0 : 1)}k` : fmt(n));
@@ -1614,6 +1643,7 @@ async function start() {
   requestAnimationFrame(fitHeader);
 }
 start();
+inlineSprite();
 
 // ------------------------------------------------------------------ images (POST /v1/images/generations)
 $("img-form").onsubmit = async (ev) => {
