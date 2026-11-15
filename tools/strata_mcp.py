@@ -2109,8 +2109,10 @@ class Tools:
         if running:
             r = running[0]
             summary = (f"Strata is running on port {r['port']}: {r.get('model')}"
-                       + (" (this is the server and the model this chat runs on; it is busy with this chat's own turn)"
-                          if r.get("this_chat") else ", busy" if r.get("busy") else ", idle")
+                       + (", busy" if r.get("busy") else ", idle")
+                       + (" (this is the server and the model this chat runs on"
+                          + ("; the request that keeps it busy can be this chat's own turn)" if r.get("busy") else ")")
+                          if r.get("this_chat") else "")
                        + ("" if r.get("loaded", True) else " (model unloaded; the next request loads it)"))
         elif "loading" in out:
             summary = f"Strata is loading {out['loading']['model']} (port {out['loading']['port']})"

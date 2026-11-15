@@ -110,6 +110,18 @@ class HostedTools(unittest.TestCase):
         self.assertNotIn("note", info)                   # no "wants an API key this folder's configs do not have"
         self.assertEqual(info["last_request"]["predicted_per_second"], 58.5)
 
+    def test_status_names_the_chats_own_server_and_tells_busy_from_idle(self):
+        t, s = self.tools()
+        with mock.patch.object(s, "installed", return_value={"models": []}), mock.patch.object(s, "install_job", return_value=None):
+            idle = t.strata_status(hardware=False)
+            Fake.busy = True
+            busy = t.strata_status(hardware=False)
+        row = idle["running"][0]
+        self.assertTrue(row["this_chat"])
+        self.assertEqual(row["started_by"], M.HOST_WORDS)
+        self.assertIn(", idle (this is the server and the model this chat runs on)", idle["summary"])
+        self.assertIn(", busy (this is the server and the model this chat runs on; the request", busy["summary"])
+
     def test_without_a_host_nothing_changes(self):
         t, s = self.tools(hosted=False)
         self.assertIsNone(s.host)
