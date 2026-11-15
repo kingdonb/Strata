@@ -28,19 +28,11 @@ struct FakeOs final : SegmentPoolOs {
     void* mem = nullptr;
     void* reserve(size_t bytes) override {
         if (refuse_reserve) return nullptr;
-#ifdef _MSC_VER                                          // fork: MSVC has no aligned_alloc (upstream v0.2.14 fails to build here)
-        mem = _aligned_malloc(bytes, size_t(2) << 20);
-#else
         mem = std::aligned_alloc(size_t(2) << 20, bytes);
-#endif
         if (mem) { std::memset(mem, 0, bytes); reserved = bytes; }
         return mem;
     }
-#ifdef _MSC_VER
-    void unreserve(void* base, size_t) override { _aligned_free(base); }
-#else
     void unreserve(void* base, size_t) override { std::free(base); }
-#endif
     bool commit(void*, size_t) override { ++commits; return !refuse_commit; }
     bool populate(void*, size_t n) override { if (refuse_populate) return false; ++populates; populated_bytes += n; return true; }
     void release(void* p, size_t n) override { ++releases; released_bytes += n; std::memset(p, 0, n); }
