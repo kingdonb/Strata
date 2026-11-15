@@ -51,16 +51,36 @@ PROTOCOL = "2025-06-18"               # the MCP revision Strata asks for; the se
 DEFAULTS = {"timeout_s": 60.0, "max_result_chars": 20000, "max_rounds": 8, "start_timeout_s": 120.0, "image_results": False}
 
 
-def builtin_strata_server(root=None):
+def builtin_strata_server(root=None, *, config=None, port=None, api_key=None):
     """The default "strata" entry: the Strata folder's own MCP server (tools/strata_mcp.py beside serve/), so the
     engine's web chat can answer "is Strata running?" with nothing configured.  Derived from this process's own
     layout - `root` defaults to the folder serve/ lives in - so a trimmed runtime install without the file simply
-    has no entry (the hub's ordinary start log says so, and the chat works without it)."""
+    has no entry (the hub's ordinary start log says so, and the chat works without it).
+
+    `config`, `port` and `api_key` are the serving process's own (serve/server.py passes them): the tools are told
+    which server started them (STRATA_MCP_HOST_*), so they name it as the chat's own server, read its config and
+    log, and can ask it for its status when it wants a key.  With a config, the Strata folder the tools work in is
+    the folder that config is in - where an installed Terminal keeps its models' configs, which is not the folder
+    the code is in."""
     root = Path(root) if root else Path(__file__).resolve().parent.parent
     script = root / "tools" / "strata_mcp.py"
     if not script.is_file():
         return None
-    return {"command": sys.executable, "args": [str(script), "--root", str(root)], "cwd": str(root)}
+    args = [str(script), "--root", str(root)]
+    env = {}
+    if config and Path(config).is_file():
+        home = Path(config).resolve().parent
+        env["STRATA_MCP_HOST_CONFIG"] = str(Path(config).resolve())
+        if home != root.resolve():
+            args = [str(script), "--root", str(home), "--src", str(root)]
+    if port:
+        env["STRATA_MCP_HOST_PORT"] = str(int(port))
+    if api_key:
+        env["STRATA_MCP_HOST_KEY"] = str(api_key)      # the child's environment only: never logged, never in a tool answer
+    out = {"command": sys.executable, "args": args, "cwd": str(root)}
+    if env:
+        out["env"] = env
+    return out
 
 
 class McpError(RuntimeError):

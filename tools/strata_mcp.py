@@ -48,6 +48,22 @@ DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 CONTROL = os.environ.get("STRATA_CONTROL_INSTALL") == "1"
 DEFAULT_PORT = 8080
 STATE_DIR = ".strata-mcp"                             # in the Strata folder (git-ignored)
+# Set by a Strata server that starts this file for its own web chat (serve/mcp.py builtin_strata_server): its port,
+# its config file and its API key.  With them the tools know which server is "the one this chat runs on".
+ENV_HOST_PORT, ENV_HOST_CONFIG, ENV_HOST_KEY = "STRATA_MCP_HOST_PORT", "STRATA_MCP_HOST_CONFIG", "STRATA_MCP_HOST_KEY"
+HOST_WORDS = ("the Strata server this chat runs on: it started these tools for its own chat, and it is the model "
+              "that is answering now")
+
+
+def host_from_env(environ=None) -> dict | None:
+    """The server that started these tools for its own chat ({"port", "config", "key"}), None when nothing did."""
+    environ = os.environ if environ is None else environ
+    raw = (environ.get(ENV_HOST_PORT) or "").strip()
+    if not raw.isdigit() or not 0 < int(raw) < 65536:
+        return None
+    cfg = (environ.get(ENV_HOST_CONFIG) or "").strip()
+    return {"port": int(raw), "config": Path(cfg) if cfg and Path(cfg).is_file() else None,
+            "key": (environ.get(ENV_HOST_KEY) or "").strip() or None}
 
 # What setup.py offers, used only when setup.py cannot be imported (the numbers are setup's MODELS / FAMILIES /
 # CONTEXTS; tools/test_strata_mcp.py checks they still match).
@@ -549,6 +565,7 @@ class Strata:
         self._setup = None
         self._setup_tried = False
         self._hw_cache = None
+        self.host = host_from_env()                     # the server whose chat these tools serve, when one started them
         # tests: the interpreter that runs setup / the server. The app's Control runs the installer on its own Python.
         self.python_override: str | None = sys.executable if CONTROL else None
         self.health_timeout = 2.0
@@ -688,8 +705,12 @@ class Strata:
 
     # ---- what is installed
     def configs(self) -> list[Path]:
-        return sorted((p for p in self.root.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")),
+        have = sorted((p for p in self.root.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")),
                       key=lambda p: p.stat().st_mtime, reverse=True)   # #346: the Chat settings file is no config
+        own = (self.host or {}).get("config")            # the config of the server this chat runs on, wherever it is
+        if own and own.is_file() and all(norm(own) != norm(p) for p in have):
+            have.insert(0, own)
+        return have
 
     @staticmethod
     def read_config(path: Path) -> dict:
@@ -1432,7 +1453,7 @@ class Strata:
     def ports(self, port: int | None) -> list[int]:
         if port:
             return [port]
-        ps = [self.state("server").get("port")] + [self.describe_config(c)["port"] for c in self.configs()]
+        ps = [(self.host or {}).get("port"), self.state("server").get("port")] + [self.describe_config(c)["port"] for c in self.configs()]
         return list(dict.fromkeys(int(p) for p in [*ps, DEFAULT_PORT] if isinstance(p, int)))
 
     def api_key_for(self, port: int) -> str | None:
@@ -1440,6 +1461,8 @@ class Strata:
         def real(cfg):                                   # "api_key": "none" = served without a key on purpose
             k = cfg.get("api_key")
             return k if k and str(k).strip().lower() != "none" else None
+        if self.host and port == self.host["port"] and self.host["key"]:
+            return self.host["key"]                      # the key of the server that started these tools
         for c in self.configs():
             cfg = self.read_config(c)
             if real(cfg) and int(cfg.get("port", DEFAULT_PORT)) == port:
@@ -2072,6 +2095,11 @@ class Tools:
         elif tracked and tracked.get("ended"):
             out["last_start"] = {"model": tracked.get("model"), "ended": True,
                                  "last_log_lines": read_tail(Path(tracked.get("log", "")), 6)}
+        host = next((x for x in running if s.host and x["port"] == s.host["port"]), None)
+        if host:
+            host["this_chat"] = True
+            host["started_by"] = HOST_WORDS
+            running.sort(key=lambda x: not x.get("this_chat"))
         for x in running:
             x.setdefault("started_by", "outside this MCP server (its own window, a start script or a service)")
         out["running"] = running
@@ -2081,7 +2109,8 @@ class Tools:
         if running:
             r = running[0]
             summary = (f"Strata is running on port {r['port']}: {r.get('model')}"
-                       + (", busy" if r.get("busy") else ", idle")
+                       + (" (this is the server and the model this chat runs on; it is busy with this chat's own turn)"
+                          if r.get("this_chat") else ", busy" if r.get("busy") else ", idle")
                        + ("" if r.get("loaded", True) else " (model unloaded; the next request loads it)"))
         elif "loading" in out:
             summary = f"Strata is loading {out['loading']['model']} (port {out['loading']['port']})"
@@ -2501,6 +2530,10 @@ class Tools:
             for p in s.ports(port):
                 info = s.probe(p, deep=False)
                 if info and not info.get("other"):
+                    if s.host and p == s.host["port"]:   # never from inside its own chat, with force or without
+                        raise ToolError(f"port {p} is the Strata server this chat runs on: stopping it here would end this "
+                                        "answer. The person stops it with the Unload button on the page, or with "
+                                        "`strata launch --stop` in a terminal")
                     key = s.api_key_for(p)
                     st, body = http_json(f"http://127.0.0.1:{p}/unload", "POST", api_key=key, timeout=120)
                     r = body.get("status") if isinstance(body, dict) else None
@@ -2519,20 +2552,22 @@ class Tools:
     # ---- strata_logs
     def strata_logs(self, source=None, model=None, lines=80) -> dict:
         s = self.s
+        hosted = bool(s.host and s.host["config"] and not s.tracked_server())
         if source is None:
             job = s.install_job()
-            source = "setup" if job and job["running"] else "server"
+            source = "setup" if job and job["running"] else "engine" if hosted else "server"
         if source == "setup":
             path = s.state_dir / "setup.log"
         elif source == "server":
             path = s.state_dir / "server.log"
         else:
-            cfg = s.find_config(model or (s.state("server").get("model")))
+            own = hosted and not model                   # the engine log of the server this chat runs on
+            cfg = s.host["config"] if own else s.find_config(model or (s.state("server").get("model")))
             raw = s.read_config(cfg).get("log")
             if not raw:
                 raise ToolError(f"{cfg.name} names no engine log")
             path = Path(raw)
-            if not s.allowed(path):
+            if not own and not s.allowed(path):
                 raise ToolError(f"{cfg.name}'s log {raw} is outside the Strata folder and its data folder: not shown")
         if not path.exists():
             return {"summary": f"no {source} log yet ({path})", "log": str(path), "lines": []}
@@ -2554,6 +2589,12 @@ class Tools:
         key = s.api_key_for(p)
         st, stat = http_json(f"http://127.0.0.1:{p}/status", api_key=key, timeout=3)
         if st == 200 and isinstance(stat, dict) and (stat.get("busy") or stat.get("queued")):
+            if s.host and p == s.host["port"]:           # the running request is this chat's own turn: no second request can be timed
+                last = (s.probe(p) or {}).get("last_request")
+                return {"summary": "this chat runs on this server, so a separate speed test cannot run while it answers; "
+                                   + ("the numbers of its last finished request are given instead" if last else
+                                      "it has no finished request to report yet"),
+                        "port": p, "model": target.get("model"), "this_chat": True, "last_request": last}
             raise ToolError("Strata is busy with a request; run the speed test when it is idle")
         body = {"model": target.get("model") or "strata", "max_tokens": max_tokens, "temperature": 0,
                 "reasoning_effort": "none", "stream": False,
@@ -2644,6 +2685,16 @@ class McpServer:
         self.write_lock = threading.Lock()
         self.protocol = PROTOCOL
 
+    def host_words(self) -> str:
+        """What an assistant is told when a Strata server started these tools for its own chat: which server is its own."""
+        host = self.strata.host
+        if not host:
+            return ""
+        return (f" These tools were started by the Strata server on port {host['port']} for its own chat. If you are "
+                "the assistant in that chat, that server is the model you are: strata_status marks it "
+                "\"this_chat\", its numbers (speed of the last request, memory, context) are your own, and "
+                "strata_logs shows its engine log. It was not started by these tools, so strata_stop refuses to stop it.")
+
     def send(self, msg: dict) -> None:
         data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
         with self.write_lock:
@@ -2675,7 +2726,7 @@ class McpServer:
             return self.result(rid, {"protocolVersion": self.protocol,
                                      "capabilities": {"tools": {"listChanged": False}},
                                      "serverInfo": {"name": "strata", "title": "Strata", "version": VERSION},
-                                     "instructions": INSTRUCTIONS})
+                                     "instructions": INSTRUCTIONS + self.host_words()})
         if method == "ping":
             return self.result(rid, {})
         if method == "tools/list":

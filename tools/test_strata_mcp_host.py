@@ -1,0 +1,158 @@
+"""The Strata tools when a Strata server starts them for its own chat (this fork: serve/mcp.py builtin_strata_server
+sets STRATA_MCP_HOST_PORT / _CONFIG / _KEY).  The tools must say which server is the chat's own, find its config
+and log outside the code folder, use its key, and refuse to stop it.
+
+A small stand-in server answers /health, /status, /v1/status and /unload on a loopback port; nothing real starts.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+import threading
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+import strata_mcp as M  # noqa: E402
+
+KEY = "sk-host-test"
+
+
+class Fake(BaseHTTPRequestHandler):
+    busy = False
+    unloads = 0
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body):
+        raw = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _keyed(self):
+        if self.headers.get("Authorization") == f"Bearer {KEY}":
+            return True
+        self._send(401, {"error": {"message": "missing or wrong API key"}})
+        return False
+
+    def do_GET(self):
+        if self.path == "/health":
+            return self._send(200, {"service": "strata", "model": "qwen-test", "max_context": 131072, "images": False,
+                                    "loaded": True, "api_key": True})
+        if not self._keyed():
+            return
+        if self.path == "/v1/status":
+            return self._send(200, {"engine": "0.1.60", "uptime_s": 5, "activity": {"requests": 3},
+                                    "last_timings": {"prompt_n": 100, "prompt_per_second": 900.0, "predicted_n": 50,
+                                                     "predicted_per_second": 58.5}})
+        if self.path == "/status":
+            return self._send(200, {"busy": type(self).busy})
+        self._send(404, {})
+
+    def do_POST(self):
+        if not self._keyed():
+            return
+        if self.path == "/unload":
+            type(self).unloads += 1
+        self._send(200, {"status": "unloaded"})
+
+
+class HostedTools(unittest.TestCase):
+    def setUp(self):
+        Fake.busy, Fake.unloads = False, 0
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Fake)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.code = Path(tmp.name) / "code"              # where the Terminal's code is: no config lives here
+        self.data = Path(tmp.name) / "data"              # where the running model's config and log are
+        self.code.mkdir()
+        self.data.mkdir()
+        self.log = self.data / "strata-q2_0.log"
+        self.log.write_text("engine line 1\nengine line 2\n", encoding="utf-8")
+        self.config = self.data / "strata-q2_0.json"
+        self.config.write_text(json.dumps({"port": self.port, "log": str(self.log), "model_name": "qwen-test"}), encoding="utf-8")
+
+    def tools(self, hosted=True, key=KEY):
+        env = {M.ENV_HOST_PORT: str(self.port), M.ENV_HOST_CONFIG: str(self.config), M.ENV_HOST_KEY: key} if hosted else {}
+        with mock.patch.dict(os.environ, env):
+            for k in (() if hosted else (M.ENV_HOST_PORT, M.ENV_HOST_CONFIG, M.ENV_HOST_KEY)):
+                os.environ.pop(k, None)
+            s = M.Strata(self.code, ROOT)
+        s.health_timeout = 3
+        return M.Tools(s), s
+
+    def test_the_environment_is_read_strictly(self):
+        self.assertIsNone(M.host_from_env({}))
+        self.assertIsNone(M.host_from_env({M.ENV_HOST_PORT: "eighty"}))
+        self.assertIsNone(M.host_from_env({M.ENV_HOST_PORT: "70000"}))
+        host = M.host_from_env({M.ENV_HOST_PORT: "8080", M.ENV_HOST_CONFIG: str(self.code / "missing.json")})
+        self.assertEqual(host, {"port": 8080, "config": None, "key": None})
+
+    def test_the_chats_own_server_is_found_with_its_key_and_its_config(self):
+        t, s = self.tools()
+        self.assertEqual(s.ports(None)[0], self.port, "the chat's own port is looked at first")
+        self.assertEqual(s.api_key_for(self.port), KEY)
+        self.assertEqual(s.configs(), [self.config], "the config is found although it is not in the code folder")
+        info = s.probe(self.port)
+        self.assertNotIn("note", info)                   # no "wants an API key this folder's configs do not have"
+        self.assertEqual(info["last_request"]["predicted_per_second"], 58.5)
+
+    def test_without_a_host_nothing_changes(self):
+        t, s = self.tools(hosted=False)
+        self.assertIsNone(s.host)
+        self.assertEqual(s.configs(), [])
+        self.assertIsNone(s.api_key_for(self.port))
+        self.assertEqual(M.McpServer(s).host_words(), "")
+
+    def test_the_instructions_say_which_server_is_the_chats_own(self):
+        t, s = self.tools()
+        words = M.McpServer(s).host_words()
+        self.assertIn(f"port {self.port}", words)
+        self.assertIn("this_chat", words)
+        self.assertNotIn(KEY, words)
+
+    def test_the_log_of_the_chats_own_server_is_the_default(self):
+        t, s = self.tools()
+        out = t.strata_logs()
+        self.assertEqual(out["log"], str(self.log))
+        self.assertEqual(out["lines"][-1], "engine line 2")
+
+    def test_stop_refuses_the_chats_own_server_even_with_force(self):
+        t, s = self.tools()
+        for force in (False, True):
+            with self.assertRaises(M.ToolError) as e:
+                t.strata_stop(force=force)
+            self.assertIn("this chat runs on", str(e.exception))
+        self.assertEqual(Fake.unloads, 0)
+
+    def test_a_speed_test_from_inside_the_chats_own_turn_reports_the_last_request(self):
+        Fake.busy = True                                 # the running request is the chat's own turn
+        t, s = self.tools()
+        out = t.strata_benchmark()
+        self.assertTrue(out["this_chat"])
+        self.assertEqual(out["last_request"]["predicted_per_second"], 58.5)
+        t2, _ = self.tools(hosted=False)
+        with self.assertRaises(M.ToolError) as e:        # started by hand, with no key: what the chat saw before (HTTP 401)
+            t2.strata_benchmark(port=self.port)
+        self.assertIn("401", str(e.exception))
+
+    def test_no_answer_carries_the_key(self):
+        t, s = self.tools()
+        self.assertNotIn(KEY, json.dumps(t.strata_logs()) + json.dumps(s.probe(self.port)) + json.dumps(s.describe_config(self.config)))
+
+
+if __name__ == "__main__":
+    unittest.main()

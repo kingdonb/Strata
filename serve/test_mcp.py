@@ -244,6 +244,16 @@ class Config(unittest.TestCase):
             self.assertIsNotNone(default)
             self.assertEqual(default["args"], [str(Path(d) / "tools" / "strata_mcp.py"), "--root", d])
             self.assertEqual(default["command"], sys.executable)
+            self.assertNotIn("env", default)                 # nothing about a serving process was given
+            with tempfile.TemporaryDirectory() as data:      # the serving process names itself: its config, port and key
+                config = Path(data) / "strata-q2_0.json"
+                config.write_text("{}", encoding="utf-8")
+                hosted = builtin_strata_server(d, config=str(config), port=8095, api_key="sk-x")
+                self.assertEqual(hosted["args"], [str(Path(d) / "tools" / "strata_mcp.py"), "--root", str(Path(data).resolve()),
+                                                  "--src", d], "the tools work in the folder the config is in")
+                self.assertEqual(hosted["env"], {"STRATA_MCP_HOST_CONFIG": str(config.resolve()), "STRATA_MCP_HOST_PORT": "8095",
+                                                 "STRATA_MCP_HOST_KEY": "sk-x"})
+                self.assertEqual(builtin_strata_server(d, port=8095)["env"], {"STRATA_MCP_HOST_PORT": "8095"})
             hub = hub_from_config({}, defaults={"strata": default})
             self.assertEqual(sorted(hub.servers), ["strata"])
             self.assertEqual(hub.servers["strata"].cfg["cwd"], d)

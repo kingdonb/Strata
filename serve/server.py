@@ -10188,7 +10188,7 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
     # "strata_mcp": true, like every other server's; the person's own "strata" entry (even a disabled one) or
     # "mcp": {"builtin_strata": false} suppresses the row. A strict-offline profile starts without it (the check
     # below stays about the person's own servers), and so does a trimmed runtime without the file.
-    strata_default = builtin_strata_server() if not a.offline else None
+    strata_default = builtin_strata_server(config=a.config, port=a.port, api_key=preflight_api_key) if not a.offline else None
     hub = hub_from_config(cfg, a.mcp_config, defaults={"strata": strata_default} if strata_default else None)   # before the minutes of loading: a bad entry stops here
     if a.offline and (hub is not None or cfg.get("before_load") or a.before_load):
         ap.error("--offline requires MCP servers and before_load commands to be disabled in this profile")
