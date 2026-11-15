@@ -122,6 +122,47 @@ class HostedTools(unittest.TestCase):
         self.assertIn(", idle (this is the server and the model this chat runs on)", idle["summary"])
         self.assertIn(", busy (this is the server and the model this chat runs on; the request", busy["summary"])
 
+    def launch_config(self):
+        """A config as `strata launch` writes it: its own file name, and the engine named as a package."""
+        cfg = self.data / "q2_0-128k.json"
+        cfg.write_text(json.dumps({"port": self.port, "log": str(self.log), "model_name": "qwen-test",
+                                   "exe": "component:strata-engine", "args": []}), encoding="utf-8")
+        self.config.unlink()
+        self.config = cfg
+
+    def test_a_launch_config_keeps_its_name_and_is_ready_with_the_engine_package(self):
+        self.assertEqual(M.config_tag(Path("strata-q2_0.json")), "q2_0")
+        self.assertEqual(M.config_tag(Path("q2_0-128k.json")), "q2_0-128k", "not cut by the length of 'strata-'")
+        self.launch_config()
+        t, s = self.tools()
+        engine = self.data / "engine" / "strata"
+        engine.parent.mkdir()
+        engine.write_text("", encoding="utf-8")
+        found = {"exe": str(engine), "root": str(engine.parent), "version": "0.1.60", "backend": "cuda"}
+        with mock.patch.object(s, "component_engine", return_value=found):
+            d = s.describe_config(self.config)
+            info = s.engine_info()
+        self.assertEqual((d["model"], d["ready"], d["missing_files"]), ("q2_0-128k", True, []))
+        self.assertEqual((info["version"], info["folder"], info["backend"]), ("0.1.60", str(engine.parent), "cuda"))
+        with mock.patch.object(s, "component_engine", return_value=None):
+            d = s.describe_config(self.config)
+            self.assertEqual(s.engine_info(), {"folder": None, "version": None})
+        self.assertEqual((d["ready"], d["missing_files"]), (False, ["component:strata-engine"]), "no engine package: said as before")
+
+    def test_the_engine_package_lookup_never_raises(self):
+        t, s = self.tools()
+        with mock.patch.dict(os.environ, {"STRATA_COMPONENTS_DIR": str(self.data / "none")}):
+            self.assertIsNone(s.component_engine())
+
+    def test_asking_for_the_server_log_of_the_chats_own_server_gives_its_engine_log(self):
+        t, s = self.tools()
+        out = t.strata_logs(source="server")
+        self.assertEqual(out["log"], str(self.log))
+        self.assertIn("was not started by these tools", out["summary"])
+        self.assertEqual(out["lines"][-1], "engine line 2")
+        t2, _ = self.tools(hosted=False)
+        self.assertEqual(t2.strata_logs(source="server")["lines"], [], "started by hand: the tools' own (empty) server log, as before")
+
     def test_without_a_host_nothing_changes(self):
         t, s = self.tools(hosted=False)
         self.assertIsNone(s.host)
