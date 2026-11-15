@@ -937,6 +937,31 @@ function onTool(m, x) {
                       state: x.skipped ? "skipped" : x.ok ? "done" : "error"});
   }
 }
+// The answer is rewritten on every frame while it streams. Setting innerHTML made every tool row anew each time, so
+// its icons and its fold were drawn again on every token (seen as a flicker; this fork, 2026-11-15). A tool row whose
+// HTML did not change now stays the same element: `fresh` is the new content in order, {node, html} with html set for
+// a tool row only, and only what differs is taken out or put in.
+function patchAnswer(bubble, fresh) {
+  let cur = bubble.firstChild;
+  for (const {node, html} of fresh) {
+    let was = null;
+    if (html) for (let c = cur; c; c = c.nextSibling) if (c._toolHtml === html) { was = c; break; }
+    if (was) {
+      while (cur !== was) { const next = cur.nextSibling; cur.remove(); cur = next; }
+      cur = was.nextSibling;
+    } else {
+      if (html) node._toolHtml = html;
+      bubble.insertBefore(node, cur);
+    }
+  }
+  while (cur) { const next = cur.nextSibling; cur.remove(); cur = next; }
+}
+function setAnswer(bubble, html) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  patchAnswer(bubble, Array.from(tpl.content.childNodes).map((node) =>
+    ({node, html: node.nodeType === 1 && node.matches("details.tool-call") ? node.outerHTML : null})));
+}
 function updateAssistant(el, m, streaming) {
   const det = el.querySelector("details.think");
   if (m.reasoning) {
@@ -958,7 +983,7 @@ function updateAssistant(el, m, streaming) {
   } else if (!m.text && streaming && !(m.tools && m.tools.length)) {
     bubble.innerHTML = m.reasoning ? `<span class="muted cursor">Writing</span>` : `<span class="cursor"></span>`;
   } else {
-    bubble.innerHTML = answerHtml(m);
+    setAnswer(bubble, answerHtml(m));
     hydrateToolImages(bubble);
     if (settings.math) StrataMath.hydrate(bubble);
     if (streaming) bubble.classList.add("cursor"); else bubble.classList.remove("cursor");

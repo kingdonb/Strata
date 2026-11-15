@@ -55,6 +55,13 @@ HOST_WORDS = ("the Strata server this chat runs on: it started these tools for i
               "that is answering now")
 
 
+def config_tag(path: Path) -> str:
+    """The id of a run config: strata-<id>.json as setup writes it; the whole file name for a config of another name
+    (`strata launch` keeps its own, for example q2_0-128k.json)."""
+    stem = Path(path).stem
+    return stem[len("strata-"):] if stem.startswith("strata-") else stem
+
+
 def host_from_env(environ=None) -> dict | None:
     """The server that started these tools for its own chat ({"port", "config", "key"}), None when nothing did."""
     environ = os.environ if environ is None else environ
@@ -726,8 +733,11 @@ class Strata:
 
         def val(k):
             return a[a.index(k) + 1] if k in a and a.index(k) + 1 < len(a) else None
-        tag = path.stem[len("strata-"):]
-        missing = [p for p in [cfg.get("exe"), *[x for x in a if isinstance(x, str) and x.endswith(".gguf")]]
+        tag = config_tag(path)
+        exe = cfg.get("exe")
+        if isinstance(exe, str) and exe.startswith("component:"):   # the Terminal's engine package, found again at each start
+            exe = (self.component_engine() or {}).get("exe") or exe
+        missing = [p for p in [exe, *[x for x in a if isinstance(x, str) and x.endswith(".gguf")]]
                    if not p or not Path(p).exists()]
         gaps = shard_gaps([x for x in a if isinstance(x, str) and x.endswith(".gguf")])   # a model in parts is whole only with every part
         missing += gaps
@@ -844,7 +854,7 @@ class Strata:
         """What the installed models take on disk, from the real files: each model's own files, the files shared between models
         (the picture reader, the draft layer) counted ONCE, and the total.  A model's own figure leaves out the shared files and
         every other model's; rows plus 'shared' add up to the total."""
-        per = {c.stem[len("strata-"):]: self.used_files(self.read_config(c)) for c in self.configs()}
+        per = {config_tag(c): self.used_files(self.read_config(c)) for c in self.configs()}
         owners: dict = {}
         for files in per.values():
             for k in files:
@@ -907,7 +917,7 @@ class Strata:
                                   p.with_name(p.name + ".part.chunks")):
                         if extra.exists():
                             remove.append({"path": str(extra), "kind": "file", "bytes": self.tree_bytes(extra)})
-        tag = config.stem[len("strata-"):]
+        tag = config_tag(config)
         for extra in (config, config.with_name(config.name + ".bak"), config.with_name(f"strata-{tag}.log"),
                       self.root / f"run-{tag}.bat", self.root / f"run-{tag}.sh"):
             if extra.exists():
@@ -922,7 +932,7 @@ class Strata:
         if not model:
             return have[0]                              # the most recently used, as setup starts it
         m = model.strip().lower()
-        exact = [c for c in have if c.stem[len("strata-"):] == m]
+        exact = [c for c in have if config_tag(c) == m]
         if exact:
             return exact[0]
         by_name = [c for c in have if str(self.read_config(c).get("model_name", "")).lower() == m]
@@ -932,7 +942,7 @@ class Strata:
         if len(ends) == 1:
             return ends[0]
         raise ToolError(f"no installed model {model!r}; installed: " +
-                        ", ".join(c.stem[len("strata-"):] for c in have))
+                        ", ".join(config_tag(c) for c in have))
 
     def engine_info(self) -> dict:
         for d in ("engine",):
@@ -942,7 +952,30 @@ class Strata:
                         "backend": meta.get("backend")}
             except (OSError, ValueError):
                 continue
+        comp = self.component_engine()                   # an installed Terminal: the engine is a package of its own
+        if comp:
+            return {"folder": comp.get("root"), "version": comp.get("version"), "backend": comp.get("backend"),
+                    "source": "the Terminal's engine package (strata update installs it)"}
         return {"folder": None, "version": None}
+
+    def component_engine(self) -> dict | None:
+        """The engine package an installed Terminal starts on this PC (what a run config's "component:strata-engine"
+        names), None when there is none or this Strata has no such packages.  Only looked at, and at most once a minute."""
+        now = time.time()
+        cached = getattr(self, "_component_engine", None)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        found = None
+        try:
+            if str(self.src) not in sys.path:
+                sys.path.insert(0, str(self.src))
+            from strata_control import engine_component
+            report = engine_component.status()
+            found = report.get("engine") if report.get("usable") else None
+        except Exception as e:                           # noqa: BLE001 - a source checkout or an older Terminal: no packages
+            log(f"the engine package could not be looked up ({type(e).__name__})")
+        self._component_engine = (now, found)
+        return found
 
     def installed(self) -> dict:
         data = self.data_dir()
@@ -1222,7 +1255,7 @@ class Strata:
         models, families, _ctx, _src = self.tables()
         from strata_control import fit_label
         ram = float(hw.get("ram_gb") or 0)
-        have = {c.stem[len("strata-"):] for c in self.configs()}
+        have = {config_tag(c) for c in self.configs()}
         out = []
         for family in (self.mac().all_families() if self.mac() else ("qwen", "gyro")):      # Qwen, Unsloth's sets, then Gyro: never the default
             fd = families.get(family)
@@ -1369,7 +1402,7 @@ class Strata:
         vram = max((g["vram_gb"] for g in usable), default=0.0)
         from strata_control import fit_label
         card_room = fit_label.card_room_gb(usable)
-        have = {c.stem[len("strata-"):] for c in self.configs()}
+        have = {config_tag(c) for c in self.configs()}
         out = []
         for f, fd in sorted(families.items(), key=lambda kv: bool(kv[1].get("feed"))):      # the signed feed's models after the built-in ones (False sorts first, the order is kept)
             sizes = []
@@ -2571,10 +2604,17 @@ class Tools:
             path = Path(raw)
             if not own and not s.allowed(path):
                 raise ToolError(f"{cfg.name}'s log {raw} is outside the Strata folder and its data folder: not shown")
+        note = ""
+        if source == "server" and hosted and not path.exists():
+            # the chat's own server was not started by these tools, so they kept no log of it: its engine log is the one to read
+            raw = s.read_config(s.host["config"]).get("log")
+            if raw and Path(raw).exists():
+                source, path = "engine", Path(raw)
+                note = " (the server this chat runs on was not started by these tools, so there is no server log of theirs; this is its engine log)"
         if not path.exists():
             return {"summary": f"no {source} log yet ({path})", "log": str(path), "lines": []}
         tail = read_tail(path, lines)
-        return {"summary": f"last {len(tail)} lines of the {source} log", "log": str(path), "lines": tail}
+        return {"summary": f"last {len(tail)} lines of the {source} log" + note, "log": str(path), "lines": tail}
 
     # ---- strata_benchmark
     def strata_benchmark(self, port=None, max_tokens=200) -> dict:
