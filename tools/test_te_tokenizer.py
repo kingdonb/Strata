@@ -13,7 +13,6 @@ import json
 import shutil
 import struct
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,7 +37,7 @@ class TokenizerMatchesSdcpp(unittest.TestCase):
             raise AssertionError("build failed:\n" + r.stderr[-4000:])
         cls.cases = json.loads((DATA / "te_tok_expected.json").read_text())
         lines = [f"{c['name']} {base64.b64decode(c['prompt_b64']).hex()}" for c in cls.cases]
-        (d / "cases.txt").write_text("\n".join(lines) + "\n")
+        (d / "cases.txt").write_text("\n".join(lines) + "\n", newline="\n")      # read byte for byte: no CR on Windows
         r = subprocess.run([str(cls.exe), "run", str(DATA / "te_tok_merges.txt"), str(d / "cases.txt"), str(d / "out.txt")],
                            capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
@@ -58,7 +57,6 @@ class TokenizerMatchesSdcpp(unittest.TestCase):
         for prefix in ("gate_", "long_", "special_", "gguf_literal_", "w_", "u_", "e_", "l_", "x_", "r_"):
             self.assertTrue(any(n.startswith(prefix) for n in names), prefix)
 
-    @unittest.skipIf(sys.platform == "win32", "fork: fails on upstream v0.2.14 too on this system (upstream check run 43742804321); upstream runs it green on Linux only")
     def test_every_case_matches(self):
         bad = []
         for c in self.cases:
