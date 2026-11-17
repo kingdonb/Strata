@@ -227,7 +227,6 @@ class Noise(unittest.TestCase):
             self.assertEqual(QI.native_hash(), before)
         self.assertFalse({p.name for p in QI.NATIVE_DIR.iterdir()} & (set(QI.NOISE_FILES) - {"apply.py"}))   # both folders have an apply.py
 
-    @unittest.skipIf(sys.platform == "win32", "fork: fails on upstream v0.2.14 too on this system (upstream check run 43742804321); upstream runs it green on Linux only")
     def test_noise_hash(self):
         with tempfile.TemporaryDirectory() as d:
             for name in QI.NOISE_FILES:
@@ -237,7 +236,7 @@ class Noise(unittest.TestCase):
                 self.assertRegex(h, r"^[0-9a-f]{16}$")
                 self.assertEqual(h, QI.noise_hash())
                 p = Path(d) / "strata_noise.hpp"
-                p.write_bytes(p.read_bytes().replace(b"\n", b"\r\n"))        # a Windows checkout: the same hash
+                p.write_bytes(p.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))   # a Windows checkout: the same hash (the file may be CRLF already)
                 self.assertEqual(QI.noise_hash(), h)
                 p.write_bytes(p.read_bytes() + b"// edit\n")
                 self.assertNotEqual(QI.noise_hash(), h)
@@ -306,7 +305,6 @@ class VaeDecoder(unittest.TestCase):
         for backend in ("vulkan", "cpu"):
             self.assertEqual(QI.build_stamp(backend, None, False, True), QI.build_stamp(backend, None))
 
-    @unittest.skipIf(sys.platform == "win32", "fork: fails on upstream v0.2.14 too on this system (upstream check run 43742804321); upstream runs it green on Linux only")
     def test_vae_hash_follows_the_decoder_sources(self):
         h = QI.vae_hash()
         self.assertRegex(h, r"^[0-9a-f]{16}$")
@@ -321,7 +319,7 @@ class VaeDecoder(unittest.TestCase):
                 (Path(d) / src).write_bytes((ROOT / src).read_bytes())
             (Path(d) / mod.HIP_COMPAT).mkdir(parents=True, exist_ok=True)
             for f in (ROOT / mod.HIP_COMPAT).iterdir():
-                (Path(d) / mod.HIP_COMPAT / f.name).write_bytes(f.read_bytes().replace(b"\n", b"\r\n"))
+                (Path(d) / mod.HIP_COMPAT / f.name).write_bytes(f.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))   # (CRLF already in a Windows checkout)
             self.assertEqual(QI.vae_hash(Path(d)), h)                  # a CRLF checkout: the same hash
             p = Path(d) / "src" / "image" / "vae" / "wan_vae.cu"
             p.write_bytes(p.read_bytes() + b"// edit\n")

@@ -3,10 +3,10 @@
 This fork is upstream Strata plus a small set of additions. It is built from source on the owner's Mac. It does not
 publish installers, engine packages or an update feed of its own yet; that is planned (see "Releasing from the fork").
 
-- Base: upstream **v0.2.14.1**, merged on 2026-11-15 with an ordinary `git merge` (v0.2.14 first: six files
-  conflicted, all of them files of the table below; then the Control-only update v0.2.14.1, no conflicts).
+- Base: upstream **v0.2.15**, merged on 2026-11-17 with an ordinary `git merge` (two conflicts: AGENTS.md's version
+  line, and a test the fork had skipped and upstream fixed).
 - Upstream 0.2.14 removed DeepSeek V4.1-Flash from the tree. The fork follows: it has no DeepSeek either.
-- Versions: upstream's (app 0.2.14, Terminal 0.2.14.1, Control 0.1.60.1, engine 0.1.60). The fork no longer keeps a version
+- Versions: upstream's (app and Terminal 0.2.15, Control 0.1.61, engine 0.1.60). The fork no longer keeps a version
   line of its own. A fork release will add a suffix to upstream's number (owner decision, 2026-11-14).
 - Until the fork has its own feed, the built-in update address is still upstream's
   (`github.com/Niko1221/Strata/releases/latest/download`). `strata update` and the app's Update button would install
@@ -15,7 +15,7 @@ publish installers, engine packages or an update feed of its own yet; that is pl
 
 ## What the fork adds
 
-Everything else in the tree is upstream's file, byte for byte. `git diff v0.2.14.1 HEAD --stat` lists the whole
+Everything else in the tree is upstream's file, byte for byte. `git diff v0.2.15 HEAD --stat` lists the whole
 difference.
 
 | Addition | Where |
@@ -37,7 +37,7 @@ Merge a release tag. Do not apply path-scoped diffs by hand again.
 
 ```
 git fetch origin --tags
-git merge v0.2.15          # the next upstream tag
+git merge v0.2.16          # the next upstream tag
 ```
 
 Conflicts can only appear in the files of the table above. For each one, take upstream's change and keep the fork's
@@ -58,7 +58,7 @@ After a merge:
    ```
 
    Many tests fail on a Mac on pristine upstream too. Compare with the same run of the upstream tag
-   (`scripts/check_guarded.sh v0.2.14.1`) before reading a failure as the fork's.
+   (`scripts/check_guarded.sh v0.2.15`) before reading a failure as the fork's.
    After adding a `STRATA_*` setting to the engine, add it to `data/settings-register.json` (run
    `python tools/settings_register.py`, keep only the new entries, fill in `status`, `owner`, `note`); after adding a
    folder under `bench/results`, run `python tools/bench_results_index.py` in a clean checkout.
@@ -67,7 +67,7 @@ After a merge:
    `prefix_plan_test`, `moe_sim`).
 3. Run the Qwen3.6 gates on the Mac with the model loaded. The commands are in [QWEN36_METAL.md](QWEN36_METAL.md).
 
-Push the upstream tags the fork merged (`v0.2.2`, `v0.2.3.1`, `v0.2.13.1`, `v0.2.14`, `v0.2.14.1` so far) to the fork, not every upstream tag.
+Push the upstream tags the fork merged (`v0.2.2`, `v0.2.3.1`, `v0.2.13.1`, `v0.2.14`, `v0.2.14.1`, `v0.2.15` so far) to the fork, not every upstream tag.
 
 ### Names the two sides share
 
