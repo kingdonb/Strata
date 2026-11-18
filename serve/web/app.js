@@ -992,6 +992,14 @@ function setAnswer(bubble, html) {
   patchAnswer(bubble, Array.from(tpl.content.childNodes).map((node) =>
     ({node, html: node.nodeType === 1 && node.matches("details.tool-call") ? node.outerHTML : null})));
 }
+// The thinking box has its own scroll (max-height in app.css). New thinking is added at its end, and nothing moved the box,
+// so once it was full the thinking went on below its edge, out of view (this fork, 2026-11-17, seen on chudmax). The box
+// now follows its end like the page does, and lets go when the reader scrolls up inside it.
+function followText(box, text) {
+  const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight <= FOLLOW_SLACK;
+  box.textContent = text;
+  if (atEnd) box.scrollTop = box.scrollHeight;
+}
 function updateAssistant(el, m, streaming) {
   const det = el.querySelector("details.think");
   if (m.reasoning) {
@@ -1000,7 +1008,7 @@ function updateAssistant(el, m, streaming) {
     el.querySelector(".think-title").textContent = thinkingNow ? tr("think.now", "Thinking…") :
       m.thinkSecs != null ? tr("think.for", "Thought for {s} s", {s: fmt(m.thinkSecs, 1)}) : tr("think.done", "Thoughts");
     const body = el.querySelector(".thinking");
-    if (det.open || thinkingNow) body.textContent = m.reasoning;
+    if (det.open || thinkingNow) followText(body, m.reasoning);
     else body.dataset.pending = "1";
     // open while it streams (if wanted), closed once the answer starts - unless the user toggled it themselves
     if (thinkingNow && settings.show && !det.dataset.touched && !det.open) { det._auto = true; det.open = true; }

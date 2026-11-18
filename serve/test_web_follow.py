@@ -39,6 +39,33 @@ class WebFollow(unittest.TestCase):
         self.assertFalse(self.follow(100, True, 20))
         self.assertFalse(self.follow(40, True, 20))
 
+    def box(self, steps):
+        """This fork: followText on a stand-in box 420 px tall whose content grows 30 px per text; `steps` is a list
+        of reader scrollTop values (None = the reader leaves it). Returns the distance from the end after each step."""
+        fn = between(self.src, "function followText", "function updateAssistant")
+        js = self.rule + fn + """
+const box = {clientHeight: 420, scrollHeight: 420, top: 0, n: 0,          // like a browser: scrollTop stays inside 0..scrollHeight-clientHeight
+             get scrollTop() { return this.top; }, set scrollTop(v) { this.top = Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight)); },
+             set textContent(t) { this.n++; this.scrollHeight = Math.max(420, this.n * 30); this.scrollTop = this.top; }};
+const out = [];
+for (const reader of %s) {
+  if (reader !== null) box.scrollTop = reader;
+  followText(box, "x");
+  out.push(box.scrollHeight - box.scrollTop - box.clientHeight);
+}
+console.log(JSON.stringify(out));""" % json.dumps(steps)
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_the_thinking_box_keeps_its_end_in_view_while_it_grows(self):
+        self.assertEqual(self.box([None] * 40), [0] * 40, "past 420 px the end stays in view")
+
+    def test_the_thinking_box_lets_go_when_the_reader_scrolls_up_inside_it(self):
+        out = self.box([None] * 30 + [100] + [None] * 5)
+        self.assertGreater(out[-1], 24, "scrolled up inside the box: it is not pulled back")
+        self.assertIn("followText(body, m.reasoning)", self.src, "the streaming thinking uses it")
+
     def test_back_at_the_bottom_it_follows_again(self):
         self.assertTrue(self.follow(0, False, 10_000))
         self.assertTrue(self.follow(24, False, 10_000))
