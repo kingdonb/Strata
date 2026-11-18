@@ -943,14 +943,51 @@ function hydrateToolImages(root) {
 function answerMarkdown(text) {
   return settings.math ? StrataMath.markdown(text, markdown) : markdown(text);
 }
-function answerHtml(m) {
+// The thinking of one answer comes in rounds: before the first tool call, then after each round of tool calls. m.reasoning
+// holds all of it, and each tool records where the thinking stood when it was called (rat). The first round is the box
+// at the top of the answer; each later round is drawn below the tool calls it follows (this fork, 2026-11-17: thinking
+// after a tool call went into the top box, out of view above the tool rows, while it streamed). A chat saved without
+// rat on its tools keeps all its thinking in the top box, as before.
+function splitThinking(m) {
+  const tools = m.tools || [];
+  return tools.length > 0 && tools.every((t, k) => typeof t.rat === "number" && (k === 0 || t.rat >= tools[k - 1].rat));
+}
+function firstThinking(m) {
+  return splitThinking(m) ? (m.reasoning || "").slice(0, m.tools[0].rat) : (m.reasoning || "");
+}
+// the thinking after tool k, when k is the last call of its round: from its rat to the next round's (or the end)
+function roundThinking(m, k) {
+  const tools = m.tools, t = tools[k], next = tools[k + 1];
+  if (!splitThinking(m) || (next && next.rat === t.rat)) return null;
+  return (m.reasoning || "").slice(t.rat, next ? next.rat : undefined).replace(/^\s+/, "");
+}
+// the box of a later round: an empty shell (its text is written by followText after the answer is set, so the shell's
+// HTML stays the same while it streams and patchAnswer keeps it, with its own scroll)
+function roundThinkingHtml(m, k, streaming) {
+  const text = roundThinking(m, k);
+  if (!text) return "";
+  const t = m.tools[k];
+  const now = streaming && k === m.tools.length - 1 && m.text.length <= (t.at || 0);
+  const open = t.thinkOpen != null ? t.thinkOpen : now && settings.show;
+  return `<details class="st-collapse think think-round" data-round="${k}"${open ? " open" : ""}><summary>${icon("thinking", "st-icon st-icon--sm")}` +
+    `<span class="think-title">${esc(now ? tr("think.now", "Thinking…") : tr("think.done", "Thoughts"))}</span>` +
+    `${icon("chevron", "st-icon st-icon--sm st-chev")}</summary><div class="st-collapse__body thinking"></div></details>`;
+}
+function fillRoundThinking(bubble, m) {
+  bubble.querySelectorAll(":scope > details.think-round").forEach((d) => {
+    const text = roundThinking(m, +d.dataset.round) || "";
+    const body = d.querySelector(".thinking");
+    if (body.textContent !== text) followText(body, text);
+  });
+}
+function answerHtml(m, streaming = false) {
   if (!m.tools || !m.tools.length) return answerMarkdown(m.text || "");
   let html = "", pos = 0;
   m.tools.forEach((t, k) => {
     const at = Math.min(Math.max(t.at || 0, pos), m.text.length);
     if (at > pos) html += answerMarkdown(m.text.slice(pos, at));
     pos = at;
-    html += toolHtml(t, k) + toolImages(t);
+    html += toolHtml(t, k) + toolImages(t) + roundThinkingHtml(m, k, streaming);
   });
   return html + answerMarkdown(m.text.slice(pos));
 }
@@ -990,17 +1027,26 @@ function setAnswer(bubble, html) {
   const tpl = document.createElement("template");
   tpl.innerHTML = html;
   patchAnswer(bubble, Array.from(tpl.content.childNodes).map((node) =>
-    ({node, html: node.nodeType === 1 && node.matches("details.tool-call") ? node.outerHTML : null})));
+    ({node, html: node.nodeType === 1 && node.matches("details.tool-call, details.think-round") ? node.outerHTML : null})));
+}
+// The thinking box has its own scroll (max-height in app.css). New thinking is added at its end, and nothing moved the box,
+// so once it was full the thinking went on below its edge, out of view (this fork, 2026-11-17, seen on chudmax). The box
+// now follows its end like the page does, and lets go when the reader scrolls up inside it.
+function followText(box, text) {
+  const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight <= FOLLOW_SLACK;
+  box.textContent = text;
+  if (atEnd) box.scrollTop = box.scrollHeight;
 }
 function updateAssistant(el, m, streaming) {
-  const det = el.querySelector("details.think");
-  if (m.reasoning) {
+  const det = el.querySelector(":scope > details.think");
+  const first = firstThinking(m);
+  if (first) {
     det.hidden = false;
-    const thinkingNow = streaming && !m.text;
-    el.querySelector(".think-title").textContent = thinkingNow ? tr("think.now", "Thinking…") :
+    const thinkingNow = streaming && !m.text && !(m.tools && m.tools.length);
+    det.querySelector(".think-title").textContent = thinkingNow ? tr("think.now", "Thinking…") :
       m.thinkSecs != null ? tr("think.for", "Thought for {s} s", {s: fmt(m.thinkSecs, 1)}) : tr("think.done", "Thoughts");
-    const body = el.querySelector(".thinking");
-    if (det.open || thinkingNow) body.textContent = m.reasoning;
+    const body = det.querySelector(".thinking");
+    if (det.open || thinkingNow) followText(body, first);
     else body.dataset.pending = "1";
     // open while it streams (if wanted), closed once the answer starts - unless the user toggled it themselves
     if (thinkingNow && settings.show && !det.dataset.touched && !det.open) { det._auto = true; det.open = true; }
@@ -1013,7 +1059,8 @@ function updateAssistant(el, m, streaming) {
   } else if (!m.text && streaming && !(m.tools && m.tools.length)) {
     bubble.innerHTML = m.reasoning ? `<span class="muted cursor">Writing</span>` : `<span class="cursor"></span>`;
   } else {
-    setAnswer(bubble, answerHtml(m));
+    setAnswer(bubble, answerHtml(m, streaming));
+    fillRoundThinking(bubble, m);
     hydrateToolImages(bubble);
     if (settings.math) StrataMath.hydrate(bubble);
     if (streaming) bubble.classList.add("cursor"); else bubble.classList.remove("cursor");
@@ -1089,6 +1136,15 @@ $("chat").addEventListener("click", (e) => {
   const mc = e.target.closest("[data-msg-copy]");
   if (mc) { const i = +mc.closest(".st-msg").dataset.i; copyText(messages[i].text, mc); return; }
   // a tool block: its open state lives in the message (the answer is rebuilt while it streams), so the click sets it
+  const tr0 = e.target.closest(".think-round > summary");
+  if (tr0) {
+    e.preventDefault();
+    const el = tr0.closest(".st-msg"), m = messages[+el.dataset.i], d = tr0.parentElement, t = m && m.tools && m.tools[+d.dataset.round];
+    if (!t) return;
+    t.thinkOpen = !d.open;
+    updateAssistant(el, m, !!busy && busy.msg === m);
+    return;
+  }
   const sum = e.target.closest(".tool-call > summary");
   if (sum) {
     e.preventDefault();
@@ -1100,11 +1156,11 @@ $("chat").addEventListener("click", (e) => {
 });
 $("chat").addEventListener("toggle", (e) => {
   const d = e.target;
-  if (d.tagName !== "DETAILS" || !d.classList.contains("think")) return;
+  if (d.tagName !== "DETAILS" || !d.classList.contains("think") || d.classList.contains("think-round")) return;
   if (d._auto) { d._auto = false; return; }          // our own open/close, not the user's
   d.dataset.touched = "1";
   const body = d.querySelector(".thinking");
-  if (d.open && body.dataset.pending) { body.textContent = messages[+d.closest(".st-msg").dataset.i].reasoning; delete body.dataset.pending; }
+  if (d.open && body.dataset.pending) { body.textContent = firstThinking(messages[+d.closest(".st-msg").dataset.i]); delete body.dataset.pending; }
 }, true);
 
 function apiMessages() {

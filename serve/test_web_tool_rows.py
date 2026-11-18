@@ -94,7 +94,7 @@ class ToolRows(unittest.TestCase):
         self.assertIn('use href="${SPRITE}#i-${name}"', self.src, "a later icon follows SPRITE, which is empty after the copy")
 
     def test_the_streaming_answer_uses_it(self):
-        self.assertIn("setAnswer(bubble, answerHtml(m));", self.src)
+        self.assertIn("setAnswer(bubble, answerHtml(m, streaming));", self.src)
         self.assertNotIn("bubble.innerHTML = answerHtml(m)", self.src)
 
 
