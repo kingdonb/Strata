@@ -64,7 +64,8 @@ console.log(JSON.stringify(out));""" % json.dumps(steps)
     def test_the_thinking_box_lets_go_when_the_reader_scrolls_up_inside_it(self):
         out = self.box([None] * 30 + [100] + [None] * 5)
         self.assertGreater(out[-1], 24, "scrolled up inside the box: it is not pulled back")
-        self.assertIn("followText(body, m.reasoning)", self.src, "the streaming thinking uses it")
+        self.assertIn("followText(body, first)", self.src, "the streaming thinking uses it")
+        self.assertIn("followText(body, text)", self.src, "and each later round's box")
 
     def test_back_at_the_bottom_it_follows_again(self):
         self.assertTrue(self.follow(0, False, 10_000))
