@@ -4,7 +4,10 @@ import {nvfp4Version} from './native-names';
 export interface CatalogVersion extends NativeSize{sourceFamily:string;edition:string;images:boolean}
 export interface CatalogModel extends Omit<NativeFamily,'sizes'>{sizes:CatalogVersion[]}
 export function nativeVersionLabel(model:string){const nv=nvfp4Version(model);if(nv)return tr(nv.name);return tr(({Q2_0:'Fastest',IQ2_XS:'Compact',IQ3_XXS:'Balanced',IQ3_S:'High quality',IQ1_M:'Coding','Gyro-S':'Smallest','Gyro-M':'Small memory'} as Record<string,string>)[model]??model);}
-export const catalogVersionLabel=(version:CatalogVersion)=>{const label=nativeVersionLabel(version.model);return [tr(version.edition),label===version.model&&version.edition?'':label].filter(Boolean).join(' · ');};
+/** Qwen3.6 sizes, labelled through the family: their bare names are Flash-Next sets in the same tables (docs/FORK.md, "Names the two sides share"),
+ *  so they are never added to the bare-name map above. Plain strings like the Gyro labels, which are not catalog keys either. */
+const QWEN36_LABELS:Record<string,string>={'UD-Q4_K_XL':'Smallest','UD-Q6_K_XL':'High quality','Q8_0':'Highest quality'};
+export const catalogVersionLabel=(version:CatalogVersion)=>{const label=version.sourceFamily==='qwen36'?tr(QWEN36_LABELS[version.model]??version.model):nativeVersionLabel(version.model);return [tr(version.edition),label===version.model&&version.edition?'':label].filter(Boolean).join(' · ');};
 /**
  * Models whose picture files Load fetches by itself (strata_control/pictures.py): the Flash-Next GGUF families, which share the original's reader (Swift has its own file).
  * NVFP4 packs and Qwen3.6 keep the installer for their pictures. With these the Load of a model that is on this computer never runs the installer again just
