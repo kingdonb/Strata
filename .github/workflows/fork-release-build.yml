@@ -1,10 +1,10 @@
 # The fork's release build (kingdonb/Strata): the Terminal (Control) packages of a fork release, built without a key.
 # docs/FORK.md, "Releasing from the fork", is the guide. Upstream has no release workflow; it builds on build boxes
-# and signs on a release PC (packaging/UPDATES.md). This follows the same split: this job builds and packs, and the
+# and signs on a release PC (tools/packaging/UPDATES.md). This follows the same split: this job builds and packs, and the
 # owner signs the feed on their own machine with the key that never leaves it.
 #
-# A package for a system is built on that system (packaging/package_terminal.py), so there is one job per system.
-# Before packaging, scripts/fork_release.py bakes the fork's release address and public feed key into the checkout.
+# A package for a system is built on that system (tools/packaging/package_terminal.py), so there is one job per system.
+# Before packaging, tools/fork/fork_release.py bakes the fork's release address and public feed key into the checkout.
 name: Fork release build
 
 on:
@@ -32,19 +32,19 @@ jobs:
         with:
           python-version: '3.12'
       - name: Bake the fork's address and key
-        run: python scripts/fork_release.py bake .
+        run: python tools/fork/fork_release.py bake .
       - name: Build the Terminal
-        run: python packaging/package_terminal.py --out "$RUNNER_TEMP/terminal" --target ${{ matrix.target }} --commit "$GITHUB_SHA"
+        run: python tools/packaging/package_terminal.py --out "$RUNNER_TEMP/terminal" --target ${{ matrix.target }} --commit "$GITHUB_SHA"
       - name: Smoke test the archive
-        run: python packaging/smoke_terminal.py "$RUNNER_TEMP"/terminal/strata-terminal-*.tar.gz
+        run: python tools/packaging/smoke_terminal.py "$RUNNER_TEMP"/terminal/strata-terminal-*.tar.gz
       - name: Pack it as the feed's Control package
         run: |
-          version=$(python -c "import sys; sys.path.insert(0, 'packaging'); import package_terminal as p; print(p._source_version())")
+          version=$(python -c "import sys; sys.path.insert(0, 'tools/packaging'); import package_terminal as p; print(p._source_version())")
           mkdir -p "$RUNNER_TEMP/unpacked" "$RUNNER_TEMP/release/control"
           tar -xzf "$RUNNER_TEMP"/terminal/strata-terminal-*.tar.gz -C "$RUNNER_TEMP/unpacked"
-          python packaging/feed_tool.py pack-control "$RUNNER_TEMP"/unpacked/strata-terminal-* --version "$version" \
+          python tools/packaging/feed_tool.py pack-control "$RUNNER_TEMP"/unpacked/strata-terminal-* --version "$version" \
             --platform ${{ matrix.platform }} --out "$RUNNER_TEMP/release/control" --url-prefix=
-          cp packaging/install.sh packaging/install.ps1 "$RUNNER_TEMP/release/"
+          cp tools/packaging/install.sh tools/packaging/install.ps1 "$RUNNER_TEMP/release/"
           ls -l "$RUNNER_TEMP/release/control"
           cat "$RUNNER_TEMP"/release/control/*.entry.json
       - uses: actions/upload-artifact@v4
