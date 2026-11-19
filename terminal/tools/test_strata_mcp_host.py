@@ -139,7 +139,9 @@ class HostedTools(unittest.TestCase):
         engine.parent.mkdir()
         engine.write_text("", encoding="utf-8")
         found = {"exe": str(engine), "root": str(engine.parent), "version": "0.1.60", "backend": "cuda"}
-        with mock.patch.object(s, "component_engine", return_value=found):
+        # describe_config asks upstream's engine_here (0.2.16) whether the component is installed; engine_info asks the fork's lookup
+        with mock.patch.object(s, "component_engine", return_value=found), \
+                mock.patch.object(M.Strata, "engine_here", staticmethod(lambda reference, cfg: True)):
             d = s.describe_config(self.config)
             info = s.engine_info()
         self.assertEqual((d["model"], d["ready"], d["missing_files"]), ("q2_0-128k", True, []))
