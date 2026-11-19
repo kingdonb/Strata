@@ -91,8 +91,9 @@ runs is in `terminal/strata_control/mac_q36.py` and nowhere else.
   setup again (the model file is found where it is and not downloaded again), or add `"arch": "qwen35moe"` by hand.
   `strata launch` on a Mac installs upstream's packaged Metal engine, which has no Qwen3.6 path: use `./setup.sh`
   from this checkout until the fork publishes its own engine package.
-- **Qwen3.6 names in the app.** The labels "Compact (MTP)" and so on were dropped from
-  `app/host/src/lib/native-catalog.ts` for the same reason; the sizes show their plain names.
+- **Qwen3.6 names in the app.** Settled (task 000861, 2026-11-19): the sizes are labelled through their family
+  (`QWEN36_LABELS` in `app/host/src/lib/native-catalog.ts`, resolved by `sourceFamily`, a test in
+  `app/host/tests/qwen36-labels.test.mjs`); the bare-name map stays Flash-Next's.
 - **The Metal gates on the merged engine.** See the merge's pull request for what was run and what was not.
 
 ## Releasing from the fork
@@ -159,9 +160,12 @@ The desktop app is not part of a fork release yet: it would need a Tauri updater
   and where a suffix is allowed (the installed app's version, `terminal/strata_cli/handover.py`) it reads as a pre-release and
   sorts below the same number. So the packages of a fork release carry upstream's numbers (Control 0.1.60.1,
   engine 0.1.60).
-- Not decided: how a second fork release on the same upstream base reaches a machine that already has the first.
-  `strata update` only installs a higher version, and upstream owns the next numbers. Until that is settled, such a
-  machine is updated with `strata update --force` or installed again.
+- A second fork release on the same upstream base (a `.2` after a `.1`) carries the same package versions, because
+  they are upstream's numbers; `strata update` refuses it (it only installs a higher version). The convention the
+  releases follow (written out in the v0.2.15-mbp.rtx.2 notes): such a machine is updated by running the fork's
+  installer again — it installs the Terminal beside the old one and keeps the models and the settings — or, on the
+  command line, with `strata update --force`. A release on a newer base updates with `strata update` as usual
+  (v0.2.16-mbp.rtx.1 did: Control 0.1.62 and engine 0.1.62 are both newer than 0.1.61).
 
 ## Owner decisions on record
 
