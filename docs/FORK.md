@@ -163,8 +163,10 @@ The desktop app is not part of a fork release yet: it would need a Tauri updater
 - A second fork release on the same upstream base (a `.2` after a `.1`) carries the same package versions, because
   they are upstream's numbers; `strata update` refuses it (it only installs a higher version). The convention the
   releases follow (written out in the v0.2.15-mbp.rtx.2 notes): such a machine is updated by running the fork's
-  installer again — it installs the Terminal beside the old one and keeps the models and the settings — or, on the
-  command line, with `strata update --force`. A release on a newer base updates with `strata update` as usual
+  installer again — it installs the Terminal beside the old one and keeps the models and the settings.
+  `strata update --force` does not help here: it only tries again a version that failed its test start or was rolled
+  back from (`terminal/strata_control/updater.py`), never the one already current. A release on a newer base updates
+  with `strata update` as usual
   (v0.2.16-mbp.rtx.1 did: Control 0.1.62 and engine 0.1.62 are both newer than 0.1.61).
 
 ## Owner decisions on record
