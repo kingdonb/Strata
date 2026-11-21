@@ -3572,9 +3572,11 @@
   "s9137": "2K",
   "s9138": "8K",
   "s9139": "32K",
-  "s9140": "Motor de Strata",
-  "s9141": "Dejar que el asistente trabaje con Strata",
-  "s9142": "El asistente puede mirar tu motor de Strata: qué hay instalado y en ejecución, la lista de modelos, los registros. Iniciar, detener, una prueba de velocidad y descargar un modelo nuevo preguntan primero en el modo manual.",
-  "s9143": "No se encontró ninguna instalación de Strata en este ordenador. Conecta una (Ajustes → Motor, o la Terminal de Strata) y las herramientas aparecerán aquí.",
-  "s9144": "Los servidores conectados pueden actuar sobre los recursos que hayas configurado."
+  "s9140": "Las dos tarjetas son {0}, así que son iguales: una es la principal y la otra ayuda.",
+  "s9141": "Las {0} tarjetas son {1}, así que son iguales: una es la principal y las demás ayudan.",
+  "s9900": "Motor de Strata",
+  "s9901": "Dejar que el asistente trabaje con Strata",
+  "s9902": "El asistente puede mirar tu motor de Strata: qué hay instalado y en ejecución, la lista de modelos, los registros. Iniciar, detener, una prueba de velocidad y descargar un modelo nuevo preguntan primero en el modo manual.",
+  "s9903": "No se encontró ninguna instalación de Strata en este ordenador. Conecta una (Ajustes → Motor, o la Terminal de Strata) y las herramientas aparecerán aquí.",
+  "s9904": "Los servidores conectados pueden actuar sobre los recursos que hayas configurado."
 }
