@@ -3572,9 +3572,11 @@
   "s9137": "2K",
   "s9138": "8K",
   "s9139": "32K",
-  "s9140": "Strata engine",
-  "s9141": "Let the assistant work with Strata",
-  "s9142": "The assistant can look at your Strata engine: what is installed and running, the model list, the logs. Starting, stopping, a speed test and downloading a new model ask first in Manual mode.",
-  "s9143": "No Strata installation was found on this computer. Connect one (Settings → Engine, or the Strata Terminal), and the tools appear here.",
-  "s9144": "Connected servers can act on the resources you configured."
+  "s9140": "Both cards are {0}, so they are alike: one is Main and the other helps.",
+  "s9141": "All {0} cards are {1}, so they are alike: one is Main and the others help.",
+  "s9900": "Strata engine",
+  "s9901": "Let the assistant work with Strata",
+  "s9902": "The assistant can look at your Strata engine: what is installed and running, the model list, the logs. Starting, stopping, a speed test and downloading a new model ask first in Manual mode.",
+  "s9903": "No Strata installation was found on this computer. Connect one (Settings → Engine, or the Strata Terminal), and the tools appear here.",
+  "s9904": "Connected servers can act on the resources you configured."
 }
