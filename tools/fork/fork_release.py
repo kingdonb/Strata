@@ -7,7 +7,7 @@ A fork release differs in two places only, and both are made here, at build time
   bake TREE     Write the fork's release address and the fork's public feed key into a copy of the sources that is
                 about to be packaged (the build box's checkout, never the checkout you work in). It is the same idea
                 as tools/packaging/make_local_feed.py, which bakes a local address into install.sh.
-  carry         Take the engine and drafter entries of upstream's signed feed into entry files for build-feed, with
+  carry         Take the engine, drafter and shape-engine entries of upstream's signed feed into entry files for build-feed, with
                 their addresses made absolute. The fork's feed then names upstream's packages where they are, with
                 upstream's sizes and SHA-256; nothing of upstream's is built or uploaded again. Upstream's feed is
                 checked against upstream's key first.
@@ -88,12 +88,13 @@ def carry(feed_path: Path, sig_path: Path, tag: str, out: Path, *, skip_platform
     feedmod.verify_and_parse(payload, sig, source=str(feed_path), trusted=upstream_keys)     # raises when the signature is not upstream's
     doc = json.loads(payload)
     base = f"https://github.com/{UPSTREAM}/releases/download/{tag}/"
-    done = {"engine": [], "drafters": [], "skipped": []}
-    for member in ("engine", "drafters"):
-        folder = out / member
+    done = {"engine": [], "drafters": [], "shapes": [], "skipped": []}
+    # shape_engines (0.2.18): the engine programs of models with a shape of their own (Hy4-Flash); build-feed takes them with --shapes
+    for member, where in (("engine", "engine"), ("drafters", "drafters"), ("shape_engines", "shapes")):
+        folder = out / where
         folder.mkdir(parents=True, exist_ok=True)
         for e in (doc.get(member) or {}).get("packages", []):
-            if member == "engine" and e.get("platform") in skip_platforms:
+            if member in ("engine", "shape_engines") and e.get("platform") in skip_platforms:
                 done["skipped"].append(f"{e['platform']} {e.get('backend')} {e.get('version')}")
                 continue
             e = dict(e)
@@ -101,7 +102,7 @@ def carry(feed_path: Path, sig_path: Path, tag: str, out: Path, *, skip_platform
                 e["url"] = base + e["url"]
             name = e["url"].rsplit("/", 1)[1]
             (folder / (name + ".entry.json")).write_text(json.dumps(e, indent=1) + "\n", encoding="utf-8")
-            done[member].append(name)
+            done[where].append(name)
     done["upstream_sequence"] = doc["sequence"]
     return done
 

@@ -132,7 +132,8 @@ The steps of a release `vX-mbp.rtx.N`:
    ```
    python tools/packaging/feed_tool.py build-feed --out RELEASE --key KEYDIR/feed-key.json \
        --sequence $(python tools/fork/fork_release.py sequence --upstream-feed strata-feed.json -n N) \
-       --engine RELEASE/engine --drafters RELEASE/drafters --control RELEASE/control --no-dsv41-carry
+       --engine RELEASE/engine --drafters RELEASE/drafters --shapes RELEASE/shapes \
+       --control RELEASE/control --no-dsv41-carry
    python tools/packaging/feed_tool.py verify-feed RELEASE --pub tools/packaging/fork/feed-key.pub.json
    ```
 
