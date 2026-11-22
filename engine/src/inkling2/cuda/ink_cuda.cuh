@@ -23,13 +23,26 @@
 #include <cstring>
 #include <chrono>
 
+// A CUDA or cuBLAS error ends the process at once (_Exit), not through std::exit.  Seen on chudmax, 2026-11-22: an
+// out-of-memory error at serve time (ink_dspark.cuh, cudaGraphInstantiate) printed its line, then the process stayed
+// alive for good, holding the card: main thread waiting on a futex, the detached stdin reader (ink_serve.h ServeInput)
+// blocked in getline.  The likely cause (unconfirmed, no stack was taken): exit's stdio clean-up waits for stdin's
+// lock, which that reader holds.  _Exit runs no clean-up.  stdout and stderr are flushed by name first, never
+// fflush(nullptr), which would take stdin's lock as well.
+#define INK_DIE(code)                                                                                                 \
+    do {                                                                                                              \
+        std::fflush(stdout);                                                                                          \
+        std::fflush(stderr);                                                                                          \
+        std::_Exit(code);                                                                                             \
+    } while (0)
+
 #define INK_CK(call)                                                                                                  \
     do {                                                                                                              \
         cudaError_t _e = (call);                                                                                      \
         if (_e != cudaSuccess) {                                                                                      \
             std::fprintf(stderr, "strata-inkling CUDA error %d (%s) at %s:%d\n", (int)_e, cudaGetErrorString(_e),     \
                          __FILE__, __LINE__);                                                                         \
-            std::exit(3);                                                                                             \
+            INK_DIE(3);                                                                                               \
         }                                                                                                             \
     } while (0)
 
@@ -38,7 +51,7 @@
         cublasStatus_t _s = (call);                                                                                   \
         if (_s != CUBLAS_STATUS_SUCCESS) {                                                                            \
             std::fprintf(stderr, "strata-inkling cuBLAS error %d at %s:%d\n", (int)_s, __FILE__, __LINE__);           \
-            std::exit(3);                                                                                             \
+            INK_DIE(3);                                                                                               \
         }                                                                                                             \
     } while (0)
 
