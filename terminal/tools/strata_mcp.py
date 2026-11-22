@@ -850,12 +850,29 @@ class Strata:
         self.children = [p for p in self.children if p.poll() is None]
 
     # ---- what is installed
+    SIDE_FILES = (".shared-settings.json", ".choices.json", ".tune.json")   # beside a config, never one (#346: the Chat settings file)
+
     def configs(self) -> list[Path]:
-        have = sorted((p for p in self.root.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")),
-                      key=lambda p: p.stat().st_mtime, reverse=True)   # #346: the Chat settings file is no config
+        """The run configs in this folder, newest first: setup's strata-<tag>.json, and the <name>.json that `strata launch` writes (its
+        folder also holds <name>.choices.json and <name>.tune.json, which are no configs). A file is a config only when it is one: an
+        object with the engine ("exe") and its arguments ("args"); anything else in the folder is left alone."""
+        def is_config(p: Path) -> bool:
+            if p.name.endswith(self.SIDE_FILES):
+                return False
+            if p.name.startswith("strata-"):
+                return True
+            cfg = self.read_config(p)
+            return isinstance(cfg.get("exe"), str) and isinstance(cfg.get("args"), list)
+
+        def mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+        have = sorted((p for p in self.root.glob("*.json") if p.is_file() and is_config(p)), key=mtime, reverse=True)
         own = (self.host or {}).get("config")            # the config of the server this chat runs on, wherever it is
-        if own and own.is_file() and all(norm(own) != norm(p) for p in have):
-            have.insert(0, own)
+        if own and own.is_file():                       # first, so a tool asked about no model in particular means the chat's own
+            have = [own] + [p for p in have if norm(p) != norm(own)]
         return have
 
     @staticmethod
@@ -892,7 +909,9 @@ class Strata:
         vis = cfg.get("vision")
         own_usage = (usage or self.disk_usage())["models"].get(tag) or {"gb": 0.0, "bytes": 0, "shared_bytes": 0}
         plan = self.removal_plan(path)
+        eng = self.config_engine(cfg)
         return {"model": tag, "config": path.name, "model_name": cfg.get("model_name"),
+                **({"engine": {k: eng.get(k) for k in ("component", "version", "backend")}} if eng else {}),
                 "context": int(val("--max-context")) if str(val("--max-context") or "").isdigit() else None,
                 "kv": val("--kv"), "images": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict)
                 else ("on" if val("--vision") else "off"),
@@ -908,14 +927,15 @@ class Strata:
                 "last_used": time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))}
 
     # ---- what a model owns on disk (Delete, and the per-model disk usage in Storage)
-    FILE_FLAGS = ("--native", "--ple-gguf", "--embd-gguf", "--native-dense-gguf")
+    FILE_FLAGS = ("--native", "--ple-gguf", "--embd-gguf", "--native-dense-gguf", "--engram")
     DIR_FLAGS = ("--pack", "--mtp")
 
     def model_paths(self, cfg: dict) -> tuple[list, list]:
-        """(the GGUF files, the folders) a run config names: --native/--ple-gguf/... and --pack/--mtp, plus any other .gguf."""
+        """(the model files, the folders) a run config names: --native/--ple-gguf/--engram/... and --pack/--mtp, plus any other .gguf or
+        .strata file (a Hy4-Flash config names its Engram table and its picture reader as .strata files: --engram, --vision PATH)."""
         a = [x for x in (cfg.get("args") or []) if isinstance(x, str)]
         files = [Path(a[i + 1]) for i, x in enumerate(a[:-1]) if x in self.FILE_FLAGS]
-        files += [Path(x) for x in a if x.lower().endswith(".gguf")]
+        files += [Path(x) for x in a if x.lower().endswith((".gguf", ".strata"))]
         dirs = [Path(a[i + 1]) for i, x in enumerate(a[:-1]) if x in self.DIR_FLAGS]
         seen, once = set(), []
         for f in files:                                 # one file named by several flags is still one file
@@ -1104,6 +1124,36 @@ class Strata:
             return {"folder": comp.get("root"), "version": comp.get("version"), "backend": comp.get("backend"),
                     "source": "the Terminal's engine package (strata update installs it)"}
         return {"folder": None, "version": None}
+
+    def config_engine(self, cfg: dict) -> dict | None:
+        """The engine package a run config starts: "component:strata-engine" is the Strata engine, "component:strata-<shape>" the
+        engine of a model shape (Hy4-Flash: strata-hy4, in components/shapes/hy4), which has a version of its own. None for an
+        engine named by its path, or when the package is not found. Only looked at, and at most once a minute per package."""
+        exe = cfg.get("exe")
+        if not isinstance(exe, str) or not exe.startswith("component:"):
+            return None
+        name = exe[len("component:"):] or "strata-engine"
+        if name == "strata-engine":
+            comp = self.component_engine()
+            return {"component": name, "folder": comp.get("root"), "version": comp.get("version"),
+                    "backend": comp.get("backend")} if comp else None
+        now = time.time()
+        cache = self.__dict__.setdefault("_shape_engines", {})
+        if name in cache and now - cache[name][0] < 60:
+            return cache[name][1]
+        found = None
+        try:
+            if str(self.src) not in sys.path:
+                sys.path.insert(0, str(self.src))
+            from strata_control import shape_engine
+            shape = shape_engine.shape_of_component(name)
+            if shape:
+                e = shape_engine.find(shape)
+                found = {"component": name, "shape": shape, "folder": str(e.root), "version": e.version, "backend": e.backend}
+        except Exception as e:                           # noqa: BLE001 - not installed, or an older Terminal without shape engines
+            log(f"the engine package {name} could not be looked up ({type(e).__name__})")
+        cache[name] = (now, found)
+        return found
 
     def component_engine(self) -> dict | None:
         """The engine package an installed Terminal starts on this PC (what a run config's "component:strata-engine"
@@ -2403,6 +2453,10 @@ class Tools:
         if host:
             host["this_chat"] = True
             host["started_by"] = HOST_WORDS
+            own = s.host.get("config")
+            pkg = s.config_engine(s.read_config(own)) if own else None
+            if pkg:                                     # engine_version is what the engine calls itself (Hy4's: "hy4-serve-0"), not its package
+                host["engine_package"] = {k: pkg.get(k) for k in ("component", "version", "backend", "folder")}
             running.sort(key=lambda x: not x.get("this_chat"))
         for x in running:
             x.setdefault("started_by", "outside this MCP server (its own window, a start script or a service)")
