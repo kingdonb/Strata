@@ -31,6 +31,8 @@ difference.
 | Qwen3.6 setup on a Mac (`./setup.sh --family qwen36`) | `engine/metal/setup_mac_q36.py`, the hand-over in `engine/metal/setup_mac.py` (`qwen36_setup`), `terminal/tools/test_setup_mac_q36.py` |
 | The Qwen3.6 engine's settings in the register, its result folders in the bench index, the guarded check script | `terminal/data/settings-register.json` (13 `STRATA_Q36M_*` entries), `docs/bench-results/README.md` (two rows), `tools/fork/check_guarded.sh` |
 | The M2 validation records, the Metal roadmap and review, the sandbox notes | `docs/QWEN36_METAL*.md`, `docs/m2-sessions/`, `docs/M2_*.md`, `docs/ENVIRONMENT.md`, `docs/blog/`, `docs/bench-results/2026-10-*-m2-q36-*` |
+| A frozen engine is ended on the `--batch` path too (every Inkling request takes it, even at `--parallel 1`): the reader, a slot and the drain after a disconnect call the stall check, so a silent engine with no CPU, I/O or GPU work is ended after `ENGINE_STALL_S` (90 s) instead of never | `terminal/serve/server.py` (`_control`, the slot reader in `generate_batched`, `_drain_control`), four tests in `terminal/serve/test_server.py` (`SilentEngine`) |
+| Inkling engine (CUDA): a CUDA or cuBLAS error ends the process with `_Exit` (it could hang in `std::exit`, holding the card); a CUDA graph that finds no memory falls back to running without graphs; the prompt-reading attention workspace is sized for the 256-row chunk it is read in (it was 512: ~2.8 GB at 32k, now ~1.6 GB) and falls back to the flash path when it cannot grow. Measured on chudmax (RTX 5060 Ti 16 GB, SQ-10 at 32k, DSpark), 2026-11-22: a 27,933-token prompt that ended upstream's engine with an out-of-memory error answers, and so does a 30,639-token one | `engine/src/inkling2/cuda/ink_cuda.cuh` (`INK_DIE`, `try_capture_graph`, `try_dalloc`), `ink_dspark.cuh`, `ink_runner.cuh` (`ensure_pf_attn`); version `0.1.65.1` |
 
 ## Syncing with upstream
 
@@ -111,6 +113,10 @@ Upstream has no release workflow. It builds on build boxes without a key and sig
   addresses, sizes and SHA-256, into the fork's feed. A fork Control trusts both keys: the fork's for the feed, and
   upstream's because each engine package carries upstream's signature. Upstream's Metal engine is left out (it has
   no Qwen3.6 path); the fork's own Metal engine package is open work. There is no DeepSeek member.
+- **One exception, from v0.2.19-mbp.rtx.2: the Inkling 2 Mini engine for Linux CUDA 13** (`strata-inkling`, shape
+  `inkling2`) is the fork's own build, version `0.1.65.1`, signed with the fork's key. It carries the engine fixes listed
+  in "What the fork adds" above. Its entry replaces upstream's carried `strata-inkling` linux-x86_64 cuda13 entry
+  in `RELEASE/shapes` before `build-feed`. Every other engine is still upstream's.
 - **The feed sequence is upstream's times 1000, plus N** (`tools/fork/fork_release.py sequence`). A PC refuses a feed
   older than the last one it accepted, so a PC that ran upstream needs a higher number. A PC that took a fork feed
   refuses upstream's feed afterwards.
@@ -184,6 +190,10 @@ The desktop app is not part of a fork release yet: it would need a Tauri updater
 - 2026-11-14: when the fork and upstream both changed something, follow upstream unless the fork's work is expressly
   new. Adopt upstream's version numbers. Publish only the upstream tags the fork merged. A fork release carries a
   suffix on upstream's number.
+- 2026-11-22: v0.2.19-mbp.rtx.2 ships the fork's own build of the Inkling engine (Linux, CUDA 13) with the fork's
+  fixes, version `0.1.65.1`: newer than upstream's 0.1.65, so `strata update` installs it beside the old one. This
+  departs from "versions are upstream's, unmodified" for that one package; the reason is that a package with
+  upstream's number would never reach a machine that has upstream's.
 - 2026-10-25: a small bugfix rides along with the story that touches it; there is no separate patch release per fix.
   Each concern still gets its own commit and a line in the pull request, and the review of a mixed pull request lands
   as a docs file in the same branch (see [PR24_REVIEW.md](PR24_REVIEW.md)).

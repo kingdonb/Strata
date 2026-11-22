@@ -21,7 +21,7 @@
 using namespace ink2;
 
 #ifndef INKLING_VERSION
-#define INKLING_VERSION "0.1.65"
+#define INKLING_VERSION "0.1.65.1"   // the kingdonb fork's build: upstream 0.1.65 + the fork's fixes (docs/FORK.md)
 #endif
 
 static int cmd_export_tokenizer(const std::string& file, const std::string& dir) {
