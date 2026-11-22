@@ -130,6 +130,68 @@ class HostedTools(unittest.TestCase):
         self.config.unlink()
         self.config = cfg
 
+    def hy4_config(self):
+        """A Hy4-Flash config as `strata launch` writes it (0.2.18): the shape engine as a package, and three .strata files."""
+        models = self.data / "models" / "hy4-flash"
+        models.mkdir(parents=True)
+        files = {}
+        for name, size in (("Hy4-Flash-SQ-64.strata", 4000), ("Hy4-Flash-Engram-Q8.strata", 5000), ("Hy4-Flash-Vision.strata", 300)):
+            f = models / name
+            f.write_bytes(b"\0" * size)
+            f.with_name(name + ".done").write_text("{}", encoding="utf-8")   # Strata downloaded it
+            files[name] = f
+        cfg = self.data / "sq-64-128k.json"
+        cfg.write_text(json.dumps({"port": self.port, "log": str(self.log), "model_name": "hy4-flash-sq-64", "exe": "component:strata-hy4",
+                                   "args": ["--native", str(files["Hy4-Flash-SQ-64.strata"]), "--engram", str(files["Hy4-Flash-Engram-Q8.strata"]),
+                                            "--max-context", "131072", "--vision", str(files["Hy4-Flash-Vision.strata"]),
+                                            "--vram-experts-gb", "2.31"]}), encoding="utf-8")
+        self.config.unlink()
+        self.config = cfg
+        return files
+
+    def test_a_hy4_model_counts_its_engram_and_picture_files(self):
+        files = self.hy4_config()
+        t, s = self.tools()
+        usage = s.disk_usage()["models"]["sq-64-128k"]
+        self.assertEqual((usage["files"], usage["bytes"]), (3, 9300), "the Engram table and the picture reader are the model's too")
+        plan = s.removal_plan(self.config)
+        self.assertEqual(sorted({Path(r["path"]).name for r in plan["remove"]} & set(files)), sorted(files), "Delete takes all three files")
+
+    def test_a_hy4_model_names_its_shape_engine_package(self):
+        self.hy4_config()
+        t, s = self.tools()
+        found = mock.Mock(root=Path("/c/shapes/hy4/engine/0.1.64-linux-x86_64-cuda-cuda13"), version="0.1.64", backend="cuda")
+        from strata_control import shape_engine
+        with mock.patch.object(shape_engine, "find", return_value=found) as find, \
+                mock.patch.object(s, "component_engine", side_effect=AssertionError("not the Strata engine")):
+            row = s.describe_config(self.config)
+            with mock.patch.object(s, "installed", return_value={"models": []}), mock.patch.object(s, "install_job", return_value=None):
+                status = t.strata_status(hardware=False)
+        find.assert_called_once_with("hy4")                  # looked up once, then cached
+        self.assertEqual(row["engine"], {"component": "strata-hy4", "version": "0.1.64", "backend": "cuda"})
+        own = status["running"][0]
+        self.assertTrue(own["this_chat"])
+        self.assertEqual(own["engine_version"], "0.1.60", "what the engine calls itself is kept")
+        self.assertEqual(own["engine_package"]["component"], "strata-hy4")
+        self.assertEqual(own["engine_package"]["version"], "0.1.64")
+
+    def test_every_launch_config_is_listed_and_its_side_files_are_not(self):
+        """`strata launch` keeps <name>.json, <name>.choices.json, <name>.tune.json and <name>.engine.log in one folder (chudmax, 0.2.18)."""
+        self.hy4_config()
+        other = self.data / "q2_0-256k-2.json"
+        other.write_text(json.dumps({"exe": "component:strata-engine", "args": ["--max-context", "262144"], "port": 8080}), encoding="utf-8")
+        os.utime(other, (2e9, 2e9))                      # the newest file: the chat's own config is still listed first
+        for name, body in (("q2_0-256k-2.choices.json", {"exe": "x", "args": []}), ("q2_0-256k-2.tune.json", {"state": "done"}),
+                           ("sq-64-128k.choices.json", {"model": "sq-64"}), ("notes.json", {"exe": "x"}), ("list.json", [1, 2]),
+                           ("broken.json", None)):
+            (self.data / name).write_text("{not json" if body is None else json.dumps(body), encoding="utf-8")
+        self.code = self.data                            # serve/mcp.py starts the hosted tools with --root = the config's folder
+        t, s = self.tools()
+        self.assertEqual([p.name for p in s.configs()], ["sq-64-128k.json", "q2_0-256k-2.json"])
+        self.assertEqual(s.find_config(None).resolve(), self.config.resolve())
+        self.assertEqual(s.find_config("q2_0-256k-2").resolve(), other.resolve())
+        self.assertEqual(sorted(s.disk_usage()["models"]), ["q2_0-256k-2", "sq-64-128k"])
+
     def test_a_launch_config_keeps_its_name_and_is_ready_with_the_engine_package(self):
         self.assertEqual(M.config_tag(Path("strata-q2_0.json")), "q2_0")
         self.assertEqual(M.config_tag(Path("q2_0-128k.json")), "q2_0-128k", "not cut by the length of 'strata-'")
