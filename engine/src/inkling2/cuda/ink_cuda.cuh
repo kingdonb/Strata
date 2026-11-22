@@ -95,6 +95,24 @@ inline T* dalloc(size_t count) {
     return p;
 }
 
+// cudaMalloc for a buffer the engine can do without: false (nothing allocated, the error cleared) when the card has no
+// memory left, so the caller takes a path that needs no buffer instead of ending the process mid-request.  Any other
+// error ends the process as INK_CK does.
+template <typename T>
+inline bool try_dalloc(T*& p, size_t count) {
+    p = nullptr;
+    if (count == 0) return true;
+    const cudaError_t e = cudaMalloc(&p, count * sizeof(T));
+    if (e == cudaSuccess) return true;
+    p = nullptr;
+    if (e != cudaErrorMemoryAllocation) {
+        std::fprintf(stderr, "strata-inkling CUDA error %d (%s) at %s:%d\n", (int)e, cudaGetErrorString(e), __FILE__, __LINE__);
+        INK_DIE(3);
+    }
+    (void)cudaGetLastError();   // not sticky: clear it so no later check reads it
+    return false;
+}
+
 template <typename T>
 inline T* halloc_pinned(size_t count) {
     T* p = nullptr;

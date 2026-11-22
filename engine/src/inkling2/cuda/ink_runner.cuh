@@ -410,6 +410,7 @@ struct InkCudaRunner {
     __nv_bfloat16 *d_pf_q = nullptr, *d_pf_k = nullptr, *d_pf_v = nullptr, *d_pf_p = nullptr;  // TC prefill attention
     float *d_pf_s = nullptr, *d_pf_o = nullptr;
     int pf_kv_cap = 0;
+    int pf_fail_len = 0;   // a workspace for this many tokens or more found no memory: not tried again (0: none failed)
     float *d_stage_k = nullptr, *d_stage_v = nullptr, *d_stage_sconv = nullptr;  // Tree-16 verify staging
     InkKvVisitDesc* d_kv_desc_arr = nullptr;
     float** d_sconv_pool_arr = nullptr;
@@ -1028,19 +1029,38 @@ struct InkCudaRunner {
         }
     }
 
-    void ensure_pf_attn(int K_len) {
-        constexpr int Q_CH = 512;
-        if (K_len <= pf_kv_cap && d_pf_q) return;
+    // Tensor Core prefill attention workspace.  Its size follows the prompt (about 49 KB per token of K_len: 1.6 GB at
+    // 32k), and it grows during a request, when the prompt is longer than any before.  It used to be sized for a query
+    // chunk of 512 while run_visit reads 256 at a time (twice the memory, ~2.8 GB at 32k), and a grow that found no
+    // memory ended the process (chudmax 2026-11-22, RTX 5060 Ti 16 GB: a ~27.9k-token prompt after a 24.9k one).  Now
+    // a grow without memory frees the workspace and returns false: run_visit then reads the prompt with the flash path,
+    // which needs none (slower, the same answer).
+    static constexpr int kPfQChunk = 256;   // the query rows of one S/P block; run_visit's loop uses the same
+    bool ensure_pf_attn(int K_len) {
+        if (K_len <= pf_kv_cap && d_pf_q) return true;
+        if (pf_fail_len > 0 && std::max(K_len, 2048) >= pf_fail_len) return false;   // known not to fit: the flash path
         INK_CK(cudaStreamSynchronize(st));
         auto fr = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
         fr(d_pf_q); fr(d_pf_k); fr(d_pf_v); fr(d_pf_p); fr(d_pf_s); fr(d_pf_o);
-        pf_kv_cap = std::max(K_len, 2048);
-        d_pf_q = dalloc<__nv_bfloat16>((size_t)kInkHeads * max_batch * kInkHeadDim);
-        d_pf_k = dalloc<__nv_bfloat16>((size_t)kInkHeads * pf_kv_cap * kInkHeadDim);
-        d_pf_v = dalloc<__nv_bfloat16>((size_t)kInkHeads * pf_kv_cap * kInkHeadDim);
-        d_pf_s = dalloc<float>((size_t)kInkHeads * Q_CH * pf_kv_cap);
-        d_pf_p = dalloc<__nv_bfloat16>((size_t)kInkHeads * Q_CH * pf_kv_cap);
-        d_pf_o = dalloc<float>((size_t)kInkHeads * Q_CH * kInkHeadDim);
+        pf_kv_cap = 0;
+        const int cap = std::max(K_len, 2048);
+        const bool ok =
+            try_dalloc(d_pf_q, (size_t)kInkHeads * max_batch * kInkHeadDim) &&
+            try_dalloc(d_pf_k, (size_t)kInkHeads * cap * kInkHeadDim) &&
+            try_dalloc(d_pf_v, (size_t)kInkHeads * cap * kInkHeadDim) &&
+            try_dalloc(d_pf_s, (size_t)kInkHeads * kPfQChunk * cap) &&
+            try_dalloc(d_pf_p, (size_t)kInkHeads * kPfQChunk * cap) &&
+            try_dalloc(d_pf_o, (size_t)kInkHeads * kPfQChunk * kInkHeadDim);
+        if (!ok) {
+            pf_fail_len = cap;
+            fr(d_pf_q); fr(d_pf_k); fr(d_pf_v); fr(d_pf_p); fr(d_pf_s); fr(d_pf_o);
+            std::fprintf(stderr, "strata-inkling: no card memory for the prefill attention workspace (%d tokens); "
+                                 "reading this prompt with the flash path\n", K_len);
+            std::fflush(stderr);
+            return false;
+        }
+        pf_kv_cap = cap;
+        return true;
     }
 
     // ---- Execute 1 virtual visit (visit in 0..47, phys layer ip in 0..23) ----
@@ -1223,14 +1243,15 @@ struct InkCudaRunner {
                     (mode == 2) ? d_tree_anc : nullptr, (mode == 2) ? d_tree_dep : nullptr,
                     p0_val, d_attn_pm, d_attn_pl, d_attn_po, M);
                 k_ink_flash_gqa_merge<<<gr, 128, 0, st>>>(d_attn_pm, d_attn_pl, d_attn_po, d_gate_attn, d_attn_out, M);
-            } else if (mode == 0 && M >= 128 && (m.sm_cc >= 70 || m.sm_cc == 60) && (d_pf_q != nullptr || [&](){ size_t vf=0,vt=0; cudaMemGetInfo(&vf,&vt); return vf > (480ull<<20); }())) {
+            } else if (mode == 0 && M >= 128 && (m.sm_cc >= 70 || m.sm_cc == 60) && (d_pf_q != nullptr || [&](){ size_t vf=0,vt=0; cudaMemGetInfo(&vf,&vt); return vf > (480ull<<20); }()) &&
+                       ensure_pf_attn((p0_val + M) - (is_swa ? std::max(0, p0_val - kInkSwaWin + 1) : 0))) {
                 // High-speed Causal/SWA-Sliced Tensor Core Prefill Attention (BF16 on sm_80+, FP16 on sm_60..75!)
+                // (ensure_pf_attn false - no memory for the workspace - falls to the flash path below)
                 const bool use_fp16_pf = (m.sm_cc < 80);
                 const cudaDataType_t pf_dt = use_fp16_pf ? CUDA_R_16F : CUDA_R_16BF;
                 const cublasGemmAlgo_t pf_algo = (m.sm_cc >= 70) ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT;
                 const int k_start = is_swa ? std::max(0, p0_val - kInkSwaWin + 1) : 0;
                 const int K_len = (p0_val + M) - k_start;
-                ensure_pf_attn(K_len);
                 if (use_fp16_pf) {
                     k_ink_pf_pack_q<true><<<dim3(kInkHeads, M), 128, 0, st>>>(d_q, d_pf_q, M);
                     k_ink_pf_pack_kv<true><<<dim3(kInkKVHeads, K_len), 128, 0, st>>>(kv_desc[visit], slot0, k_start, K_len, d_pf_k, d_pf_v);
@@ -1238,7 +1259,7 @@ struct InkCudaRunner {
                     k_ink_pf_pack_q<false><<<dim3(kInkHeads, M), 128, 0, st>>>(d_q, d_pf_q, M);
                     k_ink_pf_pack_kv<false><<<dim3(kInkKVHeads, K_len), 128, 0, st>>>(kv_desc[visit], slot0, k_start, K_len, d_pf_k, d_pf_v);
                 }
-                constexpr int Q_CH = 256;
+                constexpr int Q_CH = kPfQChunk;
                 const float sc_qk = 0.08838834764831845f;
                 const float one = 1.0f, zero = 0.0f;
                 for (int q0 = 0; q0 < M; q0 += Q_CH) {
