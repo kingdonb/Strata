@@ -879,8 +879,8 @@ class MacCatalog(unittest.TestCase):
     def test_the_model_list_is_the_macs_sizes_with_unified_memory_verdicts(self):
         s, hw = self.hw(32)
         fams = s.model_table(hw)
-        self.assertEqual([f["family"] for f in fams], ["qwen", "unsloth", "gyro", "hy4-flash", "qwen36"],
-                         "Unsloth's sets since round 0214 (the app repacks them), no Swift or NVFP4 on a Mac; Gyro after the regular sizes; Hy4-Flash when offered; "
+        self.assertEqual([f["family"] for f in fams], ["qwen", "unsloth", "gyro", "hy4-flash", "inkling-2-mini", "qwen36"],
+                         "Unsloth's sets since round 0214 (the app repacks them), no Swift or NVFP4 on a Mac; Gyro after the regular sizes; Hy4-Flash & Inkling-2-Mini when offered; "
                          "this fork: Qwen3.6 on its Metal path (strata_control/mac_q36.py) last")
         q36 = {x["model"]: x for x in fams[-1]["sizes"]}
         self.assertEqual(list(q36), ["UD-Q2_K_XL"], "the size the Metal path was run with, not the PC sizes of the family")
@@ -901,7 +901,7 @@ class MacCatalog(unittest.TestCase):
         self.assertTrue(all(x["images"] for x in by.values()), "the Mac engine carries the Metal picture reader: pictures are on")
         s, hw = self.hw(128)
         table_128 = s.model_table(hw)
-        fits = {x["model"]: x["on_this_pc"] for f in table_128 if f["family"] != "hy4-flash" for x in f["sizes"]}
+        fits = {x["model"]: x["on_this_pc"] for f in table_128 if f["family"] not in ("hy4-flash", "inkling-2-mini") for x in f["sizes"]}
         from strata_control import mac_fit
         for m, v in fits.items():                       # the 128 GB Mac keeps ~96 GB resident: UD-Q5_K_XL and UD-Q6_K_XL (104 / 115 GB to map) stream, said not refused
             self.assertEqual(v == "fits", not mac_fit.streams(m, 128.0), m)
