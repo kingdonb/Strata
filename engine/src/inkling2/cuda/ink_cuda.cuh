@@ -23,13 +23,26 @@
 #include <cstring>
 #include <chrono>
 
+// A CUDA or cuBLAS error ends the process at once (_Exit), not through std::exit.  Seen on chudmax, 2026-11-22: an
+// out-of-memory error at serve time (ink_dspark.cuh, cudaGraphInstantiate) printed its line, then the process stayed
+// alive for good, holding the card: main thread waiting on a futex, the detached stdin reader (ink_serve.h ServeInput)
+// blocked in getline.  The likely cause (unconfirmed, no stack was taken): exit's stdio clean-up waits for stdin's
+// lock, which that reader holds.  _Exit runs no clean-up.  stdout and stderr are flushed by name first, never
+// fflush(nullptr), which would take stdin's lock as well.
+#define INK_DIE(code)                                                                                                 \
+    do {                                                                                                              \
+        std::fflush(stdout);                                                                                          \
+        std::fflush(stderr);                                                                                          \
+        std::_Exit(code);                                                                                             \
+    } while (0)
+
 #define INK_CK(call)                                                                                                  \
     do {                                                                                                              \
         cudaError_t _e = (call);                                                                                      \
         if (_e != cudaSuccess) {                                                                                      \
             std::fprintf(stderr, "strata-inkling CUDA error %d (%s) at %s:%d\n", (int)_e, cudaGetErrorString(_e),     \
                          __FILE__, __LINE__);                                                                         \
-            std::exit(3);                                                                                             \
+            INK_DIE(3);                                                                                               \
         }                                                                                                             \
     } while (0)
 
@@ -38,11 +51,38 @@
         cublasStatus_t _s = (call);                                                                                   \
         if (_s != CUBLAS_STATUS_SUCCESS) {                                                                            \
             std::fprintf(stderr, "strata-inkling cuBLAS error %d at %s:%d\n", (int)_s, __FILE__, __LINE__);           \
-            std::exit(3);                                                                                             \
+            INK_DIE(3);                                                                                               \
         }                                                                                                             \
     } while (0)
 
 namespace strata::ink {
+
+// Captures emit() on `st` and builds the graph into *exec.  A graph is built the first time its shape is used, at serve
+// time, so it asks the card for memory then.  When the card has none left (cudaErrorMemoryAllocation, seen on chudmax
+// 2026-11-22 at 15.8 of 16.3 GB) this returns false with the error cleared and nothing captured: the caller turns graphs
+// off and runs emit() directly, the same kernels without the graph - slower, but the request goes on.  Any other error
+// ends the process as INK_CK does.  When the graph is built, the calls are the same as before.
+template <typename F>
+inline bool try_capture_graph(cudaStream_t st, F&& emit, cudaGraphExec_t* exec) {
+    cudaGraph_t gr = nullptr;
+    *exec = nullptr;
+    INK_CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
+    emit();
+    INK_CK(cudaStreamEndCapture(st, &gr));
+    const cudaError_t e = cudaGraphInstantiate(exec, gr, nullptr, nullptr, 0);
+    INK_CK(cudaGraphDestroy(gr));
+    if (e == cudaSuccess) return true;
+    *exec = nullptr;
+    if (e != cudaErrorMemoryAllocation) {
+        std::fprintf(stderr, "strata-inkling CUDA error %d (%s) at %s:%d\n", (int)e, cudaGetErrorString(e), __FILE__, __LINE__);
+        INK_DIE(3);
+    }
+    (void)cudaGetLastError();   // not sticky: clear it so no later check reads it
+    std::fprintf(stderr, "strata-inkling: no card memory for a CUDA graph (%s); running without graphs from here\n",
+                 cudaGetErrorString(e));
+    std::fflush(stderr);
+    return false;
+}
 
 inline double now_s() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -53,6 +93,24 @@ inline T* dalloc(size_t count) {
     T* p = nullptr;
     if (count > 0) INK_CK(cudaMalloc(&p, count * sizeof(T)));
     return p;
+}
+
+// cudaMalloc for a buffer the engine can do without: false (nothing allocated, the error cleared) when the card has no
+// memory left, so the caller takes a path that needs no buffer instead of ending the process mid-request.  Any other
+// error ends the process as INK_CK does.
+template <typename T>
+inline bool try_dalloc(T*& p, size_t count) {
+    p = nullptr;
+    if (count == 0) return true;
+    const cudaError_t e = cudaMalloc(&p, count * sizeof(T));
+    if (e == cudaSuccess) return true;
+    p = nullptr;
+    if (e != cudaErrorMemoryAllocation) {
+        std::fprintf(stderr, "strata-inkling CUDA error %d (%s) at %s:%d\n", (int)e, cudaGetErrorString(e), __FILE__, __LINE__);
+        INK_DIE(3);
+    }
+    (void)cudaGetLastError();   // not sticky: clear it so no later check reads it
+    return false;
 }
 
 template <typename T>

@@ -6214,6 +6214,74 @@ class SilentEngine(unittest.TestCase):
         self.assertFalse(engine_frozen((10.0, 100), (13.0, 100)))
         self.assertFalse(engine_frozen((10.0, 100), (10.0, 100 + (8 << 20))))
 
+    def test_batched_control_ends_a_frozen_engine(self):
+        # #1317 on the --batch path (an engine that reports batch slots serves this way even at --parallel 1, as the
+        # Inkling engine does): its control reader had no stall check, so an engine that froze after a token was waited
+        # for for good, a heartbeat every 10 s
+        from serve import server
+        from serve.server import EngineSilent
+        engine = self.bare(300.0)
+        engine._ctl_mode = "solo"
+        engine._activity = lambda: (12.0, 4096)                  # the same reading every time: no work
+        with mock.patch.object(server, "ENGINE_STALL_S", 1.0):
+            t0 = time.monotonic()
+            with self.assertRaises(EngineSilent) as cm:
+                list(engine._control(threading.Event(), lambda t: None))
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertIn("frozen", str(cm.exception))
+        engine.proc.kill.assert_called_once()
+        self.assertFalse(engine.alive())
+
+    def test_batched_control_lets_a_working_engine_be(self):
+        from serve import server
+        engine = self.bare(300.0)
+        engine._ctl_mode = "solo"
+        ticks = iter(range(10 ** 6))
+        engine._activity = lambda: (float(next(ticks)), 0)       # CPU time advances: it is working
+        seen = []
+        self.later(engine, 2.5, "T 7", "DONE 1 1 1 1 length")
+        with mock.patch.object(server, "ENGINE_STALL_S", 1.0):
+            self.assertEqual(list(engine._control(threading.Event(), seen.append)), [False])
+        self.assertEqual(seen, [7])
+        engine.proc.kill.assert_not_called()
+
+    def test_a_drain_after_a_disconnect_ends_a_frozen_engine(self):
+        # after a disconnect: STOP, then a wait of DRAIN_TIMEOUT_S (300 s) for the DONE and a quarantine of QUARANTINE_S
+        # (600 s) more - 15 minutes holding the card for an engine that will never answer.  Frozen: ended in the window.
+        from serve import server
+        engine = self.bare(300.0)
+        engine.gen = 1
+        engine._activity = lambda: (12.0, 4096)
+        with mock.patch.object(server, "ENGINE_STALL_S", 1.0):
+            t0 = time.monotonic()
+            self.assertIsNone(engine._drain_control("DONE", born=1))
+        self.assertLess(time.monotonic() - t0, 10)
+        engine.proc.kill.assert_called_once()
+        self.assertFalse(engine.alive())
+
+    def test_a_drain_waits_for_a_working_engine_and_never_ends_one_it_does_not_know(self):
+        from serve import server
+        engine = self.bare(300.0)
+        engine.gen = 1
+        ticks = iter(range(10 ** 6))
+        engine._activity = lambda: (float(next(ticks)), 0)       # working: the DONE comes late, and is read
+        self.later(engine, 2.5, "DONE 1 1 1 1 cancel")
+        with mock.patch.object(server, "ENGINE_STALL_S", 1.0):
+            self.assertTrue(engine._drain_control("DONE", born=1).startswith("DONE"))
+        engine.proc.kill.assert_not_called()
+        other = self.bare(300.0)                                  # no `born`: which engine it concerns is not known
+        other.gen = 1
+        other._activity = lambda: (12.0, 4096)
+        with mock.patch.object(server, "ENGINE_STALL_S", 1.0):
+            self.assertIsNone(other._drain_control("DONE", timeout=2.5))
+        other.proc.kill.assert_not_called()
+        stale = self.bare(300.0)                                  # an engine that was replaced meanwhile: not ended
+        stale.gen = 2
+        stale._activity = lambda: (12.0, 4096)
+        with mock.patch.object(server, "ENGINE_STALL_S", 1.0):
+            self.assertIsNone(stale._drain_control("DONE", born=1))
+        stale.proc.kill.assert_not_called()
+
     def test_zero_waits_as_before(self):
         engine = self.bare(0)
         self.later(engine, 0.5, "T 5", "DONE 1 1 1 1 length")

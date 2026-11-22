@@ -1430,6 +1430,11 @@ class StrataEngine:
         beat = time.monotonic()
         held = NO_LINE                               # a line read while looking for a token's LP line
         lines_q = self.lines if lines_q is None else lines_q   # #4451: the request's own engine's lines (a restart makes new ones)
+        # #1317 on the --batch path: the frozen-engine watchdog generate() has.  Without it an engine that froze here
+        # (a CUDA error whose exit hung) held the request, and every later one, for good, a heartbeat every 10 s.
+        stall_s = ENGINE_STALL_S or 0.0
+        stall_state: dict = {}
+        heard = time.monotonic()
 
         def send_stop():
             if lines_q is self.lines:               # (a STOP to the engine that replaced this one would stop another request)
@@ -1448,11 +1453,15 @@ class StrataEngine:
                         stopped = True
                     if on_quiet is not None:
                         on_quiet()
+                    if stall_s > 0 and lines_q is self.lines:   # (only this request's own engine is ever ended)
+                        self._stall_check(heard, stall_state, stall_s)
                     if time.monotonic() - beat >= 10.0:
                         beat = time.monotonic()
                         yield None
                     continue
-            beat = time.monotonic()
+            beat = heard = time.monotonic()
+            if stall_state:
+                stall_state.clear()
             if line is None:
                 raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
             if not line.startswith(("PP ", "INFO")):
@@ -1538,15 +1547,29 @@ class StrataEngine:
         wait_s = self.DRAIN_TIMEOUT_S if timeout is None else timeout
         end = time.monotonic() + wait_s
         lines_q = self.lines if lines_q is None else lines_q
+        # #1317: a FROZEN engine (no line, no CPU, no I/O, GPU idle for ENGINE_STALL_S) will never give the line: it is
+        # ended then, not after DRAIN_TIMEOUT_S and the quarantine's QUARANTINE_S on top (15 minutes in all).  Only the
+        # request's own engine (born), and only while it is still the current one.
+        stall_s = (ENGINE_STALL_S or 0.0) if born is not None else 0.0
+        stall_state: dict = {}
+        heard = time.monotonic()
         while time.monotonic() < end:
             if born is not None and (self.gen != born or not self.alive()):
                 return None
             try:
                 line = lines_q.get(timeout=max(0.1, min(1.0, end - time.monotonic())))
             except queue.Empty:
+                if stall_s > 0 and self.gen == born and lines_q is self.lines:
+                    try:
+                        self._stall_check(heard, stall_state, stall_s)
+                    except EngineSilent:
+                        return None                          # ended (killed): nothing more will come
                 continue
             if line is None:
                 return None
+            heard = time.monotonic()
+            if stall_state:
+                stall_state.clear()
             end = time.monotonic() + wait_s                  # any line is progress
             if line.startswith("DONE"):
                 self._parse_done(line)
@@ -2211,6 +2234,7 @@ class StrataEngine:
                             generated=len(out))
                 gen0 = len(out) - 1 if adm_tok else len(out)   # the admission's own token: the slot feeds it first
                 going_solo = False
+                slot_heard, slot_stall = time.monotonic(), {}   # #1317: a slot of a frozen engine is ended too
                 while True:
                     try:
                         line = sq[slot].get(timeout=10.0)
@@ -2221,8 +2245,19 @@ class StrataEngine:
                         if cancel.is_set() and not stop_sent:
                             self._send_for(born, f"BSTOP {slot}")
                             stop_sent = True
+                        if (ENGINE_STALL_S or 0) > 0:
+                            # the engine as a whole: a slot left waiting while another request reads its prompt sees the
+                            # engine working (CPU, GPU), so it is never ended for that
+                            try:
+                                self._stall_check(slot_heard, slot_stall, ENGINE_STALL_S)
+                            except EngineSilent:
+                                phase = "none"              # ended: nothing to BSTOP or wait for
+                                raise
                         yield None
                         continue
+                    slot_heard = time.monotonic()
+                    if slot_stall:
+                        slot_stall.clear()
                     if line is None:
                         phase = "none"
                         raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")

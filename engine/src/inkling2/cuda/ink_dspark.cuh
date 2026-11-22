@@ -1537,15 +1537,10 @@ struct InkDSpark {
         INK_CK(cudaMemcpyAsync(d_apos,      h_meta_pin + 1, 4, cudaMemcpyHostToDevice, r.st));
         INK_CK(cudaMemcpyAsync(d_pos,       h_meta_pin + 2, B * 4, cudaMemcpyHostToDevice, r.st));
 
+        if (r.use_cuda_graph && !draft_graph &&
+            !try_capture_graph(r.st, [&] { emit_draft_block8(); }, &draft_graph))
+            r.use_cuda_graph = false;                     // no memory for it: without graphs from here
         if (r.use_cuda_graph) {
-            if (!draft_graph) {
-                cudaGraph_t gr = nullptr;
-                INK_CK(cudaStreamBeginCapture(r.st, cudaStreamCaptureModeThreadLocal));
-                emit_draft_block8();
-                INK_CK(cudaStreamEndCapture(r.st, &gr));
-                INK_CK(cudaGraphInstantiate(&draft_graph, gr, nullptr, nullptr, 0));
-                INK_CK(cudaGraphDestroy(gr));
-            }
             INK_CK(cudaGraphLaunch(draft_graph, r.st));
         } else {
             emit_draft_block8();
@@ -1572,17 +1567,14 @@ struct InkDSpark {
         INK_CK(cudaMemcpyAsync(d_apos,      h_meta_pin + 1, 4, cudaMemcpyHostToDevice, r.st));
         INK_CK(cudaMemcpyAsync(d_pos,       h_meta_pin + 2, B * 4, cudaMemcpyHostToDevice, r.st));
 
-        if (r.use_cuda_graph) {
-            if (!beam_graph || beam_graph_w != beam_w) {
-                if (beam_graph) { cudaGraphExecDestroy(beam_graph); beam_graph = nullptr; }
-                cudaGraph_t gr = nullptr;
-                INK_CK(cudaStreamBeginCapture(r.st, cudaStreamCaptureModeThreadLocal));
-                emit_draft_beam_tree(beam_w);
-                INK_CK(cudaStreamEndCapture(r.st, &gr));
-                INK_CK(cudaGraphInstantiate(&beam_graph, gr, nullptr, nullptr, 0));
-                INK_CK(cudaGraphDestroy(gr));
+        if (r.use_cuda_graph && (!beam_graph || beam_graph_w != beam_w)) {
+            if (beam_graph) { cudaGraphExecDestroy(beam_graph); beam_graph = nullptr; }
+            if (try_capture_graph(r.st, [&] { emit_draft_beam_tree(beam_w); }, &beam_graph))
                 beam_graph_w = beam_w;
-            }
+            else
+                r.use_cuda_graph = false;                 // no memory for it: without graphs from here
+        }
+        if (r.use_cuda_graph) {
             INK_CK(cudaGraphLaunch(beam_graph, r.st));
         } else {
             emit_draft_beam_tree(beam_w);
