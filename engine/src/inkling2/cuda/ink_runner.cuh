@@ -1458,17 +1458,16 @@ struct InkCudaRunner {
             cudaGraphExec_t exec = nullptr;
             for (const auto& e : graph_cache) if (e.key == key) { exec = e.exec; break; }
             if (!exec) {
-                cudaGraph_t gr = nullptr;
-                INK_CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
-                emit_48_visits(M, 0, slot0, p0, want_taps);
-                INK_CK(cudaStreamEndCapture(st, &gr));
-                INK_CK(cudaGraphInstantiate(&exec, gr, nullptr, nullptr, 0));
-                INK_CK(cudaGraphDestroy(gr));
-                graph_cache.push_back({key, exec});
+                if (try_capture_graph(st, [&] { emit_48_visits(M, 0, slot0, p0, want_taps); }, &exec))
+                    graph_cache.push_back({key, exec});
+                else
+                    use_cuda_graph = false;               // no memory for it: without graphs from here
             }
-            INK_CK(cudaGraphLaunch(exec, st));
-            if (m.hybrid.active && m.n_host_experts > 0) m.hybrid.step_promote(m.d_sec4, m.d_experts, st);
-            return;
+            if (exec) {
+                INK_CK(cudaGraphLaunch(exec, st));
+                if (m.hybrid.active && m.n_host_experts > 0) m.hybrid.step_promote(m.d_sec4, m.d_experts, st);
+                return;
+            }
         }
         emit_48_visits(M, 0, slot0, p0, want_taps);
         if (M == 1 && m.hybrid.active && m.n_host_experts > 0) m.hybrid.step_promote(m.d_sec4, m.d_experts, st);
@@ -1500,16 +1499,15 @@ struct InkCudaRunner {
             cudaGraphExec_t exec = nullptr;
             for (const auto& e : graph_cache) if (e.key == key) { exec = e.exec; break; }
             if (!exec) {
-                cudaGraph_t gr = nullptr;
-                INK_CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
-                emit_48_visits(M, 2, slot0, 0, want_taps);
-                INK_CK(cudaStreamEndCapture(st, &gr));
-                INK_CK(cudaGraphInstantiate(&exec, gr, nullptr, nullptr, 0));
-                INK_CK(cudaGraphDestroy(gr));
-                graph_cache.push_back({key, exec});
+                if (try_capture_graph(st, [&] { emit_48_visits(M, 2, slot0, 0, want_taps); }, &exec))
+                    graph_cache.push_back({key, exec});
+                else
+                    use_cuda_graph = false;               // no memory for it: without graphs from here
             }
-            INK_CK(cudaGraphLaunch(exec, st));
-            return;
+            if (exec) {
+                INK_CK(cudaGraphLaunch(exec, st));
+                return;
+            }
         }
         emit_48_visits(M, 2, slot0, p0, want_taps);
     }
@@ -1529,16 +1527,15 @@ struct InkCudaRunner {
             cudaGraphExec_t exec = nullptr;
             for (const auto& e : graph_cache) if (e.key == key) { exec = e.exec; break; }
             if (!exec) {
-                cudaGraph_t gr = nullptr;
-                INK_CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
-                emit_48_visits(B, 1, 0, 0, want_taps);
-                INK_CK(cudaStreamEndCapture(st, &gr));
-                INK_CK(cudaGraphInstantiate(&exec, gr, nullptr, nullptr, 0));
-                INK_CK(cudaGraphDestroy(gr));
-                graph_cache.push_back({key, exec});
+                if (try_capture_graph(st, [&] { emit_48_visits(B, 1, 0, 0, want_taps); }, &exec))
+                    graph_cache.push_back({key, exec});
+                else
+                    use_cuda_graph = false;               // no memory for it: without graphs from here
             }
-            INK_CK(cudaGraphLaunch(exec, st));
-            return;
+            if (exec) {
+                INK_CK(cudaGraphLaunch(exec, st));
+                return;
+            }
         }
         emit_48_visits(B, 1, 0, 0, want_taps);
     }

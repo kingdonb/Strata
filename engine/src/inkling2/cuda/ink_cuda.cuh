@@ -57,6 +57,33 @@
 
 namespace strata::ink {
 
+// Captures emit() on `st` and builds the graph into *exec.  A graph is built the first time its shape is used, at serve
+// time, so it asks the card for memory then.  When the card has none left (cudaErrorMemoryAllocation, seen on chudmax
+// 2026-11-22 at 15.8 of 16.3 GB) this returns false with the error cleared and nothing captured: the caller turns graphs
+// off and runs emit() directly, the same kernels without the graph - slower, but the request goes on.  Any other error
+// ends the process as INK_CK does.  When the graph is built, the calls are the same as before.
+template <typename F>
+inline bool try_capture_graph(cudaStream_t st, F&& emit, cudaGraphExec_t* exec) {
+    cudaGraph_t gr = nullptr;
+    *exec = nullptr;
+    INK_CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
+    emit();
+    INK_CK(cudaStreamEndCapture(st, &gr));
+    const cudaError_t e = cudaGraphInstantiate(exec, gr, nullptr, nullptr, 0);
+    INK_CK(cudaGraphDestroy(gr));
+    if (e == cudaSuccess) return true;
+    *exec = nullptr;
+    if (e != cudaErrorMemoryAllocation) {
+        std::fprintf(stderr, "strata-inkling CUDA error %d (%s) at %s:%d\n", (int)e, cudaGetErrorString(e), __FILE__, __LINE__);
+        INK_DIE(3);
+    }
+    (void)cudaGetLastError();   // not sticky: clear it so no later check reads it
+    std::fprintf(stderr, "strata-inkling: no card memory for a CUDA graph (%s); running without graphs from here\n",
+                 cudaGetErrorString(e));
+    std::fflush(stderr);
+    return false;
+}
+
 inline double now_s() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
