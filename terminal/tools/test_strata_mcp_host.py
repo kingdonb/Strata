@@ -175,6 +175,23 @@ class HostedTools(unittest.TestCase):
         self.assertEqual(own["engine_package"]["component"], "strata-hy4")
         self.assertEqual(own["engine_package"]["version"], "0.1.64")
 
+    def test_every_launch_config_is_listed_and_its_side_files_are_not(self):
+        """`strata launch` keeps <name>.json, <name>.choices.json, <name>.tune.json and <name>.engine.log in one folder (chudmax, 0.2.18)."""
+        self.hy4_config()
+        other = self.data / "q2_0-256k-2.json"
+        other.write_text(json.dumps({"exe": "component:strata-engine", "args": ["--max-context", "262144"], "port": 8080}), encoding="utf-8")
+        os.utime(other, (2e9, 2e9))                      # the newest file: the chat's own config is still listed first
+        for name, body in (("q2_0-256k-2.choices.json", {"exe": "x", "args": []}), ("q2_0-256k-2.tune.json", {"state": "done"}),
+                           ("sq-64-128k.choices.json", {"model": "sq-64"}), ("notes.json", {"exe": "x"}), ("list.json", [1, 2]),
+                           ("broken.json", None)):
+            (self.data / name).write_text("{not json" if body is None else json.dumps(body), encoding="utf-8")
+        self.code = self.data                            # serve/mcp.py starts the hosted tools with --root = the config's folder
+        t, s = self.tools()
+        self.assertEqual([p.name for p in s.configs()], ["sq-64-128k.json", "q2_0-256k-2.json"])
+        self.assertEqual(s.find_config(None).resolve(), self.config.resolve())
+        self.assertEqual(s.find_config("q2_0-256k-2").resolve(), other.resolve())
+        self.assertEqual(sorted(s.disk_usage()["models"]), ["q2_0-256k-2", "sq-64-128k"])
+
     def test_a_launch_config_keeps_its_name_and_is_ready_with_the_engine_package(self):
         self.assertEqual(M.config_tag(Path("strata-q2_0.json")), "q2_0")
         self.assertEqual(M.config_tag(Path("q2_0-128k.json")), "q2_0-128k", "not cut by the length of 'strata-'")

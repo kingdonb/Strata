@@ -797,12 +797,29 @@ class Strata:
         self.children = [p for p in self.children if p.poll() is None]
 
     # ---- what is installed
+    SIDE_FILES = (".shared-settings.json", ".choices.json", ".tune.json")   # beside a config, never one (#346: the Chat settings file)
+
     def configs(self) -> list[Path]:
-        have = sorted((p for p in self.root.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")),
-                      key=lambda p: p.stat().st_mtime, reverse=True)   # #346: the Chat settings file is no config
+        """The run configs in this folder, newest first: setup's strata-<tag>.json, and the <name>.json that `strata launch` writes (its
+        folder also holds <name>.choices.json and <name>.tune.json, which are no configs). A file is a config only when it is one: an
+        object with the engine ("exe") and its arguments ("args"); anything else in the folder is left alone."""
+        def is_config(p: Path) -> bool:
+            if p.name.endswith(self.SIDE_FILES):
+                return False
+            if p.name.startswith("strata-"):
+                return True
+            cfg = self.read_config(p)
+            return isinstance(cfg.get("exe"), str) and isinstance(cfg.get("args"), list)
+
+        def mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+        have = sorted((p for p in self.root.glob("*.json") if p.is_file() and is_config(p)), key=mtime, reverse=True)
         own = (self.host or {}).get("config")            # the config of the server this chat runs on, wherever it is
-        if own and own.is_file() and all(norm(own) != norm(p) for p in have):
-            have.insert(0, own)
+        if own and own.is_file():                       # first, so a tool asked about no model in particular means the chat's own
+            have = [own] + [p for p in have if norm(p) != norm(own)]
         return have
 
     @staticmethod
