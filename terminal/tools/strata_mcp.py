@@ -1218,12 +1218,9 @@ class Strata:
                 if d.is_dir():
                     for c in sorted(d.iterdir()):
                         if c.is_dir():
-                            ggufs = list(c.glob("*.gguf"))
                             entry = {"folder": str(c), "size_gb": dir_size_gb(c)}
                             if sub == "models":
-                                entry["complete"] = bool(ggufs) and all(
-                                    g.with_name(g.name + ".done").exists() for g in ggufs)
-                                entry["downloading"] = bool(list(c.glob("*.part")))
+                                entry.update(download_state(c))
                             items.setdefault(sub, []).append(entry)
         mtp = data / "mtp" / "rt" / "experts.bin"
         usage = self.disk_usage()
@@ -1996,6 +1993,20 @@ def expected_files(S, family: str, model: str, models_dir: Path, vision: bool) -
     except Exception:                                   # noqa: BLE001 - progress is a convenience: never break the install
         return []
     return out
+
+
+MODEL_FILE_SUFFIXES = (".gguf", ".strata")    # the files a model folder holds: GGUF, and Strata's own format (Hy4-Flash, Inkling-2-Mini)
+
+
+def download_state(folder: Path) -> dict:
+    """{"complete", "downloading"} of a model folder: complete when it holds model files (.gguf or .strata) and each has
+    the .done marker Strata writes after a download, and no .part is left. Counting .gguf files alone listed every
+    Hy4-Flash and Inkling-2-Mini folder as an incomplete download (kingdonb fork, seen on chudmax 2026-11-22); upstream
+    0.2.20 counts the same way."""
+    files = [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in MODEL_FILE_SUFFIXES]
+    parts = list(folder.glob("*.part"))
+    done = bool(files) and not parts and all(f.with_name(f.name + ".done").exists() for f in files)
+    return {"complete": done, "downloading": bool(parts)}
 
 
 def files_here(S, family: str, model: str, models_dir: Path, vision: bool) -> dict | None:
