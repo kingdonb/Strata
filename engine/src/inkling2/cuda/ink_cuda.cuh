@@ -16,12 +16,17 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 
+// MERGED from kuraneko1/Strata (MIT, kuraneko1/_ryu15_): two-axis SM x VRAM
+// automatic profile selection. Credit: kuraneko1 (_ryu15_), kuraneko1/Strata (MIT).
+#include "strata/inkling2/profile_rules.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include "strata/platform/cgroup_mem.hpp"
 
 // A CUDA or cuBLAS error ends the process at once (_Exit), not through std::exit.  Seen on chudmax, 2026-11-22: an
 // out-of-memory error at serve time (ink_dspark.cuh, cudaGraphInstantiate) printed its line, then the process stayed
@@ -57,33 +62,6 @@
 
 namespace strata::ink {
 
-// Captures emit() on `st` and builds the graph into *exec.  A graph is built the first time its shape is used, at serve
-// time, so it asks the card for memory then.  When the card has none left (cudaErrorMemoryAllocation, seen on chudmax
-// 2026-11-22 at 15.8 of 16.3 GB) this returns false with the error cleared and nothing captured: the caller turns graphs
-// off and runs emit() directly, the same kernels without the graph - slower, but the request goes on.  Any other error
-// ends the process as INK_CK does.  When the graph is built, the calls are the same as before.
-template <typename F>
-inline bool try_capture_graph(cudaStream_t st, F&& emit, cudaGraphExec_t* exec) {
-    cudaGraph_t gr = nullptr;
-    *exec = nullptr;
-    INK_CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
-    emit();
-    INK_CK(cudaStreamEndCapture(st, &gr));
-    const cudaError_t e = cudaGraphInstantiate(exec, gr, nullptr, nullptr, 0);
-    INK_CK(cudaGraphDestroy(gr));
-    if (e == cudaSuccess) return true;
-    *exec = nullptr;
-    if (e != cudaErrorMemoryAllocation) {
-        std::fprintf(stderr, "strata-inkling CUDA error %d (%s) at %s:%d\n", (int)e, cudaGetErrorString(e), __FILE__, __LINE__);
-        INK_DIE(3);
-    }
-    (void)cudaGetLastError();   // not sticky: clear it so no later check reads it
-    std::fprintf(stderr, "strata-inkling: no card memory for a CUDA graph (%s); running without graphs from here\n",
-                 cudaGetErrorString(e));
-    std::fflush(stderr);
-    return false;
-}
-
 inline double now_s() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -93,24 +71,6 @@ inline T* dalloc(size_t count) {
     T* p = nullptr;
     if (count > 0) INK_CK(cudaMalloc(&p, count * sizeof(T)));
     return p;
-}
-
-// cudaMalloc for a buffer the engine can do without: false (nothing allocated, the error cleared) when the card has no
-// memory left, so the caller takes a path that needs no buffer instead of ending the process mid-request.  Any other
-// error ends the process as INK_CK does.
-template <typename T>
-inline bool try_dalloc(T*& p, size_t count) {
-    p = nullptr;
-    if (count == 0) return true;
-    const cudaError_t e = cudaMalloc(&p, count * sizeof(T));
-    if (e == cudaSuccess) return true;
-    p = nullptr;
-    if (e != cudaErrorMemoryAllocation) {
-        std::fprintf(stderr, "strata-inkling CUDA error %d (%s) at %s:%d\n", (int)e, cudaGetErrorString(e), __FILE__, __LINE__);
-        INK_DIE(3);
-    }
-    (void)cudaGetLastError();   // not sticky: clear it so no later check reads it
-    return false;
 }
 
 template <typename T>
@@ -132,6 +92,17 @@ inline int current_sm_arch(int dev = 0) {
     return cached_sm;
 }
 
+// MERGED from kuraneko1/Strata (MIT): select the measured SM x VRAM profile for
+// this GPU. Returns a pure-C++ table entry (no CUDA dependency in its own TU);
+// unmeasured cards take the conservative Generic defaults. Explicit CLI flags /
+// env overrides still win at the caller, per Strata's measured-only rule.
+inline strata::inkling2::ArchProfile current_arch_profile(int dev = 0) {
+    const int sm = current_sm_arch(dev);
+    if (sm <= 0) return strata::inkling2::select_arch_profile(0, 0);
+    const int major = sm / 10, minor = sm % 10;
+    return strata::inkling2::select_arch_profile(major, minor);
+}
+
 // Unified-Memory-safe VRAM query: on Linux integrated GPUs (e.g. DGX Spark GB10 sm_121 128 GB UMA),
 // cudaMemGetInfo subtracts reclaimable OS page cache (like the 19 GB .strata file just read!),
 // so take max(cuda_free, /proc/meminfo MemAvailable) to prevent false hybrid spill!
@@ -150,6 +121,10 @@ inline cudaError_t ink_cuda_mem_info(size_t* vfree, size_t* vtot, int dev = -1) 
                 unsigned long long kb = 0;
                 if (std::sscanf(line, "MemAvailable: %llu kB", &kb) == 1) {
                     size_t avail = (size_t)kb * 1024ull;
+                    const auto cg = strata::platform::cgroup_mem::probe_cgroup_room((uint64_t)*vtot);
+                    if (cg.limited && cg.available_bytes != strata::platform::cgroup_mem::kUnlimited) {
+                        avail = std::min<size_t>(avail, (size_t)cg.available_bytes);
+                    }
                     if (avail > *vfree) *vfree = std::min(avail, *vtot);
                     break;
                 }
@@ -215,6 +190,7 @@ enum InkFmt : int {
     FMT_S8_K  = 8,
     FMT_SF4   = 15,
     FMT_MX8   = 16,
+    FMT_GGUF_RAW = 20,
     FMT_Q8ROW = 100,
     FMT_F32   = 101,
     FMT_BF16  = 102,
@@ -375,9 +351,11 @@ __device__ __forceinline__ float ue8m0_to_f32(uint8_t e) {
     return __uint_as_float((uint32_t)e << 23);
 }
 
-// Exact SITU(beta=4.0, lb=25.0) double-softcapped MoE activation
+// Exact SITU(beta=4.0, lb=25.0) double-softcapped MoE activation (non-finite guard prevents NaN propagation!)
 __device__ __forceinline__ float situ_f32(float g, float u) {
-    const float sig = 1.0f / (1.0f + __expf(-g));
+    if (!isfinite(g) || !isfinite(u)) return 0.0f;
+    const float gc = fminf(fmaxf(g, -80.0f), 80.0f);
+    const float sig = 1.0f / (1.0f + __expf(-gc));
     const float ga = kInkSituBeta * tanhf(g * (1.0f / kInkSituBeta)) * sig;
     const float ua = kInkSituLb * tanhf(u * (1.0f / kInkSituLb));
     return ga * ua;

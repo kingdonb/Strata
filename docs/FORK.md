@@ -3,12 +3,13 @@
 This fork is upstream Strata plus a small set of additions. It is built from source on the owner's Mac. It does not
 publish installers, engine packages or an update feed of its own yet; that is planned (see "Releasing from the fork").
 
-- Base: upstream **v0.2.19**, merged on 2026-11-22 with an ordinary `git merge` (5 conflicts, each a line both sides
-  had changed; both sides kept). 0.2.16 had moved the top level into `app/`, `engine/`, `terminal/`, `docs/` and
+- Base: upstream **v0.2.20**, merged on 2026-11-22 with an ordinary `git merge` (22 files in conflict: the fork's
+  additions beside upstream's changes, both sides kept; and the Inkling engine, where upstream's 0.2.20 rewrite
+  replaced two of the fork's fixes). 0.2.16 had moved the top level into `app/`, `engine/`, `terminal/`, `docs/` and
   `tools/`; the fork's own scripts are in `tools/fork/`. The fork's five Settings strings are `s9900`-`s9904`, far
   from upstream's numbering, which took the fork's earlier numbers twice.
 - Upstream 0.2.14 removed DeepSeek V4.1-Flash from the tree. The fork follows: it has no DeepSeek either.
-- Versions: upstream's (app and Terminal 0.2.19, Control 0.1.65, engine 0.1.65). The fork no longer keeps a version
+- Versions: upstream's (app and Terminal 0.2.20, Control 0.1.66, engine 0.1.66). The fork no longer keeps a version
   line of its own. A fork release will add a suffix to upstream's number (owner decision, 2026-11-14).
 - Until the fork has its own feed, the built-in update address is still upstream's
   (`github.com/Niko1221/Strata/releases/latest/download`). `strata update` and the app's Update button would install
@@ -17,7 +18,7 @@ publish installers, engine packages or an update feed of its own yet; that is pl
 
 ## What the fork adds
 
-Everything else in the tree is upstream's file, byte for byte. `git diff v0.2.19 HEAD --stat` lists the whole
+Everything else in the tree is upstream's file, byte for byte. `git diff v0.2.20 HEAD --stat` lists the whole
 difference.
 
 | Addition | Where |
@@ -32,7 +33,7 @@ difference.
 | The Qwen3.6 engine's settings in the register, its result folders in the bench index, the guarded check script | `terminal/data/settings-register.json` (13 `STRATA_Q36M_*` entries), `docs/bench-results/README.md` (two rows), `tools/fork/check_guarded.sh` |
 | The M2 validation records, the Metal roadmap and review, the sandbox notes | `docs/QWEN36_METAL*.md`, `docs/m2-sessions/`, `docs/M2_*.md`, `docs/ENVIRONMENT.md`, `docs/blog/`, `docs/bench-results/2026-10-*-m2-q36-*` |
 | A frozen engine is ended on the `--batch` path too (every Inkling request takes it, even at `--parallel 1`): the reader, a slot and the drain after a disconnect call the stall check, so a silent engine with no CPU, I/O or GPU work is ended after `ENGINE_STALL_S` (90 s) instead of never | `terminal/serve/server.py` (`_control`, the slot reader in `generate_batched`, `_drain_control`), four tests in `terminal/serve/test_server.py` (`SilentEngine`) |
-| Inkling engine (CUDA): a CUDA or cuBLAS error ends the process with `_Exit` (it could hang in `std::exit`, holding the card); a CUDA graph that finds no memory falls back to running without graphs; the prompt-reading attention workspace is sized for the 256-row chunk it is read in (it was 512: ~2.8 GB at 32k, now ~1.6 GB) and falls back to the flash path when it cannot grow. Measured on chudmax (RTX 5060 Ti 16 GB, SQ-10 at 32k, DSpark), 2026-11-22: a 27,933-token prompt that ended upstream's engine with an out-of-memory error answers, and so does a 30,639-token one | `engine/src/inkling2/cuda/ink_cuda.cuh` (`INK_DIE`, `try_capture_graph`, `try_dalloc`), `ink_dspark.cuh`, `ink_runner.cuh` (`ensure_pf_attn`); version `0.1.65.1` |
+| Inkling engine (CUDA): a CUDA or cuBLAS error ends the process with `_Exit` after flushing stdout and stderr, not `std::exit`, which could hang holding the card (seen on chudmax, RTX 5060 Ti 16 GB, 2026-11-22). In v0.2.19-mbp.rtx.2 the fork also shipped a graph fallback and a half-size prompt workspace; upstream 0.2.20 fixed both its own way (graph builds fall back to eager mode; the workspace is a fixed 2,048-token tile, about 114 MiB, its #6605 / #6609), and the merge took upstream's | `engine/src/inkling2/cuda/ink_cuda.cuh` (`INK_DIE`) |
 
 ## Syncing with upstream
 
@@ -61,7 +62,7 @@ After a merge:
    ```
 
    Many tests fail on a Mac on pristine upstream too. Compare with the same run of the upstream tag
-   (`tools/fork/check_guarded.sh v0.2.19`) before reading a failure as the fork's.
+   (`tools/fork/check_guarded.sh v0.2.20`) before reading a failure as the fork's.
    After adding a `STRATA_*` setting to the engine, add it to `terminal/data/settings-register.json` (run
    `python tools/settings_register.py`, keep only the new entries, fill in `status`, `owner`, `note`); after adding a
    folder under `docs/bench-results`, run `python tools/bench_results_index.py` in a clean checkout.
@@ -70,7 +71,7 @@ After a merge:
    `prefix_plan_test`, `moe_sim`).
 3. Run the Qwen3.6 gates on the Mac with the model loaded. The commands are in [QWEN36_METAL.md](QWEN36_METAL.md).
 
-Push the upstream tags the fork merged (`v0.2.2`, `v0.2.3.1`, `v0.2.13.1`, `v0.2.14`, `v0.2.14.1`, `v0.2.15`, `v0.2.16`, `v0.2.17`, `v0.2.18`, `v0.2.19` so far) to the fork, not every upstream tag.
+Push the upstream tags the fork merged (`v0.2.2`, `v0.2.3.1`, `v0.2.13.1`, `v0.2.14`, `v0.2.14.1`, `v0.2.15`, `v0.2.16`, `v0.2.17`, `v0.2.18`, `v0.2.19`, `v0.2.20` so far) to the fork, not every upstream tag.
 
 ### Names the two sides share
 
@@ -113,10 +114,12 @@ Upstream has no release workflow. It builds on build boxes without a key and sig
   addresses, sizes and SHA-256, into the fork's feed. A fork Control trusts both keys: the fork's for the feed, and
   upstream's because each engine package carries upstream's signature. Upstream's Metal engine is left out (it has
   no Qwen3.6 path); the fork's own Metal engine package is open work. There is no DeepSeek member.
-- **One exception, from v0.2.19-mbp.rtx.2: the Inkling 2 Mini engine for Linux CUDA 13** (`strata-inkling`, shape
-  `inkling2`) is the fork's own build, version `0.1.65.1`, signed with the fork's key. It carries the engine fixes listed
-  in "What the fork adds" above. Its entry replaces upstream's carried `strata-inkling` linux-x86_64 cuda13 entry
-  in `RELEASE/shapes` before `build-feed`. Every other engine is still upstream's.
+- **One exception, in v0.2.19-mbp.rtx.2: the Inkling 2 Mini engine for Linux CUDA 13** (`strata-inkling`, shape
+  `inkling2`) was the fork's own build, version `0.1.65.1`, signed with the fork's key. Its entry replaced upstream's
+  carried `strata-inkling` linux-x86_64 cuda13 entry in `RELEASE/shapes` before `build-feed`. On the 0.2.20 base the
+  fork's only engine change is the `_Exit` fix; whether a 0.2.20 release builds its own Inkling engine again
+  (`0.1.66.1`) or carries upstream's 0.1.66 is open. The recipe of the rtx.2 build: `~/inkling-release/release.sh` on
+  chudmax (not in the tree yet).
 - **The feed sequence is upstream's times 1000, plus N** (`tools/fork/fork_release.py sequence`). A PC refuses a feed
   older than the last one it accepted, so a PC that ran upstream needs a higher number. A PC that took a fork feed
   refuses upstream's feed afterwards.
