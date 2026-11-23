@@ -377,3 +377,61 @@ class LaunchConfigsInTheModelTable(unittest.TestCase):
         with mock.patch.object(M.Strata, "engine_here", staticmethod(lambda ref, cfg: False)):
             d = self.strata().describe_config(cfg)
         self.assertIn("component:strata-inkling", d["missing_files"], "an engine package that is not installed is reported")
+
+
+class DownloadsInStatus(unittest.TestCase):
+    """strata_status's "downloads": a model folder of .strata files (Hy4-Flash, Inkling-2-Mini) is a download too (kingdonb
+    fork, seen on chudmax 2026-11-22: both folders were listed as incomplete with every file and its .done marker in place)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data = Path(tmp.name) / "data"
+        self.models = self.data / "models"
+        self.models.mkdir(parents=True)
+        self.root = Path(tmp.name) / "launch"
+        self.root.mkdir()
+
+    def folder(self, name, files, done=(), parts=()):
+        d = self.models / name
+        d.mkdir()
+        for f in files:
+            (d / f).write_bytes(b"\0" * 32)
+        for f in done:
+            (d / (f + ".done")).write_text("{}", encoding="utf-8")
+        for f in parts:
+            (d / (f + ".part")).write_bytes(b"\0" * 8)
+        return d
+
+    def test_a_strata_folder_with_every_file_done_is_complete(self):
+        ink = ["Inkling-2-Mini-SQ-10.strata", "Inkling-2-Mini-SQ-15.strata", "Inkling-2-Mini-Vision.strata"]
+        d = self.folder("inkling-2-mini", ink + ["tokenizer.json", "chat_template.jinja"], done=ink + ["tokenizer.json"])
+        self.assertEqual(M.download_state(d), {"complete": True, "downloading": False},
+                         "the tokenizer and the chat template are not model files: their markers do not matter")
+
+    def test_a_strata_file_without_its_marker_or_a_part_left_is_not_complete(self):
+        hy4 = ["Hy4-Flash-SQ-64.strata", "Hy4-Flash-Engram-Q8.strata"]
+        self.assertEqual(M.download_state(self.folder("hy4-a", hy4, done=hy4[:1])), {"complete": False, "downloading": False})
+        self.assertEqual(M.download_state(self.folder("hy4-b", hy4, done=hy4, parts=["Hy4-Flash-Vision.strata"])),
+                         {"complete": False, "downloading": True})
+
+    def test_gguf_folders_count_as_before_and_an_empty_folder_is_not_a_download(self):
+        g = ["model-00001-of-00002.gguf", "model-00002-of-00002.gguf"]
+        self.assertEqual(M.download_state(self.folder("Q2_0", g, done=g)), {"complete": True, "downloading": False})
+        self.assertEqual(M.download_state(self.folder("IQ3_S", g, done=g[:1])), {"complete": False, "downloading": False})
+        self.assertEqual(M.download_state(self.folder("empty", [])), {"complete": False, "downloading": False})
+
+    def test_status_lists_the_strata_folders_as_complete(self):
+        ink = ["Inkling-2-Mini-SQ-10.strata", "Inkling-2-Mini-Vision.strata"]
+        hy4 = ["Hy4-Flash-SQ-64.strata", "Hy4-Flash-Engram-Q8.strata", "Hy4-Flash-Vision.strata"]
+        self.folder("inkling-2-mini", ink, done=ink)
+        self.folder("hy4-flash", hy4, done=hy4)
+        env = mock.patch.dict(os.environ, {})
+        env.start()
+        self.addCleanup(env.stop)
+        for k in (M.ENV_HOST_PORT, M.ENV_HOST_CONFIG, M.ENV_HOST_KEY):
+            os.environ.pop(k, None)
+        s = M.Strata(self.root, ROOT)
+        with mock.patch.object(s, "data_dir", return_value=self.data):
+            downloads = s.installed()["downloads"]
+        self.assertEqual({Path(d["folder"]).name: d["complete"] for d in downloads}, {"inkling-2-mini": True, "hy4-flash": True})
