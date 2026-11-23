@@ -899,6 +899,36 @@ class Strata:
         except Exception:                               # noqa: BLE001 - no engine, an unknown component, a damaged folder: missing
             return False
 
+    def installed_index(self) -> dict:
+        """Which run config here holds which model-table entry: {config id: config id, ("choice", family, size): config id,
+        ("name", model_name): config id}. `strata launch` names its configs after the size and context (sq-10-32k.json,
+        q2_0-256k.json), not after the table's tag (inkling-2-mini-sq-10, q2_0), so matching names alone listed every model it
+        set up as not installed, even the one serving (kingdonb fork, seen on chudmax 2026-11-22). Its <name>.choices.json
+        names the family and size; a config without one still names its model (model_name: the tag, for Inkling-2-Mini and
+        Hy4-Flash). configs() is newest first, so a size set up twice points at its latest config. `tag in index` still
+        answers "is there a config of that name" (the Mac's Qwen3.6 rows ask that)."""
+        idx: dict = {}
+        for c in self.configs():
+            cid = config_tag(c)
+            idx.setdefault(cid, cid)
+            try:
+                ch = json.loads(c.with_name(c.stem + ".choices.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                ch = {}
+            if isinstance(ch, dict) and ch.get("family") and ch.get("model"):
+                idx.setdefault(("choice", str(ch["family"]), str(ch["model"]).lower()), cid)
+            name = self.read_config(c).get("model_name")
+            if isinstance(name, str) and name:
+                idx.setdefault(("name", name.lower()), cid)
+        return idx
+
+    @staticmethod
+    def installed_row(have: dict, family: str, model: str, tag: str) -> dict:
+        """A model-table row's "installed" and "id": the config of that name, else the newest config whose choices or
+        model_name name this family and size (installed_index). "id" is the config to start or remove."""
+        cid = have.get(tag) or have.get(("choice", family, str(model).lower())) or have.get(("name", tag))
+        return {"installed": cid is not None, "id": cid or tag}
+
     def describe_config(self, path: Path, usage: dict | None = None) -> dict:
         cfg = self.read_config(path)
         a = cfg.get("args") if isinstance(cfg.get("args"), list) else []
@@ -1457,7 +1487,7 @@ class Strata:
         models, families, _ctx, _src = self.tables()
         from strata_control import fit_label
         ram = float(hw.get("ram_gb") or 0)
-        have = {config_tag(c) for c in self.configs()}
+        have = self.installed_index()
         out = []
         for family in (self.mac().all_families() if self.mac() else ("qwen", "gyro")):      # Qwen, Unsloth's sets, then Gyro: never the default
             fd = families.get(family)
@@ -1472,7 +1502,7 @@ class Strata:
                               "ram_needed_gb": d["ram_gb"], "experts_gb": d.get("arena_gb"), "mem_total": False,
                               "memory_gb": round(float(d.get("arena_gb") or d["ram_gb"]) + 1.0, 1),
                               "fit_gb": fit_label.files_gb(family, m, d),
-                              "on_this_pc": self._mac_verdict(m, ram) if ram else None, "installed": tag in have, "id": tag})
+                              "on_this_pc": self._mac_verdict(m, ram) if ram else None, **self.installed_row(have, family, m, tag)})
             if sizes:
                 out.append({"family": family, "title": fd["title"], "about": fd.get("about"), "experimental": False,
                             "images": any(x["images"] for x in sizes), "sizes": sizes})
@@ -1493,7 +1523,7 @@ class Strata:
                                   "experimental": False, "images": True,
                                   "ram_needed_gb": d["ram_gb"], "experts_gb": d.get("arena_gb"), "mem_total": False,
                                   "memory_gb": d["footprint_gb"], "fit_gb": d["footprint_gb"],
-                                  "on_this_pc": verdict, "installed": tag in have, "id": tag, "gpu_options": None})
+                                  "on_this_pc": verdict, **self.installed_row(have, f, m, tag), "gpu_options": None})
                 if sizes:
                     out.append({"family": f, "title": fd["title"], "about": fd.get("about"), "experimental": False,
                                 "images": True, "sizes": sizes})
@@ -1515,7 +1545,7 @@ class Strata:
                                   "experimental": False, "images": True,
                                   "ram_needed_gb": d["ram_gb"], "experts_gb": d.get("arena_gb"), "mem_total": False,
                                   "memory_gb": d["footprint_gb"], "fit_gb": d["footprint_gb"],
-                                  "on_this_pc": verdict, "installed": tag in have, "id": tag, "gpu_options": None})
+                                  "on_this_pc": verdict, **self.installed_row(have, f, m, tag), "gpu_options": None})
                 if sizes:
                     out.append({"family": f, "title": fd["title"], "about": fd.get("about"), "experimental": False,
                                 "images": True, "sizes": sizes})
@@ -1661,7 +1691,7 @@ class Strata:
         vram = max((g["vram_gb"] for g in usable), default=0.0)
         from strata_control import fit_label
         card_room = fit_label.card_room_gb(usable)
-        have = {config_tag(c) for c in self.configs()}
+        have = self.installed_index()
         out = []
         for f, fd in sorted(families.items(), key=lambda kv: bool(kv[1].get("feed"))):      # the signed feed's models after the built-in ones (False sorts first, the order is kept)
             sizes = []
@@ -1707,7 +1737,7 @@ class Strata:
                               # Qwen3.6: the conversation memory per token and what the card holds before it (strata_control/own_path_fit.py,
                               # #5715): the app's context estimate and its warning use these; absent for every other model
                               **({"context_fit": d["context_fit"]} if d.get("context_fit") else {}),
-                              "on_this_pc": verdict, "installed": tag in have, "id": tag,
+                              "on_this_pc": verdict, **self.installed_row(have, f, m, tag),
                               "rdna4_faster": None,
                               # which graphics cards to use for it (strata_control/gpu_fit.py, the one rule app / Terminal / setup share):
                               # only with two or more cards that count; "recommended" names the pre-selected option

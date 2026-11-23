@@ -18,6 +18,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT))                 # strata_control, which the Hy4 test patches (it failed run alone)
 import strata_mcp as M  # noqa: E402
 
 KEY = "sk-host-test"
@@ -273,3 +274,106 @@ class HostedTools(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LaunchConfigsInTheModelTable(unittest.TestCase):
+    """The model table's "installed" for configs `strata launch` writes (kingdonb fork, seen on chudmax 2026-11-22: every
+    model it set up was listed as not installed, Inkling-2-Mini SQ-10 while it was serving). Its configs are named after the
+    size and context (sq-10-32k.json), not after the table's tag (inkling-2-mini-sq-10); the size is found through the
+    config's <name>.choices.json, or its model_name."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / "launch"
+        self.models = Path(tmp.name) / "models"
+        self.root.mkdir()
+        self.models.mkdir()
+        env = mock.patch.dict(os.environ, {})
+        env.start()
+        self.addCleanup(env.stop)
+        for k in (M.ENV_HOST_PORT, M.ENV_HOST_CONFIG, M.ENV_HOST_KEY):
+            os.environ.pop(k, None)
+
+    def config(self, name, model_name, exe, files=(), choices=None, mtime=None):
+        """A config as `strata launch` writes it (the engine as a package, the model's .strata files), and its choices file."""
+        args = []
+        for flag, fname in files:
+            f = self.models / fname
+            f.write_bytes(b"\0" * 64)
+            args += [flag, str(f)]
+        cfg = self.root / f"{name}.json"
+        cfg.write_text(json.dumps({"exe": exe, "args": args + ["--max-context", "32768"], "model_name": model_name, "port": 8080}),
+                       encoding="utf-8")
+        if choices:
+            (self.root / f"{name}.choices.json").write_text(json.dumps({"family": choices[0], "model": choices[1]}), encoding="utf-8")
+        if mtime is not None:
+            os.utime(cfg, (mtime, mtime))
+        return cfg
+
+    def strata(self):
+        return M.Strata(self.root, ROOT)
+
+    def chudmax_folder(self):
+        """The launch folder of chudmax on 2026-11-22, cut down: Inkling SQ-10 (with choices), SQ-15 twice (no choices, the older
+        launcher), Hy4-Flash SQ-64, Flash-Next Q2_0, and a config setup.py named after the tag."""
+        ink = "component:strata-inkling"
+        self.config("sq-10-32k", "inkling-2-mini-sq-10", ink,
+                    [("--native", "Inkling-2-Mini-SQ-10.strata"), ("--vision", "Inkling-2-Mini-Vision.strata")],
+                    choices=("inkling-2-mini", "SQ-10"))
+        self.config("sq-15-32k", "inkling-2-mini-sq-15", ink, [("--native", "Inkling-2-Mini-SQ-15.strata")], mtime=1_000_000)
+        self.config("sq-15-32k-2", "inkling-2-mini-sq-15", ink, [("--native", "Inkling-2-Mini-SQ-15.strata")], mtime=2_000_000)
+        self.config("sq-64-128k", "hy4-flash-sq-64", "component:strata-hy4",
+                    [("--native", "Hy4-Flash-SQ-64.strata"), ("--engram", "Hy4-Flash-Engram-Q8.strata")], choices=("hy4-flash", "SQ-64"))
+        self.config("q2_0-256k", "qwen3.8-flash-next-q2_0", "component:strata-engine", choices=("qwen", "Q2_0"))
+        self.config("strata-iq3_s", "qwen3.8-flash-next-iq3_s", "component:strata-engine")
+
+    def test_each_size_strata_launch_set_up_is_installed_and_points_at_its_config(self):
+        self.chudmax_folder()
+        s = self.strata()
+        have = s.installed_index()
+        row = s.installed_row
+        self.assertEqual(row(have, "inkling-2-mini", "SQ-10", "inkling-2-mini-sq-10"), {"installed": True, "id": "sq-10-32k"},
+                         "the serving Inkling size, found through its choices file")
+        self.assertEqual(row(have, "hy4-flash", "SQ-64", "hy4-flash-sq-64"), {"installed": True, "id": "sq-64-128k"})
+        self.assertEqual(row(have, "qwen", "Q2_0", "q2_0"), {"installed": True, "id": "q2_0-256k"},
+                         "a Flash-Next size: its model_name is not the tag, its choices file names it")
+
+    def test_a_config_without_choices_is_found_by_its_model_name_and_the_newest_wins(self):
+        self.chudmax_folder()
+        s = self.strata()
+        self.assertEqual(s.installed_row(s.installed_index(), "inkling-2-mini", "SQ-15", "inkling-2-mini-sq-15"),
+                         {"installed": True, "id": "sq-15-32k-2"})
+
+    def test_a_config_named_after_the_tag_is_still_found_and_an_absent_size_is_not(self):
+        self.chudmax_folder()
+        s = self.strata()
+        have = s.installed_index()
+        self.assertEqual(s.installed_row(have, "qwen", "IQ3_S", "iq3_s"), {"installed": True, "id": "iq3_s"})
+        self.assertEqual(s.installed_row(have, "inkling-2-mini", "SQ-20", "inkling-2-mini-sq-20"),
+                         {"installed": False, "id": "inkling-2-mini-sq-20"})
+        self.assertEqual(s.installed_row(have, "hy4-flash", "SQ-96", "hy4-flash-sq-96"), {"installed": False, "id": "hy4-flash-sq-96"})
+        self.assertIn("sq-10-32k", have, "`tag in index` still answers by config name (the Mac's Qwen3.6 rows)")
+
+    def test_side_files_are_not_configs(self):
+        self.chudmax_folder()
+        names = sorted(M.config_tag(c) for c in self.strata().configs())
+        self.assertEqual(names, ["iq3_s", "q2_0-256k", "sq-10-32k", "sq-15-32k", "sq-15-32k-2", "sq-64-128k"])
+
+    def test_the_serving_inkling_config_is_ready_with_every_file(self):
+        # the "not fully downloaded" report: Terminal 0.1.51's tools did not know the Inkling package; these do
+        self.chudmax_folder()
+        s = self.strata()
+        cfg = self.root / "sq-10-32k.json"
+        with mock.patch.object(M.Strata, "engine_here", staticmethod(lambda ref, cfg: ref == "component:strata-inkling")):
+            d = s.describe_config(cfg)
+        self.assertTrue(d["ready"])
+        self.assertEqual(d["missing_files"], [])
+        (self.models / "Inkling-2-Mini-Vision.strata").unlink()
+        with mock.patch.object(M.Strata, "engine_here", staticmethod(lambda ref, cfg: True)):
+            d = s.describe_config(cfg)
+        self.assertFalse(d["ready"])
+        self.assertEqual([Path(p).name for p in d["missing_files"]], ["Inkling-2-Mini-Vision.strata"])
+        with mock.patch.object(M.Strata, "engine_here", staticmethod(lambda ref, cfg: False)):
+            d = self.strata().describe_config(cfg)
+        self.assertIn("component:strata-inkling", d["missing_files"], "an engine package that is not installed is reported")
