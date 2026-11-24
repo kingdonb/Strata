@@ -1140,6 +1140,37 @@ card's reader is `strata-vision-hip`; if it cannot start, the server starts the 
 A picture becomes up to 1,024 tokens of the context (a 640x480 photo: 300). The same picture sent again, as chat apps do on
 every turn, is encoded once.
 
+### Inkling-2-Mini's picture reader
+
+Inkling-2-Mini reads pictures inside its own engine (`strata-inkling`, with `Inkling-2-Mini-Vision.strata`), not with
+`strata-vision`. The reader it uses:
+
+| Backend | Reader |
+| --- | --- |
+| NVIDIA (CUDA, one card) | The card. The reader's weights (0.63 GB) and a picture's working memory (about 1.3 GB for a 2,000x1,088 screenshot) are on the card only while that picture is read. |
+| NVIDIA with a layer split or two cards | The CPU. |
+| AMD (HIP), Intel (SYCL), Mac (Metal) | The card. |
+| Any other, or when the card lacks free memory | The CPU, after the picture is scaled down to at most `--vision-cpu-max-tokens` tokens (default 256; `0` = no cap). |
+
+The CPU reader runs in the engine's only request slot, so nothing else is answered meanwhile. Measured on an RTX 5060 Ti 16 GB
+with an i5-10400 (12 threads), Inkling SQ-10 serving, 2026-11-23:
+
+| Picture | Tokens | On the card | On the CPU |
+| --- | --- | --- | --- |
+| 2,000x1,088 | 1,400 | 0.9 s (1.5 s for the first picture, which reads the weights) | over 468 s |
+| scaled to 512 tokens | 464 | 0.21 s | 72 s |
+| 1,000x544 | 350 | 0.17 s | 49 s |
+| scaled to 256 tokens | 220 | 0.13 s | 27 s |
+
+With the KV cache grown to its full 81,920 tokens (13.9 GB of the card in use), a 2,000x1,088 picture still read on the
+card in 1.4 s and a 2,880x1,800 one (3,240 tokens) in 4.6 s; the reader keeps 256 MiB free beyond what a picture needs,
+and hands the picture to the CPU when that much is not there.
+
+The card's embeddings match the CPU reference to a cosine of 0.99994 or better (relative L2 difference about 1%, from bf16
+activations; `strata-inkling-vision-check` measures both). The engine log names the reader of each picture
+(`picture 0 (2000x1088): 1400 tokens read on the card in 0.9 s`). `STRATA_INK_CUDA_VISION=0` makes an NVIDIA engine read
+on the CPU.
+
 ### Vision settings (the `"vision"` section of `strata-<model>.json`)
 
 | Setting | Effect |

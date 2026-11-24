@@ -102,3 +102,22 @@ target_link_libraries(strata_inkling_cuda PUBLIC
 
 target_compile_definitions(strata-inkling PRIVATE INKLING_ENABLE_CUDA=1)
 target_link_libraries(strata-inkling PRIVATE strata_inkling_cuda)
+
+# strata-inkling-vision-check: one picture through the CPU reference reader and the CUDA reader (times, parity)
+add_executable(strata-inkling-vision-check "${CMAKE_CURRENT_SOURCE_DIR}/ink_vision_check.cu")
+target_include_directories(strata-inkling-vision-check PRIVATE ${_ink_cuda_inc})
+set_target_properties(strata-inkling-vision-check PROPERTIES
+  CUDA_STANDARD 20
+  CUDA_STANDARD_REQUIRED ON
+  CUDA_ARCHITECTURES "${STRATA_INK_CUDA_ARCHS}"
+  CUDA_RUNTIME_LIBRARY Shared
+)
+target_compile_options(strata-inkling-vision-check PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+target_link_libraries(strata-inkling-vision-check PRIVATE strata_inkling_core CUDA::cudart CUDA::cublas)
+# the CPU reference reader's loops are OpenMP (#pragma omp); in a .cu file the host compiler needs -fopenmp passed through,
+# or the check times the CPU reader on one core instead of every core as the engine runs it
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+  target_compile_options(strata-inkling-vision-check PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=${OpenMP_CXX_FLAGS}>)
+  target_link_libraries(strata-inkling-vision-check PRIVATE OpenMP::OpenMP_CXX)
+endif()

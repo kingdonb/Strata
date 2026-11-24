@@ -431,6 +431,11 @@ struct ActiveReq {
 struct ServeConfig {
     std::string model_path;
     std::string vision_path;
+    // The CPU picture reader runs inside the single request slot. Measured on an i5-10400 (12 threads, OpenMP), 2026-11-23:
+    // 220 tokens 27 s, 350 tokens 49 s, 464 tokens 72 s; a 2,000x1,088 screenshot (1,400 tokens) kept the slot 468+ s.
+    // A picture read on the CPU (no CUDA reader, or not enough card memory for it) is first scaled down to at most this
+    // many merged tokens (one token = one 40x40 cell): 256 keeps it near 30 s there. 0 = no cap. --vision-cpu-max-tokens N.
+    int vision_cpu_max_tokens = 256;
     BackendOpts bopts;
     std::string draft_mode = "auto";  // auto | dspark | off
     bool force_cpu = false;
@@ -520,6 +525,24 @@ inline int run_serve_loop(const ServeConfig& cfg, InkModelFile& mf, InkBackend& 
         rq.active = false;
     };
 
+    // A picture the CPU reads, scaled down to at most cfg.vision_cpu_max_tokens merged tokens (prepare_picture keeps the
+    // aspect ratio and pads to whole 40x40 cells, so the pixel budget is tightened until the padded grid fits).
+    auto shrink_for_cpu = [&](const std::string& path, ImageRec& rec, std::string& err) -> bool {
+        const int cap = cfg.vision_cpu_max_tokens;
+        if (cap <= 0 || rec.num_lm_tokens() <= cap) return true;
+        const int64_t cell = static_cast<int64_t>(vprobe.c.patch) * vprobe.c.merge;
+        int64_t px = static_cast<int64_t>(cap) * cell * cell;
+        for (int tries = 0; tries < 8; ++tries) {
+            VitCfg vc = vprobe.c;
+            vc.max_pixels = std::max<int64_t>(cell * cell, px);
+            ImageRec small;
+            if (!prepare_picture(path, vc, small, err)) return false;
+            if (small.num_lm_tokens() <= cap || tries == 7) { rec = std::move(small); return true; }
+            px = px * 85 / 100;
+        }
+        return true;
+    };
+
     auto prepare_req = [&](const ParsedGen& pg, ActiveReq& rq, std::string& err) -> bool {
         rq.active = true;
         rq.is_solo = (pg.cmd == "GEN");
@@ -554,20 +577,33 @@ inline int run_serve_loop(const ServeConfig& cfg, InkModelFile& mf, InkBackend& 
                 if (!prepare_picture(f, vprobe.c, rc, err)) { rq.active = false; return false; }
                 recs.push_back(std::move(rc));
             }
-            if (!expand_image_pads(pg.ids, c.image_token_id, recs, rq.prompt_ids, rq.prompt_img_idx, err)) {
-                rq.active = false;
-                return false;
-            }
-            // Encode images (try GPU backend first, fallback to CPU ViT)
+            // Encode images (try the GPU backend first, else the CPU ViT), BEFORE the prompt is expanded: a picture the CPU
+            // reads is scaled down to cfg.vision_cpu_max_tokens first, and the prompt gets that picture's token count.
             for (size_t k = 0; k < recs.size(); ++k) {
                 std::vector<float> emb;
                 std::string verr;
-                if (!backend.encode_image(recs[k], emb, verr)) {
+                const double t_enc = now_s();
+                const bool on_card = backend.encode_image(recs[k], emb, verr);
+                if (!on_card) {
+                    const int full = recs[k].num_lm_tokens();
+                    if (!shrink_for_cpu(pg.images[k], recs[k], err)) { rq.active = false; return false; }
                     if (!cpu_vit.loaded && !cpu_vit.load(cfg.vision_path, err)) { rq.active = false; return false; }
                     if (!cpu_vit.encode(recs[k], emb, err)) { rq.active = false; return false; }
+                    std::fprintf(stderr, "[strata-inkling] picture %zu (%dx%d): %d tokens read on the CPU in %.1f s%s%s%s\n",
+                                 k, recs[k].orig_w, recs[k].orig_h, recs[k].num_lm_tokens(), now_s() - t_enc,
+                                 full != recs[k].num_lm_tokens() ? (" (scaled down from " + std::to_string(full) + " tokens)").c_str() : "",
+                                 verr.empty() ? "" : "; card: ", verr.c_str());
+                } else {
+                    std::fprintf(stderr, "[strata-inkling] picture %zu (%dx%d): %d tokens read on the card in %.1f s\n",
+                                 k, recs[k].orig_w, recs[k].orig_h, recs[k].num_lm_tokens(), now_s() - t_enc);
                 }
+                std::fflush(stderr);
                 rq.img_embeds.insert(rq.img_embeds.end(), emb.begin(), emb.end());
                 proto("IMG %zu %d %d %d", k, recs[k].grid_h, recs[k].grid_w, recs[k].num_lm_tokens());
+            }
+            if (!expand_image_pads(pg.ids, c.image_token_id, recs, rq.prompt_ids, rq.prompt_img_idx, err)) {
+                rq.active = false;
+                return false;
             }
         } else {
             rq.prompt_ids = pg.ids;

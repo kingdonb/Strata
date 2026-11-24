@@ -9,12 +9,14 @@
 #include "ink_cuda.cuh"
 #include "ink_dspark.cuh"
 #include "ink_runner.cuh"
+#include "ink_cuda_vision.cuh"
 #include "ink_spec.cuh"
 #include "strata/core/volta_forever.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -101,8 +103,20 @@ public:
         return st;
     }
 
+    // Reads a picture on the card (cuda/ink_cuda_vision.cuh). false - no picture reader file, a multi-GPU split, not enough
+    // free card memory, any CUDA error - makes the serve loop read it on the CPU; this never ends the engine.
+    // STRATA_INK_CUDA_VISION=0 always reads on the CPU (for comparisons).
+    bool encode_image(const ImageRec& img, std::vector<float>& out_embeds, std::string& err) override {
+        if (!initialized_ || !runner_ || vision_path_.empty()) { err = "CUDA picture reader: no picture reader file"; return false; }
+        const char* env = std::getenv("STRATA_INK_CUDA_VISION");
+        if (env && std::strcmp(env, "0") == 0) { err = "CUDA picture reader: off (STRATA_INK_CUDA_VISION=0)"; return false; }
+        if (model_.ls_active || model_.ep2_active) { err = "CUDA picture reader: one card only (layer split / two-card mode)"; return false; }
+        return vision_.encode(vision_path_, img, runner_->cublas, runner_->st, out_embeds, err);
+    }
+
     bool init(const InkModelFile& mf, const BackendOpts& opts, std::string& err) override {
         cleanup();
+        vision_path_ = opts.vision_path;
         int n_dev = 0;
         cudaError_t ce = cudaGetDeviceCount(&n_dev);
         if (ce != cudaSuccess || n_dev <= 0) {
@@ -885,6 +899,8 @@ private:
     int dspark_slot_ = -1;
     KvDtype kv_dtype_ = KvDtype::FP16;
     std::string dev_info_;
+    std::string vision_path_;
+    strata::ink::InkCudaVision vision_;
 
     strata::ink::InkCudaModel model_;
     std::unique_ptr<strata::ink::InkCudaRunner> runner_;
