@@ -1,7 +1,8 @@
 # About this fork (kingdonb/Strata)
 
-This fork is upstream Strata plus a small set of additions. It is built from source on the owner's Mac. It does not
-publish installers, engine packages or an update feed of its own yet; that is planned (see "Releasing from the fork").
+This fork is upstream Strata plus a small set of additions. It publishes its own releases on kingdonb/Strata: a signed
+update feed, the one-line installers and the Terminal (Control) packages, tagged `-mbp.rtx.N`; engines are upstream's,
+except the fork's own Inkling engine for Linux CUDA 13 (see "Releasing from the fork").
 
 - Base: upstream **v0.2.21**, merged on 2026-11-24 with an ordinary `git merge` (7 files in conflict, each a line or
   two: version strings, the engine's usage line, the tool-approval part of one app line, the bench index, and the
@@ -12,10 +13,12 @@ publish installers, engine packages or an update feed of its own yet; that is pl
 - Upstream 0.2.14 removed DeepSeek V4.1-Flash from the tree. The fork follows: it has no DeepSeek either.
 - Versions: upstream's (app and Terminal 0.2.21, Control 0.1.67, engine 0.1.67). The fork no longer keeps a version
   line of its own. A fork release will add a suffix to upstream's number (owner decision, 2026-11-14).
-- Until the fork has its own feed, the built-in update address is still upstream's
-  (`github.com/Niko1221/Strata/releases/latest/download`). `strata update` and the app's Update button would install
-  upstream's engine, which does not have the Qwen3.6 Metal path. Do not use them on a machine that runs this fork's
-  engine.
+- Updates: a Terminal installed from a fork release reads the fork's signed feed
+  (`github.com/kingdonb/Strata/releases/latest/download`, key `e52bcd0bc55781a9`), so `strata update` installs the
+  fork's releases there. The address and key are written in when a release is built (`tools/fork/fork_release.py
+  bake`); the tree itself keeps upstream's, so a source checkout and the desktop app (not part of a fork release yet)
+  still read upstream's feed. A release that keeps the same Control version (a `.2` after a `.1`) is installed by running
+  the installer again, not by `strata update`.
 
 ## What the fork adds
 
