@@ -115,12 +115,11 @@ Upstream has no release workflow. It builds on build boxes without a key and sig
   addresses, sizes and SHA-256, into the fork's feed. A fork Control trusts both keys: the fork's for the feed, and
   upstream's because each engine package carries upstream's signature. Upstream's Metal engine is left out (it has
   no Qwen3.6 path); the fork's own Metal engine package is open work. There is no DeepSeek member.
-- **One exception, in v0.2.19-mbp.rtx.2: the Inkling 2 Mini engine for Linux CUDA 13** (`strata-inkling`, shape
-  `inkling2`) was the fork's own build, version `0.1.65.1`, signed with the fork's key. Its entry replaced upstream's
-  carried `strata-inkling` linux-x86_64 cuda13 entry in `RELEASE/shapes` before `build-feed`. On the 0.2.20 base the
-  fork's only engine change is the `_Exit` fix; whether a 0.2.20 release builds its own Inkling engine again
-  (`0.1.66.1`) or carries upstream's 0.1.66 is open. The recipe of the rtx.2 build: `~/inkling-release/release.sh` on
-  chudmax (not in the tree yet).
+- **One exception: the Inkling 2 Mini engine for Linux CUDA 13** (`strata-inkling`, shape `inkling2`) is the fork's own
+  build when the fork has engine changes upstream lacks: `0.1.65.1` in v0.2.19-mbp.rtx.2, and `0.1.66.1` from
+  v0.2.20-mbp.rtx.3 (the CUDA picture reader and the `_Exit` fix). It is signed with the fork's key, and its entry
+  replaces upstream's carried `strata-inkling` linux-x86_64 cuda13 entry in `RELEASE/shapes` before `build-feed`. Built
+  with `tools/fork/inkling_release.sh` in `nvidia/cuda:13.0.2-devel-ubuntu24.04`. Every other engine is upstream's.
 - **The feed sequence is upstream's times 1000, plus N** (`tools/fork/fork_release.py sequence`). A PC refuses a feed
   older than the last one it accepted, so a PC that ran upstream needs a higher number. A PC that took a fork feed
   refuses upstream's feed afterwards.
