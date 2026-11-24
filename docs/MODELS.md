@@ -262,7 +262,7 @@ strata launch --family hy4-flash --model SQ-64
 [Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) from Thinking Machines runs on its dedicated Strata shape
 engine (`strata-inkling`). Both [Strata's native `.strata` v1.1 builds](https://huggingface.co/strata-engine/Inkling-2-Mini-Strata)
 and [Unsloth's Dynamic GGUFs](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) are supported, with built-in DSpark speculative
-drafting and picture reading (`Inkling-2-Mini-Vision.strata`, 0.64 GB).
+drafting and picture reading (`Inkling-2-Mini-Vision.strata`, 0.64 GB). Pictures are read on the card (NVIDIA, AMD, Intel, Mac); see [DETAILS.md](DETAILS.md#inkling-2-minis-picture-reader) for which reader runs where and how long it takes.
 
 **Strata native `.strata` builds**
 
