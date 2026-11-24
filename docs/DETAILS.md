@@ -1162,6 +1162,10 @@ with an i5-10400 (12 threads), Inkling SQ-10 serving, 2026-11-23:
 | 1,000x544 | 350 | 0.17 s | 49 s |
 | scaled to 256 tokens | 220 | 0.13 s | 27 s |
 
+With the KV cache grown to its full 81,920 tokens (13.9 GB of the card in use), a 2,000x1,088 picture still read on the
+card in 1.4 s and a 2,880x1,800 one (3,240 tokens) in 4.6 s; the reader keeps 256 MiB free beyond what a picture needs,
+and hands the picture to the CPU when that much is not there.
+
 The card's embeddings match the CPU reference to a cosine of 0.99994 or better (relative L2 difference about 1%, from bf16
 activations; `strata-inkling-vision-check` measures both). The engine log names the reader of each picture
 (`picture 0 (2000x1088): 1400 tokens read on the card in 0.9 s`). `STRATA_INK_CUDA_VISION=0` makes an NVIDIA engine read

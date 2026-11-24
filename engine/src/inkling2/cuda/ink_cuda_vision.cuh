@@ -196,8 +196,10 @@ class InkCudaVision {
 public:
     // Attention scores of one query chunk: H x chunk x S floats. The chunk is sized to stay within this many bytes.
     size_t attn_budget_bytes = 128ull << 20;
-    // Room left free on the card beyond what one picture needs (the KV cache and the next prompt need it more).
-    size_t vram_margin_bytes = 512ull << 20;
+    // Room left free on the card beyond what one picture needs (cuBLAS workspace, the driver). The engine allocates
+    // nothing while a picture is read, and everything is freed before the prompt is read, so the margin covers only this
+    // reader. 512 MiB sent a 1,400-token picture to the CPU with the KV cache full (chudmax: 1,910 MiB free, 1,974 needed).
+    size_t vram_margin_bytes = 256ull << 20;
 
     // Reads `img` on the card. false (with `err`) when it cannot, for any reason; the caller then reads it on the CPU.
     bool encode(const std::string& vision_path, const ink2::ImageRec& img, cublasHandle_t cb, cudaStream_t st,
