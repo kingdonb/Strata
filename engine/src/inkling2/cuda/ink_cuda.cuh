@@ -26,28 +26,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <stdexcept>
+#include <string>
+#include "strata/core/device_error_exit.hpp"
 #include "strata/platform/cgroup_mem.hpp"
-
-// A CUDA or cuBLAS error ends the process at once (_Exit), not through std::exit.  Seen on chudmax, 2026-11-22: an
-// out-of-memory error at serve time (ink_dspark.cuh, cudaGraphInstantiate) printed its line, then the process stayed
-// alive for good, holding the card: main thread waiting on a futex, the detached stdin reader (ink_serve.h ServeInput)
-// blocked in getline.  The likely cause (unconfirmed, no stack was taken): exit's stdio clean-up waits for stdin's
-// lock, which that reader holds.  _Exit runs no clean-up.  stdout and stderr are flushed by name first, never
-// fflush(nullptr), which would take stdin's lock as well.
-#define INK_DIE(code)                                                                                                 \
-    do {                                                                                                              \
-        std::fflush(stdout);                                                                                          \
-        std::fflush(stderr);                                                                                          \
-        std::_Exit(code);                                                                                             \
-    } while (0)
 
 #define INK_CK(call)                                                                                                  \
     do {                                                                                                              \
         cudaError_t _e = (call);                                                                                      \
         if (_e != cudaSuccess) {                                                                                      \
-            std::fprintf(stderr, "strata-inkling CUDA error %d (%s) at %s:%d\n", (int)_e, cudaGetErrorString(_e),     \
-                         __FILE__, __LINE__);                                                                         \
-            INK_DIE(3);                                                                                               \
+            char _what[256];                                                                                          \
+            std::snprintf(_what, sizeof(_what), "strata-inkling CUDA error %d at %s:%d", (int)_e, __FILE__, __LINE__);\
+            strata::core::exit_device_error(_what, cudaGetErrorString(_e));                                           \
         }                                                                                                             \
     } while (0)
 
@@ -55,8 +45,9 @@
     do {                                                                                                              \
         cublasStatus_t _s = (call);                                                                                   \
         if (_s != CUBLAS_STATUS_SUCCESS) {                                                                            \
-            std::fprintf(stderr, "strata-inkling cuBLAS error %d at %s:%d\n", (int)_s, __FILE__, __LINE__);           \
-            INK_DIE(3);                                                                                               \
+            char _what[256];                                                                                          \
+            std::snprintf(_what, sizeof(_what), "strata-inkling cuBLAS error %d at %s:%d", (int)_s, __FILE__, __LINE__); \
+            strata::core::exit_device_error(_what, "cublas error");                                                   \
         }                                                                                                             \
     } while (0)
 
@@ -66,10 +57,35 @@ inline double now_s() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+// A device allocation that did not fit. While start-up code runs with ink_alloc_throws() set (the backend's init), a failed
+// allocation throws this so the backend can retry with a smaller workspace (#6644 #6792); everywhere else it ends the engine
+// the way every other CUDA error does.
+struct InkAllocFailure : std::runtime_error {
+    explicit InkAllocFailure(const std::string& m) : std::runtime_error(m) {}
+};
+inline bool& ink_alloc_throws() {
+    static thread_local bool v = false;
+    return v;
+}
+// Names the request and the card's free memory ("CUDA error 2 at ink_cuda.cuh:54" alone cannot be acted on).
+inline void ink_alloc_failed(cudaError_t e, size_t bytes, const char* file, int line) {
+    size_t vf = 0, vt = 0;
+    cudaGetLastError();
+    cudaMemGetInfo(&vf, &vt);
+    char _what[300];
+    std::snprintf(_what, sizeof(_what), "strata-inkling CUDA error %d at %s:%d (allocating %.0f MiB; %.0f of %.0f MiB free)",
+                  (int)e, file, line, (double)bytes / 1048576.0, (double)vf / 1048576.0, (double)vt / 1048576.0);
+    if (ink_alloc_throws()) throw InkAllocFailure(_what);
+    strata::core::exit_device_error(_what, cudaGetErrorString(e));
+}
+
 template <typename T>
 inline T* dalloc(size_t count) {
     T* p = nullptr;
-    if (count > 0) INK_CK(cudaMalloc(&p, count * sizeof(T)));
+    if (count > 0) {
+        const cudaError_t e = cudaMalloc(&p, count * sizeof(T));
+        if (e != cudaSuccess) ink_alloc_failed(e, count * sizeof(T), __FILE__, __LINE__);
+    }
     return p;
 }
 
@@ -195,6 +211,8 @@ enum InkFmt : int {
     FMT_F32   = 101,
     FMT_BF16  = 102,
     FMT_F16   = 103,
+    FMT_Q8_0  = 104,   // GGUF Q8_0 table as stored, row by row: [N][K/32] fp16 scales, then [N][K] int8 (the embedding; CUDA backend only)
+    FMT_Q8_0F = 105,   // GGUF Q8_0 dense matrix in mma fragment order for k_ink_gemm_q8f (CUDA, sm_80+): see the loader
 };
 
 __host__ __device__ constexpr int ink_sb_bytes(int fmt) {
