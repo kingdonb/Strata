@@ -557,7 +557,7 @@ applies at the next start. Network, key, MCP and program keys are not editable t
 | `host`, `api_key`, `api_keys`, `cors_origins`, `trusted_origins`, `allowed_hosts` | local only | See [Network access](#network-access). |
 | `codex_thread_titles`, `codex_compaction_cache` | off | See [Codex CLI](#the-responses-api-and-codex-cli). |
 | `mcp_servers`, `mcp` | none | See [Tools from MCP servers](#tools-from-mcp-servers). |
-| `remote_url` | none | With `--engine remote` (the `strata serve` front-end): the resident Strata server's address; the `--engine-url` flag wins. See [A front-end without an engine](#a-front-end-without-an-engine). |
+| `remote_url` | none | With `--engine remote` (the `strata serve` front-end): the resident Strata server's address; the `--engine-url` flag wins. See [A front-end without an engine](#a-front-end-without-an-engine---engine-remote). |
 
 ### Streaming and tool calls
 
