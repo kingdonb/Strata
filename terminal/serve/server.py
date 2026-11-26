@@ -357,6 +357,8 @@ from serve import lifeline  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json, extract_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
+from serve import remote as remote_api  # noqa: E402
+from serve.remote import RemoteEngine, UpstreamError, UpstreamUnreachable  # noqa: E402,F401
 from serve import images as images_api  # noqa: E402
 
 
@@ -5068,6 +5070,8 @@ class Service:
         """POST /load and every generation request: start the engine now if it is unloaded (raises GpuBusy)."""
         # a request is on its way: the idle thread must not unload between this and the request's own start
         self.last_request_at = time.time()
+        if getattr(self.engine, "remote", False):
+            return          # the front-end owns no model: the request is forwarded and the upstream loads on its own
         if self.loaded() and not self._vision_down():
             return
         trace = getattr(self.request_trace, "record", None)
@@ -5350,6 +5354,8 @@ class Service:
                   # KV cache is gone and the Context gauge must not show it as cached
                   "gen": getattr(self.engine, "gen", None),
                   **dict(getattr(self.engine, "info", {}) or {})}
+        if remote_api.is_remote(self):
+            engine["engine_up"] = int(self.engine.reachable())   # the delegated engine answers its health probe
         if getattr(self.vision, "cpu_note", None):         # the card had no room for the picture reader: the Terminal says so in its summary
             engine["vision_note"] = self.vision.cpu_note
         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
@@ -5399,6 +5405,10 @@ class Service:
              t.get("tool_args_repaired", 0)),
             ("strata:model_loaded", "gauge", "1 while the model is loaded", int(self.loaded())),
         ]
+        if remote_api.is_remote(self):
+            rows.append(("strata:engine_up", "gauge",
+                         "1 while the delegated engine (--engine remote) answers its health probe",
+                         int(self.engine.reachable())))
         # #6081: the conversation cache from the engine's log: parks, restores, evictions and the refused parks by reason
         cc = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
         rows += [
@@ -6958,19 +6968,22 @@ def structured_chunks(chunks, validator):
 
 
 # ------------------------------------------------------------------------------------------------ Anthropic
-def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, force=None, deferred=False):
+def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, force=None, deferred=False,
+                     run=None, input_tokens=None):
     mid = "msg_" + uuid.uuid4().hex[:24]
     yield "message_start", {"type": "message_start", "message": {
         "id": mid, "type": "message", "role": "assistant", "model": svc.model_for(req), "content": [],
-        "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": len(ids), "output_tokens": 0}}}
+        "stop_reason": None, "stop_sequence": None,
+        "usage": {"input_tokens": input_tokens if input_tokens is not None else len(ids or []),
+                  "output_tokens": 0}}}
     index, open_kind, used_tool = -1, None, False
 
     def close():
         return ("content_block_stop", {"type": "content_block_stop", "index": index})
 
     streamed, finished = set(), set()              # calls sent piece by piece; those whose final tool_call came (#211)
-    for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel, force=force, declared_only=True,
-                           deferred=deferred):
+    for kind, x in run if run is not None else \
+            svc.run(ids, thinking, tools, max_new, req, cancel, force=force, declared_only=True, deferred=deferred):
         if kind == "ping":
             yield None
             continue
@@ -7019,7 +7032,8 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
                 {"stop": "end_turn", "length": "max_tokens", "cancel": "end_turn"}[x["finish"]]
             # the final counts (message_start could only say the whole prompt): what was read now stays for the next
             # request, a cache write; input_tokens keeps the last token, as 0 makes Claude Code count the prompt twice (#1013)
-            whole = max(len(ids), int(x.get("prompt_tokens") or 0))     # (pictures: their tokens count)
+            whole = max(int(input_tokens or 0) if input_tokens is not None else len(ids or []),
+                        int(x.get("prompt_tokens") or 0))     # (pictures: their tokens count)
             reused = max(0, min(x.get("reused") or 0, whole - 1))
             read_now = whole - reused
             delta_event = {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": x.get("stop_sequence")},
@@ -7658,6 +7672,20 @@ def make_handler(svc: Service):
                 self.end_headers()
                 self.wfile.write(body)
             elif path in ("/health", "/api/health"):
+                if remote_api.is_remote(svc):
+                    health = svc.engine.probe()
+                    reachable = health is not None
+                    self._json(200, {"status": "ok" if reachable else "degraded",
+                                     "max_context": svc.reported_ctx() if reachable else None,
+                                     "model": svc.model, "family": svc.family,
+                                     "images": svc.has_vision(), "api_key": bool(svc.api_key),
+                                     "image_generation": False,
+                                     "loaded": svc.loaded(), "service": "strata",
+                                     "engine": {"mode": "remote", "url": svc.engine.redacted_url(),
+                                                "reachable": reachable, "loaded": svc.engine.remote_loaded,
+                                                **({"error": svc.engine.last_error}
+                                                   if svc.engine.last_error else {})}})
+                    return
                 self._json(200, {"status": "ok", "max_context": svc.reported_ctx(), "model": svc.model,
                                  "family": svc.family,
                                  "images": svc.has_vision(), "api_key": bool(svc.api_key),
@@ -7694,6 +7722,17 @@ def make_handler(svc: Service):
                 self._json(200, s)
             elif path in ("/v1/models", "/models") or path.startswith(("/v1/models/", "/models/")):
                 if self._authorized():
+                    if remote_api.is_remote(svc):
+                        try:
+                            status, body = remote_api.proxy_get(svc.engine, path, urlsplit(self.path).query)
+                        except UpstreamError as e:
+                            self._json(e.status, e.body if isinstance(e.body, dict) else
+                                       {"error": {"message": str(e), "type": "server_error"}})
+                            return
+                        self._json(status, body if isinstance(body, (dict, list)) else
+                                   {"error": {"message": "the engine answered an unreadable model list",
+                                              "type": "server_error"}})
+                        return
                     loaded = svc.loaded()
                     ctx = svc.reported_ctx()
                     created = int(getattr(svc, "started_at", 0) or time.time())
@@ -7738,6 +7777,15 @@ def make_handler(svc: Service):
                     self._props()
             elif path == "/slots":
                 if self._authorized():
+                    if remote_api.is_remote(svc):
+                        try:
+                            status, body = remote_api.proxy_get(svc.engine, "/slots")
+                        except UpstreamError as e:
+                            self._json(e.status, e.body if isinstance(e.body, dict) else
+                                       {"error": {"message": str(e), "type": "server_error"}})
+                            return
+                        self._json(status, body if isinstance(body, list) else [])
+                        return
                     loaded = not hasattr(svc.engine, "alive") or svc.engine.alive()
                     with svc.status_lock:
                         busy = bool(svc.status.get("busy"))
@@ -7773,6 +7821,14 @@ def make_handler(svc: Service):
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
             path = V1_V1_ALIASES.get(path, path)         # an Anthropic client given ".../v1" as its base posts /v1/v1/messages
             if path.startswith("/v1/") and self._foreign_page():
+                return
+            if remote_api.is_remote(svc) and (path in ("/unload", "/load", "/v1/load", "/v1/unload", "/v1/vram",
+                                                        "/v1/images/generations") or path.startswith("/slots/")):
+                # The front-end owns no model and no GPU: the engine host's controls stay there.
+                self._json(503, {"error": {"type": "server_error",
+                                           "message": f"this front-end delegates the engine at "
+                                                      f"{svc.engine.redacted_url()}; this control belongs to the "
+                                                      "engine host"}})
                 return
             if path == "/settings":
                 self._settings()
@@ -7900,14 +7956,15 @@ def make_handler(svc: Service):
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
-                    check_model = getattr(svc, "check_model", None)
-                    if callable(check_model):
-                        model_err = check_model(req)
-                        if model_err is not None:
-                            self._json(404, responses_error_body(model_err["message"], "invalid_request_error",
-                                                                 code="model_not_found")
-                                       if path == "/v1/responses" else {"error": model_err})
-                            return
+                    if not remote_api.is_remote(svc):    # the engine host validates the model; its 404 is proxied
+                        check_model = getattr(svc, "check_model", None)
+                        if callable(check_model):
+                            model_err = check_model(req)
+                            if model_err is not None:
+                                self._json(404, responses_error_body(model_err["message"], "invalid_request_error",
+                                                                     code="model_not_found")
+                                           if path == "/v1/responses" else {"error": model_err})
+                                return
                     self.record = svc.begin_request(path, req)
                 if path == "/v1/responses":
                     self._responses(req)
@@ -7970,6 +8027,9 @@ def make_handler(svc: Service):
                 self._json(503, {"error": {"type": "server_error", "message": died_note(e)}})
             except EngineStuck as e:                         # an unload or restart that could not end the engine
                 self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+            except UpstreamError as e:                       # --engine remote: the upstream's own answer (its
+                self._json(e.status, e.body if isinstance(e.body, dict) else   # body is already in the dialect's shape)
+                           {"error": {"type": "server_error", "message": str(e)}})
 
             except ClientGone:                               # #1999: the client left while the request was prepared
                 self._note(outcome="disconnected")
@@ -8032,6 +8092,20 @@ def make_handler(svc: Service):
             self._json(200, gen.response(images, job, figures, f"{scheme}://{host}"))
 
         def _props(self):
+            if remote_api.is_remote(svc):
+                try:
+                    status, body = remote_api.proxy_get(svc.engine, "/props", urlsplit(self.path).query)
+                except UpstreamError as e:
+                    self._json(e.status, e.body if isinstance(e.body, dict) else
+                               {"error": {"message": str(e), "type": "server_error"}})
+                    return
+                svc.engine.learn_props(body) if isinstance(body, dict) else None
+                if isinstance(body, dict):
+                    body["models_autoload"] = False          # the front-end starts no engine
+                self._json(status, body if isinstance(body, dict) else
+                           {"error": {"message": "the engine answered an unreadable props body",
+                                      "type": "server_error"}})
+                return
             model = parse_qs(urlsplit(self.path).query).get("model", [svc.model])[0]
             if model not in svc.model_names():
                 self._json(404, {"error": {"message": "model not found"}})
@@ -8244,7 +8318,9 @@ def make_handler(svc: Service):
 
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
-            bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
+            delegated = remote_api.is_remote(svc)
+            if not delegated:                        # the front-end has no vocabulary: logit bias rides on to the engine
+                bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             messages, tools, kw = openai_to_messages(req)
             require_messages(messages)                # an empty conversation is a 400, as OpenAI answers it, not a reply to nothing
             self._no_local_images(messages)
@@ -8262,23 +8338,28 @@ def make_handler(svc: Service):
             # max_tokens (by the rest of the context when it is not sent), which is the only bound OpenAI and vLLM
             # put on it either.  A reply that is not streamed does hold every entry (its token, bytes and up to 20
             # alternatives) until it ends, so a long one holds a lot: streaming hands each entry out with its chunk.
-            refuse_for_split(svc.engine, req)                 # (before the batch-slot rule below: its message would say to run without --parallel)
-            if top_logprobs(req) is not None and batch_slots_on(svc.engine) and max_req != 1:
-                # --parallel/--batch: a slot's "BT <slot> <id>" lines carry no LP line, and the batched loop never
-                # calls emit_lp_line (src/program/generate.cpp); an admission -- a max_tokens 1 request -- is read
-                # as GEN 1, which does write them.  Past that one token a reply would hold entries for a prefix
-                # only, which a client cannot tell from the model's own answer, so the longer one is refused.
-                raise ValueError('logprobs is available with "parallel" (batch slots) only for max_tokens 1; '
-                                 'run the server without "--parallel" for longer replies')
-            n_vocab = len(getattr(svc.tok, "tokens", ())) or None
-            if top_logprobs(req) is not None and n_vocab:
-                # emit_lp_line indexes the logits row with each named id as given, so an id past the vocabulary
-                # would read out of bounds: refused here, before anything is sent
-                bad = [i for i in allowed_ids(req) if i >= n_vocab]
-                if bad:
-                    raise ValueError(f"allowed_token_ids: {bad[0]} is outside the vocabulary "
-                                     f"(0..{n_vocab - 1})")
-            bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
+            if delegated:                            # the engine host owns the vocabulary and the slots: it validates
+                if top_logprobs(req) is not None:
+                    raise ValueError("logprobs is not available with the remote engine (this front-end has no "
+                                     "vocabulary to spell the entries with); point the client at the engine host")
+            else:
+                refuse_for_split(svc.engine, req)         # (before the batch-slot rule below: its message would say to run without --parallel)
+                if top_logprobs(req) is not None and batch_slots_on(svc.engine) and max_req != 1:
+                    # --parallel/--batch: a slot's "BT <slot> <id>" lines carry no LP line, and the batched loop never
+                    # calls emit_lp_line (src/program/generate.cpp); an admission -- a max_tokens 1 request -- is read
+                    # as GEN 1, which does write them.  Past that one token a reply would hold entries for a prefix
+                    # only, which a client cannot tell from the model's own answer, so the longer one is refused.
+                    raise ValueError('logprobs is available with "parallel" (batch slots) only for max_tokens 1; '
+                                     'run the server without "--parallel" for longer replies')
+                n_vocab = len(getattr(svc.tok, "tokens", ())) or None
+                if top_logprobs(req) is not None and n_vocab:
+                    # emit_lp_line indexes the logits row with each named id as given, so an id past the vocabulary
+                    # would read out of bounds: refused here, before anything is sent
+                    bad = [i for i in allowed_ids(req) if i >= n_vocab]
+                    if bad:
+                        raise ValueError(f"allowed_token_ids: {bad[0]} is outside the vocabulary "
+                                         f"(0..{n_vocab - 1})")
+                bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
             use_mcp = req.get("strata_mcp") is True and svc.mcp is not None      # the web app's opt-in (serve/mcp.py)
             own = {t.get("name") for t in tools or [] if isinstance(t, dict)}   # #592: a second line of defence
             if use_mcp:
@@ -8295,11 +8376,19 @@ def make_handler(svc: Service):
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431 (#1999: before prepare, which can take long)
-            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
-            _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
-            run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
-                               {t["name"] for t in extra}) if use_mcp else None
-            chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run, force=force)
+            if delegated:
+                # The client's own body goes to the engine host as it is (the upstream applies the template,
+                # tokenizer, reasoning and tool-call parsing and its own forcing); the front-end adds its MCP
+                # tools and runs their calls here, then forwards the results as the next round.
+                run = remote_api.remote_openai(svc, req, tools, {t["name"] for t in extra} if use_mcp else frozenset(),
+                                               cancel)
+                chunks = openai_chunks(svc, req, None, None, tools, max_new, cancel, run=run)
+            else:
+                ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
+                _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
+                run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
+                                   {t["name"] for t in extra}) if use_mcp else None
+                chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run, force=force)
             if validator is not None:
                 chunks = structured_chunks(chunks, validator)
             chunks = self._capture(chunks, "openai")
@@ -8341,6 +8430,8 @@ def make_handler(svc: Service):
                 self._chat_failed(str(e))   # headers are sent, so no 400 now
             except (GpuBusy, EngineStarting, EngineStuck, ModelBusy) as e:
                 self._chat_failed(str(e))   # _post's handler would write HTTP into the stream's body
+            except UpstreamError as e:                       # --engine remote: the upstream failed mid-stream
+                self._chat_failed(str(e))
             except ClientGone:
                 raise
             except Exception:                                # no silent end: the client would take it for a whole answer
@@ -8389,8 +8480,14 @@ def make_handler(svc: Service):
                 return self._responses_ready(req, title)
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431 (#1999: before prepare, which can take long)
+            run = None
             try:
-                ids, thinking, tools, max_new, asm, validator, req, force = self._responses_prepare(req, cancel)
+                if remote_api.is_remote(svc):
+                    ids, thinking, tools, max_new, asm, validator, req, force = \
+                        self._responses_prepare_remote(req, cancel)
+                    run = remote_api.remote_responses(svc, req, cancel)
+                else:
+                    ids, thinking, tools, max_new, asm, validator, req, force = self._responses_prepare(req, cancel)
             except ClientGone:
                 self._note(outcome="disconnected")
                 return
@@ -8409,7 +8506,8 @@ def make_handler(svc: Service):
             def events():
                 yield from asm.start()
                 done = None
-                for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel, force):
+                for kind, x in run if run is not None else \
+                        svc.run(ids, thinking, tools, max_new, req, cancel, force):
                     if kind == "ping":
                         yield None
                     elif kind == "event":
@@ -8442,6 +8540,9 @@ def make_handler(svc: Service):
                                                                 code="server_error"))
                 except EngineNonFinite as e:                 # #879, twice: not the request's fault
                     return self._json(503, responses_error_body(str(e), "server_error", code="server_error"))
+                except UpstreamError as e:                   # --engine remote: the upstream's own answer
+                    return self._json(e.status, e.body if isinstance(e.body, dict) else
+                                      responses_error_body(str(e), "server_error", code="server_error"))
                 except ValueError as e:                      # the engine's ERR line
                     return self._json(500, responses_error_body(str(e), "server_error", code="server_error"))
                 return self._json(200, result)
@@ -8482,6 +8583,8 @@ def make_handler(svc: Service):
                 self._responses_failed(asm, str(e), "server_error", send)
             except (GpuBusy, EngineStarting, EngineStuck, ModelBusy) as e:   # _post would write HTTP into the stream's body
                 self._responses_failed(asm, str(e), "server_error", send)
+            except UpstreamError as e:                       # --engine remote: the upstream failed mid-stream
+                self._responses_failed(asm, str(e), "server_error", send)
             except ClientGone:
                 raise
             except Exception:                                # no silent end: the client would take it for a whole answer
@@ -8495,6 +8598,34 @@ def make_handler(svc: Service):
                 self.wfile.flush()
             except OSError:
                 pass
+
+        def _responses_prepare_remote(self, req, cancel=None):
+            """--engine remote: the checks and the Assembler without the local prompt (the engine host renders,
+            encodes and checks the context); the request's usage arrives with the upstream's completion."""
+            responses_api.check_request(req)
+            messages = responses_api.input_messages(req)
+            tools, names, skipped = responses_api.request_tools(req)
+            try:
+                self._no_local_images(messages)              # as on the chat route: no file read for a foreign page
+            except ValueError as e:
+                raise ResponsesError(str(e), "input") from None
+            try:
+                _, validator = prepare_format(responses_api.text_format(req), messages, with_tools=bool(tools))
+            except ValueError as e:
+                raise ResponsesError(str(e).replace("response_format", "text.format"), "text.format") from None
+            noted = svc.__dict__.setdefault("hosted_tools_noted", set())   # said once per tool, not per request
+            if set(skipped) - noted:
+                print(f"[strata] /v1/responses: left out the hosted tools {', '.join(sorted(set(skipped) - noted))} "
+                      f"(this server cannot run them)", flush=True)
+                noted.update(skipped)
+            include = req.get("include") if isinstance(req.get("include"), list) else []
+            found, found_names = responses_api.client_found_tools(req)
+            if tools is not None and found:
+                tools = tools + [t for t in found if t["name"] not in names]
+                names = {**found_names, **names}
+            asm = responses_api.Assembler(req, svc.model_for(req), 0, names,
+                                          "reasoning.encrypted_content" in include, validator is not None)
+            return None, None, tools, 0, asm, validator, req, None
 
         def _responses_prepare(self, req, cancel=None):
             responses_api.check_request(req)
@@ -8572,6 +8703,15 @@ def make_handler(svc: Service):
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             stop_strings(req)                                 # the same 400 as the request itself would get
             check_request_sampling(req)                       # ... likewise a sampling field of the wrong type
+            if remote_api.is_remote(svc):
+                try:
+                    count = remote_api.count_tokens(svc.engine, req)
+                except UpstreamError as e:
+                    self._json(e.status, e.body if isinstance(e.body, dict) else
+                               {"error": {"message": str(e), "type": "server_error"}})
+                    return
+                self._json(200, {"input_tokens": count})
+                return
             self._json(200, {"input_tokens": len(svc.encode_prompt(messages, tools, kw, store=False))})
 
         def _anthropic(self, req):
@@ -8589,29 +8729,37 @@ def make_handler(svc: Service):
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431 (#1999: before prepare, which can take long)
-            try:
-                ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
-            except ContextOverflow as e:
-                raise ValueError(e.anthropic_text()) from None       # #4838: Anthropic's own wording first, Strata's sentence after it
-            # #6460: Claude Code's auto-compaction summary omits `thinking` and runs near the context limit. Under the
-            # default `"anthropic_thinking": "model"`, unasked thinking can burn the little remaining output room and
-            # produce an empty summary ("summarization produced empty response"). Disable unasked thinking when the
-            # request did not ask for thinking/effort/budget and the prompt is near the context ceiling.
-            req_effort = (req.get("output_config") or {}).get("effort") if isinstance(req.get("output_config"), dict) else None
-            asked_thinking = (req.get("thinking") is not None or bool(req_effort)
-                              or req.get("reasoning_budget_tokens") is not None)
-            ctx_limit = int(getattr(svc.engine, "max_context", 0) or 0)
-            req_max = token_limit(req.get("max_tokens"), "max_tokens") or 0
-            near_limit = bool(ctx_limit >= 32768 and len(ids) >= int(ctx_limit * 0.85))
-            if thinking and not asked_thinking and near_limit and kw.get("enable_thinking") is not False:
-                kw_no_think = {**kw, "enable_thinking": False}
+            input_tokens = None
+            if remote_api.is_remote(svc):
+                # The body goes to the engine host as it is (its template, its parsing); message_start's
+                # input_tokens is the upstream's own count (its /v1/messages/count_tokens, the model does not run).
+                input_tokens = remote_api.count_tokens(svc.engine, req)
+                run = remote_api.remote_anthropic(svc, req, cancel)
+            else:
                 try:
-                    ids, thinking, max_new = svc.prepare(messages, tools, kw_no_think, req_max, force=force, req=req, cancel=cancel)
+                    ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
                 except ContextOverflow as e:
-                    raise ValueError(e.anthropic_text()) from None
-            _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
-            events = anthropic_events(svc, req, ids, thinking, callable_tools, max_new, cancel, force=force,
-                                      deferred=deferred)
+                    raise ValueError(e.anthropic_text()) from None       # #4838: Anthropic's own wording first, Strata's sentence after it
+                # #6460: Claude Code's auto-compaction summary omits `thinking` and runs near the context limit. Under the
+                # default "anthropic_thinking": "model", unasked thinking can burn the little remaining output room and
+                # produce an empty summary ("summarization produced empty response"). Disable unasked thinking when the
+                # request did not ask for thinking/effort/budget and the prompt is near the context ceiling.
+                req_effort = (req.get("output_config") or {}).get("effort") if isinstance(req.get("output_config"), dict) else None
+                asked_thinking = (req.get("thinking") is not None or bool(req_effort)
+                                  or req.get("reasoning_budget_tokens") is not None)
+                ctx_limit = int(getattr(svc.engine, "max_context", 0) or 0)
+                req_max = token_limit(req.get("max_tokens"), "max_tokens") or 0
+                near_limit = bool(ctx_limit >= 32768 and len(ids) >= int(ctx_limit * 0.85))
+                if thinking and not asked_thinking and near_limit and kw.get("enable_thinking") is not False:
+                    kw_no_think = {**kw, "enable_thinking": False}
+                    try:
+                        ids, thinking, max_new = svc.prepare(messages, tools, kw_no_think, req_max, force=force, req=req, cancel=cancel)
+                    except ContextOverflow as e:
+                        raise ValueError(e.anthropic_text()) from None
+                _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
+                run = None
+            events = anthropic_events(svc, req, None if run is not None else ids, None, callable_tools, max_new,
+                                      cancel, force=force, deferred=deferred, run=run, input_tokens=input_tokens)
             events = self._capture(events, "anthropic")
             if not req.get("stream"):
                 return self._json(200, anthropic_collect(events))
@@ -8644,6 +8792,8 @@ def make_handler(svc: Service):
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
             except (GpuBusy, EngineStarting, EngineStuck, ModelBusy) as e:   # _post would write HTTP into the stream's body
                 self._anthropic_failed(str(e), "overloaded_error" if isinstance(e, GpuBusy) else "api_error")
+            except UpstreamError as e:                       # --engine remote: the upstream failed mid-stream
+                self._anthropic_failed(str(e), "api_error")
             except ClientGone:
                 raise
             except Exception:                                # no silent end: the client would take it for a whole answer
@@ -9215,7 +9365,17 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
             event_sink = None
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--engine", choices=["mock", "strata"], default="mock")
+    ap.add_argument("--engine", choices=["mock", "strata", "remote"], default="mock",
+                    help="strata: the engine in the config (resident, this machine); mock: a scripted engine for "
+                         "client tests; remote: this server owns no model - a stateless front-end that delegates "
+                         "generation, models, props, slots, token counts and health over HTTP to a resident Strata "
+                         "server (--engine-url) and keeps the web UI, the MCP hub and the metrics local")
+    ap.add_argument("--engine-url", default=None,
+                    help="with --engine remote: the resident Strata server's base URL, http(s)://host:port "
+                         "(for example http://chudmax-engine:8080; also \"remote_url\" in the config)")
+    ap.add_argument("--engine-api-key", default=os.environ.get("STRATA_ENGINE_API_KEY", ""),
+                    help="with --engine remote: the upstream's bearer token (Authorization: Bearer ...); "
+                         "also $STRATA_ENGINE_API_KEY. Never read from the config file", metavar="TOKEN")
     ap.add_argument("--config", help="strata engine config (JSON: exe, args, cwd, tokenizer, model_name), "
                                      "written by setup.py")
     ap.add_argument("--host", default=None,
@@ -9326,6 +9486,24 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
     config_bytes = Path(a.config).read_bytes() if a.config else b""
     cfg = parse_config_text(config_bytes.decode("utf-8-sig"), a.config) if a.config else {}   # Notepad adds a BOM
     split_joined_args(cfg)
+    remote_url = None
+    if a.engine == "remote":
+        # The front-end owns no model and no GPU: the engine-side knobs belong to the engine host.
+        remote_url = a.engine_url or cfg.get("remote_url")
+        if not isinstance(remote_url, str) or not remote_url.strip():
+            ap.error('--engine remote needs --engine-url (or "remote_url" in the config): the resident Strata '
+                     "server's base URL")
+        remote_url = remote_url.strip()
+        parts = urlsplit(remote_url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            ap.error("--engine-url must be an http:// or https:// URL (the resident Strata server's address)")
+        used_flags = {x.split("=", 1)[0] for x in launch_args}
+        for flag in ("--gpu", "--parallel", "--batch-groups", "--replicas", "--split-serve", "--lazy",
+                     "--idle-unload", "--min-free-vram-mib", "--before-load", "--slot-save-path",
+                     "--batch-telemetry", "--no-batch-telemetry", "--script", "--script-cycle",
+                     "--script-delay", "--tokenizer"):
+            if flag in used_flags:
+                ap.error(f"--engine remote delegates the engine: {flag} belongs to the engine host")
     from strata_control import retired
     _ds = retired.config_reason(cfg) if a.config else None
     if _ds:                                             # DeepSeek: this Strata no longer runs it; stop before the engine starts (retired.py)
@@ -9547,6 +9725,17 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
                                  linux_desktop()) if not groups and not split else None
         if note:                                        # #560 #516: before --open starts a browser on that card
             print(note, flush=True)
+    elif a.engine == "remote":
+        effort_end = None
+        engine = RemoteEngine(remote_url, api_key=a.engine_api_key, silence_s=engine_silence_s(cfg))
+        vision, sampling_defaults = None, {}
+        engine.probe()                                  # best-effort: the banner says what it saw; the routes re-probe
+        print(f"[strata] the engine is remote: {engine.redacted_url}"
+              + (f" (model {engine.model_name})" if engine.model_name else "")
+              + ("" if engine.last_error is None else
+                 f"; it did not answer its health probe: {engine.last_error}"), flush=True)
+        print("[strata] this front-end serves the web UI, the MCP tools and the API; generation, models, "
+              "props, slots and token counts are delegated", flush=True)
     else:
         effort_end = None
         engine, vision, sampling_defaults = MockEngine(tok, a.script or [
@@ -9556,9 +9745,15 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
     # the model's own chat template (exported with its tokenizer), else the original model's
     tpl = tpath / "chat_template.jinja"
     svc = Service(engine, tok, ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja"),
-                  model_name=default_model_name(cfg), vision=vision,
+                  model_name=engine.model_name or default_model_name(cfg), vision=vision,
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or (not a.no_fit_max_tokens and cfg.get("fit_max_tokens") is not False))
+    if a.engine == "remote":                            # the first health answer names the model the engine serves
+        def _learned_model(health):
+            name = health.get("model") if isinstance(health, dict) else None
+            if isinstance(name, str) and name:
+                svc.model = name
+        engine.on_probe = _learned_model
     svc.launch_attestation = launch_attestation
     svc.offline = a.offline
     svc.max_queue = max_queue
@@ -9776,8 +9971,15 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
     if hub is not None:
         import atexit
         svc.mcp = hub
-        # #2343: tool images reach a model that reads pictures unless the config says "image_results": false
-        hub.settings["image_results"] = resolve_image_results(hub.settings, svc.has_vision())
+        if remote_api.is_remote(svc):
+            # Tool pictures would be files on this front-end, which the engine host cannot read: text results only,
+            # whatever the config says (the front-end has no picture reader of its own to pass them through).
+            hub.settings["image_results"] = False
+            print("[strata] MCP tool images are off: the engine is remote, and its model cannot read the "
+                  "front-end's tool picture files", flush=True)
+        else:
+            # #2343: tool images reach a model that reads pictures unless the config says "image_results": false
+            hub.settings["image_results"] = resolve_image_results(hub.settings, svc.has_vision())
         if hub.settings["image_results"]:
             hub.media_dir = Path(a.config).with_suffix(".tool-media") if a.config else Path.cwd() / ".tool-media"
         print(f"[strata] starting {len(hub.servers)} MCP server{'s' * (len(hub.servers) != 1)} for the web app's "
@@ -9789,10 +9991,18 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
     svc.start_idle_unload()
     svc.start_vision_idle()
     here = "[::1]" if a.host == "::" else "127.0.0.1" if a.host in ("0.0.0.0", "") else f"[{a.host}]" if ":" in a.host else a.host
-    print(f"ready: http://{here}:{bound_port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
-          f"context {engine.max_context} tokens{', images on' if svc.has_vision() else ''}"
-          f"{', API key required' if svc.api_key else ''})", flush=True)
-    print(f"       open http://{here}:{bound_port}/ in a browser to chat; close this window to stop the model", flush=True)
+    if a.engine == "remote":
+        print(f"ready: http://{here}:{bound_port}/v1  (front-end for the engine at {engine.redacted_url()}; "
+              f"OpenAI: /v1/chat/completions, Anthropic: /v1/messages{', API key required' if svc.api_key else ''})",
+              flush=True)
+        print(f"       open http://{here}:{bound_port}/ in a browser to chat; close this window to stop the front-end",
+              flush=True)
+    else:
+        print(f"ready: http://{here}:{bound_port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
+              f"context {engine.max_context} tokens{', images on' if svc.has_vision() else ''}"
+              f"{', API key required' if svc.api_key else ''})", flush=True)
+        print(f"       open http://{here}:{bound_port}/ in a browser to chat; close this window to stop the model",
+              flush=True)
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         # issue #26: reachable from other devices - say at which address, and what can still block it
         ips = [f"[{a.host}]"] if ":" in a.host and a.host != "::" else [] if a.host == "::" else lan_addresses()

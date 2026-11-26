@@ -136,6 +136,8 @@ def strata(m: dict, out: list, lab: str):
             metric("live_slots", "gauge", "The batch slots in each state (live.slots).",
                    sum(1 for x in slots if isinstance(x, dict) and x.get("state") == state), f',state="{state}"')
     metric("engine_max_context", "gauge", "The engine's context (engine.max_context).", eng.get("max_context"))
+    metric("engine_up", "gauge", "1 while the delegated engine answers its health probe (engine.engine_up).",
+           eng.get("engine_up"))
     metric("totals_prompt_seconds_total", "counter", "Time spent reading prompts (totals.prompt_ms).",
            round((totals.get("prompt_ms") or 0) / 1000, 3))
     metric("totals_decode_seconds_total", "counter", "Time spent generating (totals.decode_ms).",

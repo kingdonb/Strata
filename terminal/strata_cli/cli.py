@@ -66,9 +66,15 @@ def parser() -> argparse.ArgumentParser:
     sp = ap.add_subparsers(dest="command", required=True)
     serve = sp.add_parser("serve", help="start the existing Strata inference server in the foreground")
     serve.add_argument("--profile", "--config", dest="config", required=True, metavar="CONFIG.json")
-    serve.add_argument("--engine", choices=("strata", "mock"), default="strata",
+    serve.add_argument("--engine", choices=("strata", "mock", "remote"), default="strata",
                        help="strata: the engine in the run config (default); mock: a scripted engine for client tests, "
-                            "no GPU and no model")
+                            "no GPU and no model; remote: a stateless front-end that delegates generation, models, "
+                            "props, slots and health to a resident Strata server (--engine-url) and keeps the web UI, "
+                            "the MCP hub and the metrics local")
+    serve.add_argument("--engine-url", help="with --engine remote: the resident Strata server's base URL, "
+                                            "http(s)://host:port (also remote_url in the run config)")
+    serve.add_argument("--engine-api-key", help="with --engine remote: the upstream's bearer token "
+                                                "(also $STRATA_ENGINE_API_KEY; never written to a file)")
     serve.add_argument("--host")
     serve.add_argument("--port", type=int)
     serve.add_argument("--parallel", type=int, help="requested concurrent engine slots")
@@ -832,6 +838,10 @@ def _launch_plan(ref: str, cli: argparse.Namespace | None = None) -> tuple[dict,
     # A key is recommended on a network, never required: the server warns once at start (owner decision 2026-10-20).
     server_args = ["--engine", getattr(cli, "engine", "strata"), "--config", str(path), "--host", str(host),
                    "--port", str(values["port"])]
+    if cli is not None and getattr(cli, "engine", None) == "remote":
+        if getattr(cli, "engine_url", None):
+            server_args += ["--engine-url", str(cli.engine_url)]
+        # the upstream's bearer token rides in the environment, never in argv: the plan prints server_argv
     if cli is not None:
         server_args += ["--shutdown-timeout", str(cli.shutdown_timeout)]
     for key, flag in (("parallel", "--parallel"), ("batch_groups", "--batch-groups"),
@@ -978,6 +988,8 @@ def _serve(a: argparse.Namespace) -> int:
         raise
     if a.plan:
         return _success({"plan": plan}, machine=a.output == "json")
+    if a.engine == "remote" and getattr(a, "engine_api_key", None):
+        os.environ["STRATA_ENGINE_API_KEY"] = str(a.engine_api_key)   # in-process serve reads it as its default
     from serve.server import main as server_main
     if os.name not in ("posix", "nt"):
         return _serve_foreground(server_main, args, plan, output=a.output, quiet=a.quiet)
