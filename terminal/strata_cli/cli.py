@@ -866,9 +866,15 @@ def _launch_plan(ref: str, cli: argparse.Namespace | None = None) -> tuple[dict,
     notes = io.StringIO()
     with contextlib.redirect_stdout(notes):
         engine_argv = engine_args(effective_cfg)
+    plan_argv = list(server_args)                       # the plan prints argv; a key in --engine-url never does
+    if "--engine-url" in plan_argv:
+        from serve.remote import redact
+        _u = plan_argv.index("--engine-url")
+        if _u + 1 < len(plan_argv):
+            plan_argv[_u + 1] = redact(plan_argv[_u + 1])
     plan = {"profile": saved["id"] if saved else None, "profile_revision": revision,
             "source_config": str(path), "model_name": cfg.get("model_name"),
-            "effective": values, "origin": origins, "server_argv": server_args,
+            "effective": values, "origin": origins, "server_argv": plan_argv,
             "ready_file": ready_path,
             "engine_exe": cfg["exe"], "engine_argv": _redact_argv(engine_argv),
             "notes": [line for line in notes.getvalue().splitlines() if line]}

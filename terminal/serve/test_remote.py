@@ -539,6 +539,23 @@ class CliPlan(unittest.TestCase):
         self.assertIn("http://chudmax-engine:8080", argv)
         self.assertNotIn("secret-plan-key", done.stdout)      # the bearer token rides in the environment
 
+    def test_plan_redacts_userinfo_in_the_url(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            cfg = Path(temp) / "remote-model.json"
+            cfg.write_text(json.dumps({"exe": "echo", "args": [], "model_name": "remote-model",
+                                       "tokenizer": "pack/full/tokenizer",
+                                       "remote_url": "http://chudmax-engine:8080"}), encoding="utf-8")
+            done = subprocess.run([sys.executable, str(ROOT / "strata.py"), "serve", "--profile", str(cfg),
+                                   "--engine", "remote",
+                                   "--engine-url", "http://key-user:secret-plan-key@chudmax-engine:8080",
+                                   "--plan", "--output", "json"],
+                                  capture_output=True, text=True, timeout=60, cwd=str(ROOT))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        plan = json.loads(done.stdout)["plan"]
+        self.assertIn("http://chudmax-engine:8080", plan["server_argv"])   # the address, without the userinfo
+        self.assertNotIn("secret-plan-key", done.stdout)      # a key in the address is never printed
+
 
 class LaunchFlags(unittest.TestCase):
     """--engine remote validates its URL and refuses the engine host's knobs."""
