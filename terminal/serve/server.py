@@ -6892,7 +6892,8 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
             whole = calls and streamed.keys() <= finished
             finish = "tool_calls" if whole and x["finish"] == "stop" else {"cancel": "stop"}.get(x["finish"], x["finish"])
             last = chunk({}, finish)
-            pt = x.get("prompt_tokens", len(ids))     # after MCP rounds: the last round's prompt
+            pt = x.get("prompt_tokens")               # after MCP rounds: the last round's prompt
+            pt = len(ids) if pt is None else pt       # (the default is evaluated even when the key exists: ids may be None on the front-end)
             last["usage"] = {"prompt_tokens": pt, "completion_tokens": x["completion_tokens"],
                              "total_tokens": pt + x["completion_tokens"],
                              # the part of the prompt the conversation cache already held (OpenAI's field)
@@ -8382,6 +8383,7 @@ def make_handler(svc: Service):
                 # tools and runs their calls here, then forwards the results as the next round.
                 run = remote_api.remote_openai(svc, req, tools, {t["name"] for t in extra} if use_mcp else frozenset(),
                                                cancel)
+                run = remote_api.accounted(svc, run, cancel)
                 chunks = openai_chunks(svc, req, None, None, tools, max_new, cancel, run=run)
             else:
                 ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
@@ -8486,6 +8488,7 @@ def make_handler(svc: Service):
                     ids, thinking, tools, max_new, asm, validator, req, force = \
                         self._responses_prepare_remote(req, cancel)
                     run = remote_api.remote_responses(svc, req, cancel)
+                    run = remote_api.accounted(svc, run, cancel)
                 else:
                     ids, thinking, tools, max_new, asm, validator, req, force = self._responses_prepare(req, cancel)
             except ClientGone:
@@ -8729,12 +8732,15 @@ def make_handler(svc: Service):
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431 (#1999: before prepare, which can take long)
+            ids = thinking = None
+            run = None
             input_tokens = None
             if remote_api.is_remote(svc):
                 # The body goes to the engine host as it is (its template, its parsing); message_start's
                 # input_tokens is the upstream's own count (its /v1/messages/count_tokens, the model does not run).
                 input_tokens = remote_api.count_tokens(svc.engine, req)
                 run = remote_api.remote_anthropic(svc, req, cancel)
+                run = remote_api.accounted(svc, run, cancel)
             else:
                 try:
                     ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
@@ -8757,8 +8763,7 @@ def make_handler(svc: Service):
                     except ContextOverflow as e:
                         raise ValueError(e.anthropic_text()) from None
                 _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
-                run = None
-            events = anthropic_events(svc, req, None if run is not None else ids, None, callable_tools, max_new,
+            events = anthropic_events(svc, req, ids, thinking, callable_tools, max_new,
                                       cancel, force=force, deferred=deferred, run=run, input_tokens=input_tokens)
             events = self._capture(events, "anthropic")
             if not req.get("stream"):
@@ -9730,7 +9735,7 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
         engine = RemoteEngine(remote_url, api_key=a.engine_api_key, silence_s=engine_silence_s(cfg))
         vision, sampling_defaults = None, {}
         engine.probe()                                  # best-effort: the banner says what it saw; the routes re-probe
-        print(f"[strata] the engine is remote: {engine.redacted_url}"
+        print(f"[strata] the engine is remote: {engine.redacted_url()}"
               + (f" (model {engine.model_name})" if engine.model_name else "")
               + ("" if engine.last_error is None else
                  f"; it did not answer its health probe: {engine.last_error}"), flush=True)
@@ -9745,7 +9750,7 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
     # the model's own chat template (exported with its tokenizer), else the original model's
     tpl = tpath / "chat_template.jinja"
     svc = Service(engine, tok, ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja"),
-                  model_name=engine.model_name or default_model_name(cfg), vision=vision,
+                  model_name=getattr(engine, "model_name", None) or default_model_name(cfg), vision=vision,
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or (not a.no_fit_max_tokens and cfg.get("fit_max_tokens") is not False))
     if a.engine == "remote":                            # the first health answer names the model the engine serves

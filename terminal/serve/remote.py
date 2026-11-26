@@ -69,7 +69,13 @@ class UpstreamUnreachable(UpstreamError):
 
 
 class UpstreamStatus(UpstreamError):
-    """The upstream answered with a non-200 status; its body (already in the dialect's shape) passes through."""
+    """The upstream answered with a non-200 status; its body (already in the dialect's shape) passes
+    through.  Built as (status, body, message) at every call site."""
+
+    def __init__(self, status, body=None, message=""):
+        self.status = int(status)
+        self.body = body if isinstance(body, dict) else None
+        super().__init__(message or f"the engine answered {self.status}", self.status, self.body)
 
 
 class RemoteEngine:
@@ -230,7 +236,9 @@ class _UpstreamStream:
 
     def __init__(self, engine: RemoteEngine, path: str, body: dict, silence_s: float):
         self.engine, self.path, self.body = engine, path, body
-        self.timeout = max(CALL_TIMEOUT_S, silence_s if silence_s > 0 else CALL_TIMEOUT_S)
+        # the per-read watchdog is the engine's silence (0 = wait, as a local engine does); the health probe
+        # the routes run right before bounds the connect
+        self.timeout = silence_s if silence_s and silence_s > 0 else None
         self.resp = None
         self.cancel: threading.Event | None = None
         self._q: queue.Queue = queue.Queue(maxsize=1024)
@@ -339,12 +347,12 @@ def _upstream_body(req: dict, dialect: str, messages=None, tools=None) -> dict:
 
 
 def _finish_of(finish: str | None, cancel: threading.Event) -> str:
-    """The done dict's finish.  A turn that ended in tool calls reports "stop" (with the calls as
-    events): openai_chunks derives "tool_calls" from them, anthropic_events "tool_use"."""
+    """The done dict's finish for the OpenAI dialect: a turn that ended in tool calls reports "stop"
+    (with the calls as events) so openai_chunks derives "tool_calls" from them; an unknown reason
+    passes through ("content_filter" is a real OpenAI finish_reason)."""
     if cancel.is_set():
         return "cancel"
-    return "stop" if finish in (None, "tool_calls", "function_call", "tool_use", "end_turn",
-                                "stop_sequence", "pause_turn", "refusal") else finish
+    return "stop" if finish in (None, "tool_calls", "function_call") else (finish or "stop")
 
 
 def _tool_arguments(text: str) -> dict:
@@ -355,7 +363,7 @@ def _tool_arguments(text: str) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _accounted(svc, run, cancel: threading.Event):
+def accounted(svc, run, cancel: threading.Event):
     """The request's own accounting while the events pass through: the live status, then the totals,
     history record and latency histogram from the upstream's usage (the local engines do this inside
     Service._run)."""
@@ -441,7 +449,7 @@ def remote_openai(svc, req: dict, tools, mcp_names, cancel: threading.Event):
         timings = outcome.timings or timings
         flags.update(outcome.flags)
         run_them = bool(outcome.mcp_calls) and not outcome.own_calls and not finalizing \
-            and outcome.finish in (None, "stop") and not cancel.is_set()
+            and outcome.finish in (None, "stop", "tool_calls", "function_call") and not cancel.is_set()
         if not run_them:
             for c in outcome.mcp_calls:                 # announced, never run: close them in the client's view
                 yield "mcp", {"event": "result", "id": c.id, "ok": False, "skipped": True, "text": "not run",
@@ -531,6 +539,9 @@ def _openai_round(stream: _UpstreamStream, cancel: threading.Event, mcp_names):
     finish, usage, timings = None, None, None
     flags = {}
     for name, data in stream.events(cancel):
+        if data is None:                                # ("ping", None): a keep-alive for the chunk layer
+            yield "ping", None
+            continue
         if data == "[DONE]":
             break
         chunk = _json_of(data.encode("utf-8"))
@@ -620,6 +631,9 @@ def _anthropic_round(stream: _UpstreamStream, cancel: threading.Event):
     blocks = {}                                     # index -> {"kind", "id", "name", "args"}
     input_tokens, output_tokens, stop_reason = 0, 0, None
     for name, data in stream.events(cancel):
+        if data is None:                                # ("ping", None): a keep-alive for the chunk layer
+            yield "ping", None
+            continue
         ev = _json_of(data.encode("utf-8"))
         if not isinstance(ev, dict):
             continue
@@ -664,7 +678,11 @@ def _anthropic_round(stream: _UpstreamStream, cancel: threading.Event):
             raise UpstreamStatus(502, None, str(err.get("message") or "the engine reported an error"))
         elif kind == "message_stop":
             break
-    return _AnthropicOutcome(stop_reason, input_tokens, output_tokens)
+    # the local protocol's vocabulary (anthropic_events maps it to Anthropic's stop_reason):
+    # end_turn and its cousins are a normal stop, tool_use ends the turn with the call events out
+    finish = {"end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length", "tool_use": "stop",
+              "pause_turn": "stop", "refusal": "stop"}.get(stop_reason, "stop")
+    return _AnthropicOutcome(finish, input_tokens, output_tokens)
 
 
 def remote_responses(svc, req: dict, cancel: threading.Event):
@@ -693,6 +711,9 @@ def _responses_round(stream: _UpstreamStream, cancel: threading.Event):
     items = {}                                      # output index -> {"kind", "id", "name", "args"}
     usage, finish = None, None
     for name, data in stream.events(cancel):
+        if data is None:                                # ("ping", None): a keep-alive for the chunk layer
+            yield "ping", None
+            continue
         ev = _json_of(data.encode("utf-8"))
         if not isinstance(ev, dict):
             continue
