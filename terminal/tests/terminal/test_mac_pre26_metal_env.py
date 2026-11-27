@@ -181,7 +181,8 @@ class EngineReading(unittest.TestCase):
         got = sorted(p.name for p in (self.metal / "kernels").glob("*.metal")
                      if "MetalPerformancePrimitives/MetalPerformancePrimitives.h" in p.read_text(encoding="utf-8", errors="replace").replace("\r", "")
                      and re.search(r"(?m)^\s*#\s*include\s*<MetalPerformancePrimitives/", p.read_text(encoding="utf-8", errors="replace")))
-        self.assertEqual(got, ["dense_mm.metal", "gdn_tprobe.metal", "mm_bench.metal", "mm_i8.metal", "moe_mm.metal", "qsa_prompt.metal"])
+        # the kingdonb fork adds q36_dense.metal (its Qwen3.6 Metal engine's prompt matmuls, docs/FORK.md); upstream's six are unchanged
+        self.assertEqual(got, ["dense_mm.metal", "gdn_tprobe.metal", "mm_bench.metal", "mm_i8.metal", "moe_mm.metal", "q36_dense.metal", "qsa_prompt.metal"])
         eng = [p.name for p in (self.metal / "src" / "engine" / "msl").glob("*.metal") if "MetalPerformancePrimitives" in p.read_text(encoding="utf-8", errors="replace")]
         self.assertEqual(eng, [])
 
