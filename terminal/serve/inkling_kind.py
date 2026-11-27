@@ -316,7 +316,7 @@ def decode_path(text: str) -> str:
 # DEFAULT_MAX_PIXELS, 0.8 MP: where the measured CPU reader takes about a minute (a 1024 x 768 picture is not touched, a 1920 x 1080 screenshot is scaled to about 1190 x 670).  `inkling_image_max_mp` in the run config (or STRATA_INKLING_IMAGE_MAX_MP) sets
 # another size in megapixels, 0 turns the cap off; a value above 0 applies on every backend.
 DEFAULT_MAX_PIXELS = 800_000
-GPU_PICTURE_BACKENDS = ("hip", "sycl", "metal")
+GPU_PICTURE_BACKENDS = ("hip", "sycl", "metal", "cuda-card")   # "cuda-card": the fork's CUDA engine (card_picture_reader)
 
 
 def image_cap_pixels(cfg: dict | None, environ=None) -> int:
@@ -386,6 +386,32 @@ ALLOW_MAX_S = 3 * 3600.0
 def cpu_picture_reader(cfg: dict | None) -> bool:
     """True where the engine reads pictures on the CPU (CUDA, cpu); HIP, SYCL and Metal have a GPU encoder."""
     return (cfg or {}).get("backend") not in GPU_PICTURE_BACKENDS
+
+
+# The kingdonb fork's strata-inkling (tools/fork/inkling_release.sh, 0.1.66.1 and later) reads pictures on an NVIDIA card, and when the card
+# is too full it scales the picture down itself before its CPU reader takes it (--vision-cpu-max-tokens, 256 tokens).  Its BUILD.json says
+# "picture_reader": "card" (0.1.69.1 on); the 0.1.66.1 and 0.1.67.1 packages only name the fork's script as their "source".  Such an engine
+# gets neither the CPU reader's picture cap nor its silence allowance, unless the run config or the environment sets the cap.
+FORK_SOURCE = "kingdonb/Strata tools/fork/inkling_release.sh"
+
+
+def card_picture_reader(exe) -> bool:
+    """True when the engine at `exe` is the fork's CUDA build that reads pictures on the card (its BUILD.json, beside it)."""
+    import json
+    from pathlib import Path
+    try:
+        info = json.loads((Path(str(exe)).parent / "BUILD.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001  (no file, unreadable, not JSON: upstream's engine)
+        return False
+    if not isinstance(info, dict) or info.get("shape") != "inkling2":
+        return False
+    if info.get("picture_reader") == "card":
+        return True
+    try:
+        ver = tuple(int(p) for p in str(info.get("version") or "").split("."))
+    except ValueError:
+        return False
+    return info.get("source") == FORK_SOURCE and len(ver) == 4 and ver >= (0, 1, 66, 1)
 
 
 def picture_pixels(data: bytes) -> int:

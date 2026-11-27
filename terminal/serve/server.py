@@ -9966,11 +9966,15 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
         svc.requested_slots = per_replica * len(groups) if groups else per_replica
     svc.answer_room = cfg.get("answer_room") is not False
     if svc.inkling:                                     # #7043: a cap on the pictures the CPU picture reader gets (CUDA, cpu), its own setting, 0 = off
-        svc.inkling_cpu_pictures = inkling_kind.cpu_picture_reader(cfg)
+        card = a.engine == "strata" and inkling_kind.card_picture_reader(exe)   # the fork's CUDA engine reads pictures on the card
+        svc.inkling_cpu_pictures = inkling_kind.cpu_picture_reader(cfg) and not card
         try:
-            svc.inkling_image_max_px = inkling_kind.image_cap_pixels(cfg)
+            svc.inkling_image_max_px = inkling_kind.image_cap_pixels({**cfg, "backend": "cuda-card"} if card else cfg)
         except ValueError as e:
             raise SystemExit(f"[strata] config {e}")
+        if card and not svc.inkling_image_max_px:
+            print("[strata] pictures: read on the card by the fork's engine, passed on at full size "
+                  "(inkling_image_max_mp in the run config, in megapixels, sets a cap)", flush=True)
         if svc.inkling_image_max_px:
             print(f"[strata] pictures: scaled down to at most {svc.inkling_image_max_px / 1e6:.2f} MP before the engine reads them "
                   "(inkling_image_max_mp in the run config, in megapixels, sets another size, 0 turns it off)", flush=True)
