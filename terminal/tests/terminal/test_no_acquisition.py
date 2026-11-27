@@ -44,6 +44,7 @@ INSTALL_WORDS = {"pip", "pip3", "git", "cmake", "ninja", "npm", "npx", "pnpm", "
 NETWORK_ALLOWED = {
     ("serve/server.py", "urlopen"): "an image_url a client sends in a chat request is fetched at request time",
     ("serve/mcp.py", "urlopen"): "the MCP servers the user configured, at request time",
+    ("serve/remote.py", "urlopen"): "the resident Strata engine (--engine-url) the operator configured, at request time",
     ("strata_control/tune_api.py", "urlopen"): "the loopback engine/server of a tuning job the user started",
     ("strata_control/tune_session.py", "urlopen"): "the loopback engine (127.0.0.1) the auto-tuner a user started measures",
     ("strata_control/loopback.py", "urlopen"): "the one opener for this computer's own servers (no proxy); any other address is passed on unchanged",

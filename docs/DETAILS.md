@@ -557,6 +557,7 @@ applies at the next start. Network, key, MCP and program keys are not editable t
 | `host`, `api_key`, `api_keys`, `cors_origins`, `trusted_origins`, `allowed_hosts` | local only | See [Network access](#network-access). |
 | `codex_thread_titles`, `codex_compaction_cache` | off | See [Codex CLI](#the-responses-api-and-codex-cli). |
 | `mcp_servers`, `mcp` | none | See [Tools from MCP servers](#tools-from-mcp-servers). |
+| `remote_url` | none | With `--engine remote` (the `strata serve` front-end): the resident Strata server's address; the `--engine-url` flag wins. See [A front-end without an engine](#a-front-end-without-an-engine---engine-remote). |
 
 ### Streaming and tool calls
 
@@ -750,6 +751,51 @@ tables per token). The scaling is fixed for the whole run, because the KV cache 
   a JSON body. Other pages and `Origin: null` get **403**. Clients without an `Origin` (curl, the SDKs) are not affected. With
   an API key, the key decides. `POST /unload`, `/load` and `/slots/0?action=...` also take only JSON from no `Origin`,
   Strata's own page or a trusted origin.
+
+### A front-end without an engine (`--engine remote`)
+
+One Strata can serve the web page, the MCP tools and the API while another machine's Strata does the generating. The
+front-end owns no model and needs no GPU: it is the lightweight piece you put near the users (a web pod in
+Kubernetes, a small box per office), and it hands every generation over HTTP to the resident Strata server on the
+machine with the graphics card, which keeps running as before.
+
+```sh
+strata serve --profile strata-<model>.json --engine remote --engine-url http://chudmax-engine:8080
+```
+
+- **The address:** `--engine-url` is the resident server's base URL without `/v1` — `http://127.0.0.1:8080` on the
+  same PC, `http://chudmax-engine:8080` when the cluster resolves the engine pod's name. Also `"remote_url"` in the
+  run config; the flag wins. A username-password part in the URL is accepted but redacted everywhere the address is
+  shown.
+- **The upstream's key:** when the resident server runs with `--api-key`, give the front-end `--engine-api-key` (or
+  the `STRATA_ENGINE_API_KEY` environment variable): it sends `Authorization: Bearer ...` on every delegated call.
+  The token is read once at start, kept in memory, never written to a file or a plan, and never printed. Your users
+  still authenticate against the front-end's own `--api-key` and Host/CORS settings (above).
+- **What stays on the front-end:** the web UI, the MCP hub — `--mcp-config` tools are discovered and run here, so
+  the engine host never needs to reach your MCP servers — the Host-header guard, the request monitor and `/metrics`.
+  Tool results that would save a picture are off: the engine host could not read a file saved on the front-end.
+- **What is delegated:** `/v1/chat/completions`, `/v1/messages` and `/v1/responses`, streaming and not; tool calls
+  and `reasoning_content` pass through, and a client that hangs up cancels the upstream request too. `/v1/models`,
+  `/props`, `/slots`, the token counts and the health answer are proxied from the resident server.
+- **What is refused:** the engine knobs (`--gpu`, `--parallel`, `--replicas`, `--script`, `--tokenizer`, ...) stop
+  the start — they belong to the engine host. The engine-control routes (`/load`, `/unload`, `/v1/vram`, slot save
+  and restore, `/v1/images/generations`) and `logprobs` answer **503** with the reason.
+
+Nothing pretends. When the resident server is down, the front-end says so; it never answers from a mock.
+
+| Asked | Engine answers | Engine down |
+| --- | --- | --- |
+| `GET /health` | `200` `"ok"` with an `engine` block | `200` `"degraded"`, the failure in the `engine` block |
+| the three generation routes | the upstream's answer, its status and error body on its errors | **503** |
+| `/v1/models`, `/props`, `/slots`, token counts | the upstream's lists | **503** |
+| `/metrics` | ... `strata:engine_up 1` | still answered, `strata:engine_up 0` |
+
+`"engine_silence_s"` (the resident server's own key) bounds the upstream's silence the same way: a delegated stream
+that sends nothing for that many seconds is ended with a 503, so a wedged engine cannot hold a client forever
+(default 300, `0` waits forever). The health probe has its own 3-second timeout.
+
+The front-end serves the web page from its own `terminal/serve/web` copy, so a container image for it ships that
+directory; the engine host needs no web page at all — clients talk to the front-end only.
 
 ### Connecting apps
 
