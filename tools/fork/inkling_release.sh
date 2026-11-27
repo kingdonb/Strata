@@ -24,7 +24,7 @@ got=$("$exe" --version | awk '{print $2}')
 stage=/w/stage; rm -rf "$stage"; mkdir -p "$stage"
 cp "$exe" "$stage/"
 cuda=$(nvcc --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
-echo "{\"version\": \"$ver\", \"shape\": \"inkling2\", \"source\": \"kingdonb/Strata tools/fork/inkling_release.sh\", \"commit\": \"${COMMIT:-unknown}\", \"archs\": \"$archs\", \"cuda\": \"$cuda\", \"portable\": true}" > "$stage/BUILD.json"
+echo "{\"version\": \"$ver\", \"shape\": \"inkling2\", \"source\": \"kingdonb/Strata tools/fork/inkling_release.sh\", \"commit\": \"${COMMIT:-unknown}\", \"archs\": \"$archs\", \"cuda\": \"$cuda\", \"portable\": true, \"picture_reader\": \"card\"}" > "$stage/BUILD.json"
 python3 tools/packaging/collect_libs.py --binary "$exe" --search /usr/local/cuda/lib64 --search /usr/lib/x86_64-linux-gnu --out "$stage" --also "libcublasLt.so*" --also "libgomp.so*"
 rm -rf /w/out; mkdir -p /w/out
 python3 tools/packaging/package_engine.py --src "$stage" --backend cuda --version "$ver" --out /w/out \
