@@ -40,6 +40,7 @@ TOKENS = 128           # tokens decoded per probe request (64 was too short: the
 REPS = 2               # requests per prompt and arm; the median is used
 READY_TIMEOUT = 900.0
 STEP_TIMEOUT = 300.0
+ERR_LINES, ERR_CHARS = 8, 600   # the kingdonb fork: how much of a failed engine's stderr a probe result keeps
 ON_ARGS = ["--draft", "dflash2", "--draft-beam", "1", "--draft-adapt"]   # what a drafting run config starts with (inkling_kind.drafter_args): DFlash 2 is the only drafter
 _PLACEMENT_FLAGS = ("--native", "--max-context", "--vram-experts-gb", "--ram-experts-gb", "--ssd-experts", "--kv", "--kv-offload",
                     "--vision", "--gpus", "--layer-split", "--dspark")
@@ -129,10 +130,20 @@ class Engine:
         except ImportError:                                                      # run by hand as a script outside the package
             env = dict(os.environ if env is None else env)
             env.setdefault("GGML_NO_BACKTRACE", "1")
-        self.p = subprocess.Popen([exe, "--serve", *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        self.p = subprocess.Popen([exe, "--serve", *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   env=env, cwd=cwd, bufsize=0)
         self.q: queue.Queue = queue.Queue()
+        self.err: list[str] = []                         # the kingdonb fork: the engine's last stderr lines, for a probe that failed
         threading.Thread(target=self._pump, daemon=True).start()
+        threading.Thread(target=self._pump_err, daemon=True).start()
+
+    def _pump_err(self):
+        for raw in iter(self.p.stderr.readline, b""):
+            self.err.append(raw.decode("utf8", "replace").rstrip())
+            del self.err[:-ERR_LINES]
+
+    def stderr_tail(self) -> str:
+        return " | ".join(ln for ln in self.err if ln)[-ERR_CHARS:]
 
     def _pump(self):
         buf = b""
@@ -181,9 +192,21 @@ def _strip_draft_args(args: list[str]) -> list[str]:
     return out
 
 
+_LAST: dict = {}     # the engine of the last arm (the kingdonb fork: its stderr names why a probe failed)
+
+
+def _why(res: dict) -> dict:
+    eng = _LAST.pop("engine", None)
+    tail = getattr(eng, "stderr_tail", lambda: "")() if eng is not None else ""
+    if tail:
+        res["engine_said"] = tail
+    return res
+
+
 def _arm(open_engine, args: list[str], prompts: dict, tokens: int, reps: int) -> dict | None:
     """Start one engine, warm it, decode every prompt; {name: median tok/s}, or None when it did not come up or a request failed."""
     eng = open_engine(args)
+    _LAST["engine"] = eng
     try:
         t_end = time.time() + READY_TIMEOUT
         while True:
@@ -224,12 +247,13 @@ def probe(open_engine, base_args: list[str], *, margin: float = MARGIN, tokens: 
     res: dict = {"decision": "off", "margin": margin, "tokens": tokens, "key": key, "at": int(time.time())}
     if plain is None:
         res["error"] = "the plain engine start for the probe failed"
-        return res
+        return _why(res)
     drafted = _arm(open_engine, base + list(on_args or ON_ARGS), prompts, tokens, reps)
     if drafted is None:
         res["error"] = "the drafting engine start for the probe failed"
         res["plain_tps"] = {k: round(v, 2) for k, v in plain.items()}
-        return res
+        return _why(res)
+    _LAST.pop("engine", None)
     gains = {k: drafted[k] / plain[k] for k in prompts}
     res.update({"decision": decide(gains, margin), "mixed_gain": round(mixed_gain(gains), 3), "gains": {k: round(v, 3) for k, v in gains.items()},
                 "plain_tps": {k: round(v, 2) for k, v in plain.items()}, "drafted_tps": {k: round(v, 2) for k, v in drafted.items()}})

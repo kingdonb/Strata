@@ -2748,11 +2748,15 @@ class Runner:
             if not needs(cfg):
                 return
             from strata_control import inkling_probe
-            from serve.server import _component_exe, child_env
-            exe = _component_exe(cfg["exe"], cfg)
+            from serve.server import child_env, with_component_engine
+            # the kingdonb fork: the engine as the serving start resolves it (serve/server.py _main): the package's own folder, where its CUDA
+            # runtime is, first on the library path. With the bare run config ("lib_dirs": []) the engine could not load libcudart.so.13 and
+            # every probe on a Linux CUDA PC failed, which left drafting off (docs/FORK.md)
+            resolved = with_component_engine(dict(cfg))
+            exe = resolved["exe"]
             args = inkling_kind.engine_args(cfg, exe, announce=False)
             self.emit("start", "Measuring whether drafting makes this model faster on this computer (two short runs; once for this setup)…", None)
-            inkling_probe.probe_run_config(cfg, exe, args, env=child_env(cfg), cwd=cfg.get("cwd"))
+            inkling_probe.probe_run_config(cfg, exe, args, env=child_env(resolved), cwd=cfg.get("cwd"))
             _atomic_mod.write_text(self.config_path, json.dumps(cfg, indent=1))
         except Exception as e:                               # noqa: BLE001 - a measurement is never a reason to stop a launch
             self.emit("start", f"The drafting measurement could not be made ({type(e).__name__}: {e}); drafting stays off.", None, level="warn")

@@ -46,7 +46,7 @@ class ProbeWiring(unittest.TestCase):
             self.started.append((exe, list(args)))
             return FakeEngine(args, speeds)
         return [mock.patch.object(P, "Engine", open_engine),
-                mock.patch("serve.server._component_exe", lambda ref, cfg: "/engine/strata-inkling"),
+                mock.patch("serve.server.with_component_engine", lambda cfg: {**cfg, "exe": "/engine/strata-inkling"}),
                 mock.patch("serve.server.child_env", lambda cfg, **kw: {})]
 
     def saved(self):
@@ -110,7 +110,7 @@ class ProbeWiring(unittest.TestCase):
     def test_a_probe_that_fails_never_stops_the_launch(self):
         r = self.runner()
         with mock.patch.object(P, "probe_run_config", side_effect=RuntimeError("engine would not start")), \
-                mock.patch("serve.server._component_exe", lambda ref, cfg: "/engine/strata-inkling"), \
+                mock.patch("serve.server.with_component_engine", lambda cfg: {**cfg, "exe": "/engine/strata-inkling"}), \
                 mock.patch("serve.server.child_env", lambda cfg, **kw: {}):
             r.probe_drafting()                                       # no exception
         self.assertTrue(any("could not be made (RuntimeError: engine would not start); drafting stays off" in t for _lv, t in r.said))
