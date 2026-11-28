@@ -536,7 +536,7 @@ applies at the next start. Network, key, MCP and program keys are not editable t
 | `reasoning_budget_tokens` | `0` (no budget) | Caps the thinking at N tokens: the server ends it with a short wrap-up line and `</think>` and the model answers from there. The wrap-up counts as output tokens. A request may send the budget as `reasoning_budget_tokens`, or under the name another provider uses: `thinking_token_budget` (vLLM), `thinking_budget` (Qwen) or `thinking_budget_tokens` (llama.cpp), which is what pi's `thinkingTokenBudgetField` sends. `reasoning_budget_tokens` wins over them, and of the others the first in that order does; a request's own value wins over the config's. |
 | `inkling_thinking_budget` | by level | Inkling-2-Mini only: the default thinking budget, in tokens, for a request (and config) that names none. One number for every level; `0` none. Unset: 1,024 at `none` / `minimal`, 2,048 at `low`, 4,096 at `medium`, 8,192 at `high`, 16,384 at `xhigh` / `max`. `STRATA_INKLING_THINKING_BUDGET` in the environment does the same, `STRATA_INKLING_EFFORT` sets the default thinking level (`low`). See [MODELS.md](MODELS.md#inkling-2-mini-thinking-levels). |
 | `inkling_budget_cap` | `true` | Inkling-2-Mini only (#7133): Claude Code's own default request, `thinking.budget_tokens` of exactly 31,999 on `/v1/messages` (level `high`), is held to the default budget of the level it runs at (above): 8,192 tokens at `high`, not 31,999. Every other budget a client sends goes through as it is: any other `budget_tokens`, `reasoning_budget_tokens` and its aliases (`thinking_token_budget`, `thinking_budget`, `thinking_budget_tokens`), a budget with `reasoning_effort` and `max_completion_tokens`; a request's own `0` still means no budget; the run config's own `reasoning_budget_tokens` is not capped. `false` (or `STRATA_INKLING_BUDGET_CAP=0` in the environment) lets Claude Code's default use the full 31,999. The first request that is held prints one `[strata] the client's default thinking budget of ...` line. |
-| `inkling_image_max_mp` | `0.8` on CUDA and CPU, off on HIP, SYCL, Metal and the kingdonb fork's CUDA engine | Inkling-2-Mini only: a picture with more megapixels than this is scaled down (same proportions; JPEG stays JPEG, else PNG) before the engine reads it; a picture at or under it, a 1024x768 one for instance, is passed on unchanged (a 1920x1080 screenshot is scaled to about 1190x670). The engine has no GPU picture reader on CUDA: its CPU reader takes about 15 s for 0.25 MP, 1 minute for 0.8 MP, 5.5 minutes for 2 MP and 12 minutes for 3 MP (measured on a 6-core PC, nothing else running), and says nothing meanwhile. One line in the server window names every picture that was scaled. `0` turns the cap off, any number above 0 sets it on every backend. `STRATA_INKLING_IMAGE_MAX_MP` in the environment does the same (the config wins). **Whatever the cap, a request with pictures on the CPU reader is never ended by `engine_silence_s`**: its silence allowance is 3 times the measured time of its pictures plus a minute (at most 3 hours), or your own `engine_silence_s` when that is larger; one line says so. |
+| `inkling_image_max_mp` | `0.8` on CUDA and CPU, off on HIP, SYCL and Metal | Inkling-2-Mini only: a picture with more megapixels than this is scaled down (same proportions; JPEG stays JPEG, else PNG) before the engine reads it; a picture at or under it, a 1024x768 one for instance, is passed on unchanged (a 1920x1080 screenshot is scaled to about 1190x670). The engine has no GPU picture reader on CUDA: its CPU reader takes about 15 s for 0.25 MP, 1 minute for 0.8 MP, 5.5 minutes for 2 MP and 12 minutes for 3 MP (measured on a 6-core PC, nothing else running), and says nothing meanwhile. One line in the server window names every picture that was scaled. `0` turns the cap off, any number above 0 sets it on every backend. `STRATA_INKLING_IMAGE_MAX_MP` in the environment does the same (the config wins). **Whatever the cap, a request with pictures on the CPU reader is never ended by `engine_silence_s`**: its silence allowance is 3 times the measured time of its pictures plus a minute (at most 3 hours), or your own `engine_silence_s` when that is larger; one line says so. |
 | `answer_room` | on | A request with thinking on, no budget and `max_tokens` of 1,024 or more gets one: thinking is wrapped up when a quarter of the cap (at least 512 tokens) is left. Requests without `max_tokens` get three quarters of the context. `false` turns it off. Clients should not cap the reply far below what the context allows. Inkling-2-Mini keeps the share for any `max_tokens` of 16 or more, thinking or not. |
 | `reasoning_close_retry` | off | Closes the thinking once and continues when a reply ended inside its thinking with no answer and no tool call (#1053). |
 | `reasoning_loop_recovery` | off | `"stop"` ends, `"recover"` (or `true`) restarts once, a reply whose reasoning repeats whole passages. Checked every 512 output tokens. It can mistake repeated useful code for a loop, so keep the answer quality alongside the completion rate when testing it (#728). |
@@ -1216,40 +1216,6 @@ card's reader is `strata-vision-hip`; if it cannot start, the server starts the 
 A picture becomes up to 1,024 tokens of the context (a 640x480 photo: 300). The same picture sent again, as chat apps do on
 every turn, is encoded once.
 
-### Inkling-2-Mini's picture reader
-
-Inkling-2-Mini reads pictures inside its own engine (`strata-inkling`, with `Inkling-2-Mini-Vision.strata`), not with
-`strata-vision`. The reader it uses:
-
-| Backend | Reader |
-| --- | --- |
-| NVIDIA (CUDA, one card) | The card. The reader's weights (0.63 GB) and a picture's working memory (about 1.3 GB for a 2,000x1,088 screenshot) are on the card only while that picture is read. |
-| NVIDIA with a layer split or two cards | The CPU. |
-| AMD (HIP), Intel (SYCL), Mac (Metal) | The card. |
-| Any other, or when the card lacks free memory | The CPU, after the picture is scaled down to at most `--vision-cpu-max-tokens` tokens (default 256; `0` = no cap). |
-
-The server knows this engine by its `BUILD.json` and hands it every picture at full size: upstream's 0.8 MP cap
-(`inkling_image_max_mp`) is for an engine whose only reader is the CPU. Setting `inkling_image_max_mp` still caps the pictures.
-
-The CPU reader runs in the engine's only request slot, so nothing else is answered meanwhile. Measured on an RTX 5060 Ti 16 GB
-with an i5-10400 (12 threads), Inkling SQ-10 serving, 2026-11-23:
-
-| Picture | Tokens | On the card | On the CPU |
-| --- | --- | --- | --- |
-| 2,000x1,088 | 1,400 | 0.9 s (1.5 s for the first picture, which reads the weights) | over 468 s |
-| scaled to 512 tokens | 464 | 0.21 s | 72 s |
-| 1,000x544 | 350 | 0.17 s | 49 s |
-| scaled to 256 tokens | 220 | 0.13 s | 27 s |
-
-With the KV cache grown to its full 81,920 tokens (13.9 GB of the card in use), a 2,000x1,088 picture still read on the
-card in 1.4 s and a 2,880x1,800 one (3,240 tokens) in 4.6 s; the reader keeps 256 MiB free beyond what a picture needs,
-and hands the picture to the CPU when that much is not there.
-
-The card's embeddings match the CPU reference to a cosine of 0.99994 or better (relative L2 difference about 1%, from bf16
-activations; `strata-inkling-vision-check` measures both). The engine log names the reader of each picture
-(`picture 0 (2000x1088): 1400 tokens read on the card in 0.9 s`). `STRATA_INK_CUDA_VISION=0` makes an NVIDIA engine read
-on the CPU.
-
 ### Vision settings (the `"vision"` section of `strata-<model>.json`)
 
 | Setting | Effect |
@@ -1318,6 +1284,9 @@ bits of the answer: a switch that changes rounding can change a greedy answer at
 Windows by default, which is a little faster). Use it when sharing the machine matters more than speed. `=0` forces spinning on Linux.
 
 ### Route tail skip (`STRATA_ROUTE_TAIL_SKIP`): off by default since 0.2.17
+
+(Inkling-2-Mini has its own, separate opt-in tail skip, `strata launch --turbo` and `--turbo-max`, also off by default: see
+[INKLING_TURBO.md](INKLING_TURBO.md).)
 
 A missed expert (one that is not on the card) that every token of a verify window routes at rank 7 or lower is neither copied nor
 computed: its weight is dropped. It applies on CUDA and on HIP gfx1200/gfx1201, with one GPU or a layer split. It does not apply
@@ -1432,11 +1401,12 @@ streamed for a 2K prompt and 4% fewer at 32K (8,192-token chunks); a 1,790-token
 conversation took 18% less time and fresh 2K, 4K and 32K reads ran 20%, 8% and 5% faster (4 pairs), with byte-identical
 replies in a deterministic lane at 1K to 32K.
 
-### RTX 20 (Turing, sm_75) kernels (opt-in)
+### RTX 20 (Turing, sm_75) kernels (on by default since 0.2.23)
 
 Kernels by rafatxf (#2069-#2072, #2093, #2220-#2222), imanu86 (#2081) and xrip (#1821) for compute capability 7.5 are bitwise
-equal to the ones they replace. Nobody on the team has an sm_75 card to confirm them, so they are off until asked for.
-`STRATA_SM75_PERF=1` turns on every bitwise Turing kernel on a 7.5 card (no other card is affected). Each has its own variable
+equal to the ones they replace. Until 0.2.22 nobody on the team had an sm_75 card to confirm them, so they were off until asked for;
+0.2.23 turns them on after a check on a real RTX 2080 Ti (identical ids, no speed change measured on that pack; #7041 reports +5% to +21%
+cold prefill from 32K to 207K tokens). `STRATA_SM75_PERF=0` turns the whole series off again; unset or `=1` it is on for a 7.5 card (no other card is affected). Each has its own variable
 that wins in both directions: `STRATA_SM75_IL`, `STRATA_SM75_EXP`, `STRATA_GR_UP75` / `STRATA_GR_DOWN_TG`, `STRATA_SCORES_HALVE`,
 `STRATA_TOPK_SPLIT`, `STRATA_TOPK_SAMPLE`, `STRATA_ATTN_V3`, `STRATA_Q2_WARP`, `STRATA_FUSE_WAIT=2`, `STRATA_QIL`,
 `STRATA_TC_SM75`, `STRATA_PA_V1_PREFETCH`, `STRATA_SCORES_THREAD` (a thread-per-head block scorer; `=1` works on any CUDA card).
