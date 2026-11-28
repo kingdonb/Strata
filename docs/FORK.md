@@ -1,17 +1,21 @@
 # About this fork (kingdonb/Strata)
 
 This fork is upstream Strata plus a small set of additions. It publishes its own releases on kingdonb/Strata: a signed
-update feed, the one-line installers and the Terminal (Control) packages, tagged `-mbp.rtx.N`; engines are upstream's,
-except the fork's own Inkling engine for Linux CUDA 13 (see "Releasing from the fork").
+update feed, the one-line installers and the Terminal (Control) packages, tagged `-mbp.rtx.N`; every engine is upstream's
+(from v0.2.23; earlier releases carried the fork's own Inkling engine for Linux CUDA 13, see "Releasing from the fork").
 
-- Base: upstream **v0.2.22**, merged on 2026-11-26 with an ordinary `git merge` (5 files in conflict: four version
-  strings, and one line of `server.py` where upstream's Codex keep-alive (#7132) meets the fork's `--engine remote`
-  run). The v0.2.21 merge (2026-11-24) took upstream's Inkling error exit (`strata::core::exit_device_error`: flush,
+- Base: upstream **v0.2.23**, merged on 2026-11-28 with an ordinary `git merge` (11 files in conflict). Upstream 0.2.23
+  has its own CUDA picture reader for Inkling (`engine/src/inkling2/cuda/ink_vision_cuda.cuh`), so the fork dropped its
+  own (owner decision, 2026-11-28): `engine/src/inkling2/` is upstream's again, byte for byte, and with it the fork's
+  CPU fallback (`--vision-cpu-max-tokens`), the `strata-inkling-vision-check` tool and Control's `BUILD.json` check for
+  the fork's engine. Upstream reads pictures on the CPU on a card under 24 GB; `--vision-reader gpu` (or `--vision gpu`
+  in `strata launch`) reads them on the card and holds about 1.3 GB back from the experts at start. The v0.2.21 merge
+  (2026-11-24) took upstream's Inkling error exit (`strata::core::exit_device_error`: flush,
   then `_Exit(3)`) in place of the fork's `INK_DIE`. 0.2.16 had moved the top level into `app/`, `engine/`, `terminal/`, `docs/` and
   `tools/`; the fork's own scripts are in `tools/fork/`. The fork's five Settings strings are `s9900`-`s9904`, far
   from upstream's numbering, which took the fork's earlier numbers twice.
 - Upstream 0.2.14 removed DeepSeek V4.1-Flash from the tree. The fork follows: it has no DeepSeek either.
-- Versions: upstream's (app and Terminal 0.2.22, Control 0.1.69, engine 0.1.69). The fork no longer keeps a version
+- Versions: upstream's (app and Terminal 0.2.23, Control 0.1.70, engines 0.1.70). The fork no longer keeps a version
   line of its own. A fork release will add a suffix to upstream's number (owner decision, 2026-11-14).
 - Updates: a Terminal installed from a fork release reads the fork's signed feed
   (`github.com/kingdonb/Strata/releases/latest/download`, key `e52bcd0bc55781a9`), so `strata update` installs the
@@ -22,7 +26,7 @@ except the fork's own Inkling engine for Linux CUDA 13 (see "Releasing from the 
 
 ## What the fork adds
 
-Everything else in the tree is upstream's file, byte for byte. `git diff v0.2.22 HEAD --stat` lists the whole
+Everything else in the tree is upstream's file, byte for byte. `git diff v0.2.23 HEAD --stat` lists the whole
 difference.
 
 | Addition | Where |
@@ -37,8 +41,6 @@ difference.
 | The Qwen3.6 engine's settings in the register, its result folders in the bench index, the guarded check script | `terminal/data/settings-register.json` (13 `STRATA_Q36M_*` entries), `docs/bench-results/README.md` (two rows), `tools/fork/check_guarded.sh` |
 | The M2 validation records, the Metal roadmap and review, the sandbox notes | `docs/QWEN36_METAL*.md`, `docs/m2-sessions/`, `docs/M2_*.md`, `docs/ENVIRONMENT.md`, `docs/blog/`, `docs/bench-results/2026-10-*-m2-q36-*` |
 | A frozen engine is ended on the `--batch` path too (every Inkling request takes it, even at `--parallel 1`): the reader, a slot and the drain after a disconnect call the stall check, so a silent engine with no CPU, I/O or GPU work is ended after `ENGINE_STALL_S` (90 s) instead of never | `terminal/serve/server.py` (`_control`, the slot reader in `generate_batched`, `_drain_control`), four tests in `terminal/serve/test_server.py` (`SilentEngine`) |
-| Inkling engine (CUDA): pictures are read on the card. Upstream's CUDA backend had no picture reader, so on NVIDIA every picture was read on the CPU inside the only request slot (a 2,000x1,088 screenshot: 468+ s on chudmax; on the card 0.9 s). The reader never ends the engine: without free card memory it hands the picture to the CPU, which first scales it down to `--vision-cpu-max-tokens` (default 256, about 30 s on an i5-10400) | `engine/src/inkling2/cuda/ink_cuda_vision.cuh`, `cuda/ink_cuda_backend.cu` (`encode_image`), `ink_serve.h` (`shrink_for_cpu`), `cuda/ink_vision_check.cu` (`strata-inkling-vision-check`), [DETAILS.md](DETAILS.md#inkling-2-minis-picture-reader) |
-| Serve: no CPU-reader picture cap on the fork's CUDA engine. Upstream 0.2.22 (#7043) scales every picture to 0.8 MP on CUDA, because its CUDA engine reads pictures on the CPU; the fork's engine reads them on the card and scales down by itself when the card is full. Control knows the fork's engine by its `BUILD.json` (`"picture_reader": "card"`, or the fork's script as `"source"` from 0.1.66.1 on). `inkling_image_max_mp` in the run config still sets a cap | `terminal/serve/inkling_kind.py` (`card_picture_reader`), `server.py` (`_main`), `tools/fork/inkling_release.sh`, `serve/test_inkling_card_pictures.py` |
 | `--engine remote` front-end delegation for the serve API: a stateless front-end (`strata serve --engine remote --engine-url ...`) serves the web UI, the MCP hub, the Host guard and the metrics while a resident Strata server generates; usage is accounted from the upstream, client disconnects cancel the upstream request, an unreachable upstream answers honestly (degraded health, 503 on generation and proxies, `strata:engine_up 0`), never a mock fallback | `terminal/serve/remote.py` (new), `terminal/serve/server.py` (delegation branches, `--engine-url` / `--engine-api-key` / `"remote_url"`, honesty surfaces), `terminal/serve/prometheus.py` (`strata:engine_up`), `terminal/strata_cli/cli.py` (`strata serve` flags, the key only via `STRATA_ENGINE_API_KEY`), `terminal/serve/test_remote.py` (29 tests), [DETAILS.md](DETAILS.md#a-front-end-without-an-engine---engine-remote) |
 
 ## Syncing with upstream
@@ -68,7 +70,7 @@ After a merge:
    ```
 
    Many tests fail on a Mac on pristine upstream too. Compare with the same run of the upstream tag
-   (`tools/fork/check_guarded.sh v0.2.22`) before reading a failure as the fork's.
+   (`tools/fork/check_guarded.sh v0.2.23`) before reading a failure as the fork's.
    After adding a `STRATA_*` setting to the engine, add it to `terminal/data/settings-register.json` (run
    `python tools/settings_register.py`, keep only the new entries, fill in `status`, `owner`, `note`); after adding a
    folder under `docs/bench-results`, run `python tools/bench_results_index.py` in a clean checkout.
@@ -77,7 +79,7 @@ After a merge:
    `prefix_plan_test`, `moe_sim`).
 3. Run the Qwen3.6 gates on the Mac with the model loaded. The commands are in [QWEN36_METAL.md](QWEN36_METAL.md).
 
-Push the upstream tags the fork merged (`v0.2.2`, `v0.2.3.1`, `v0.2.13.1`, `v0.2.14`, `v0.2.14.1`, `v0.2.15`, `v0.2.16`, `v0.2.17`, `v0.2.18`, `v0.2.19`, `v0.2.20`, `v0.2.21`, `v0.2.22` so far) to the fork, not every upstream tag.
+Push the upstream tags the fork merged (`v0.2.2`, `v0.2.3.1`, `v0.2.13.1`, `v0.2.14`, `v0.2.14.1`, `v0.2.15`, `v0.2.16`, `v0.2.17`, `v0.2.18`, `v0.2.19`, `v0.2.20`, `v0.2.21`, `v0.2.22`, `v0.2.23` so far) to the fork, not every upstream tag.
 
 ### Names the two sides share
 
@@ -120,11 +122,13 @@ Upstream has no release workflow. It builds on build boxes without a key and sig
   addresses, sizes and SHA-256, into the fork's feed. A fork Control trusts both keys: the fork's for the feed, and
   upstream's because each engine package carries upstream's signature. Upstream's Metal engine is left out (it has
   no Qwen3.6 path); the fork's own Metal engine package is open work. There is no DeepSeek member.
-- **One exception: the Inkling 2 Mini engine for Linux CUDA 13** (`strata-inkling`, shape `inkling2`) is the fork's own
-  build when the fork has engine changes upstream lacks: `0.1.65.1` in v0.2.19-mbp.rtx.2, `0.1.66.1` in
-  v0.2.20-mbp.rtx.3, `0.1.67.1` in v0.2.21-mbp.rtx.1 (the CUDA picture reader; upstream 0.2.21 has the exit fix), and `0.1.69.1` from v0.2.22. It is signed with the fork's key, and its entry
-  replaces upstream's carried `strata-inkling` linux-x86_64 cuda13 entry in `RELEASE/shapes` before `build-feed`. Built
-  with `tools/fork/inkling_release.sh` in `nvidia/cuda:13.0.2-devel-ubuntu24.04`. Every other engine is upstream's.
+- **No exception since v0.2.23.** Until v0.2.22-mbp.rtx.1 the Inkling 2 Mini engine for Linux CUDA 13 (`strata-inkling`,
+  shape `inkling2`) was the fork's own build, for engine changes upstream lacked: `0.1.65.1` in v0.2.19-mbp.rtx.2,
+  `0.1.66.1` in v0.2.20-mbp.rtx.3, `0.1.67.1` in v0.2.21-mbp.rtx.1 and `0.1.69.1` in v0.2.22-mbp.rtx.1 (the CUDA picture
+  reader). Upstream 0.2.23 has both the exit fix and a picture reader, so the fork carries upstream's `strata-inkling`
+  like every other engine. If the fork needs its own engine again: build it with `tools/fork/inkling_release.sh` in
+  `nvidia/cuda:13.0.2-devel-ubuntu24.04`, give it a fourth version part, sign it with the fork's key, and put its entry
+  in place of upstream's in `RELEASE/shapes` before `build-feed`.
 - **The feed sequence is upstream's times 1000, plus N** (`tools/fork/fork_release.py sequence`). A PC refuses a feed
   older than the last one it accepted, so a PC that ran upstream needs a higher number. A PC that took a fork feed
   refuses upstream's feed afterwards.
